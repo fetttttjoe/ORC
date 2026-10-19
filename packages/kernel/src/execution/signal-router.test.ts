@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { ApprovedBy, Door, EVENT_KIND, FailureClass, NO_CHAT, REACTION, ReactionFailedPayload, RunOutcome, TASK_STATUS, type EventRecord, type Origin, type SplitResult, type TaskNode, type TaskStatus } from '@orc/contracts'
+import { ApprovedBy, Door, EVENT_KIND, FailureClass, NO_CHAT, REACTION, ReactionFailedPayload, RunOutcome, TASK_STATUS, TaskType, type EventRecord, type Origin, type SplitResult, type TaskNode, type TaskStatus } from '@orc/contracts'
 import { Kernel } from '../kernel'
 import { fold } from '../projections'
 import { openStorage, type EventLog } from '../storage'
@@ -17,7 +17,7 @@ const evt = (over: Partial<EventRecord>): EventRecord =>
   eventFixture({ projectId: TEST_PROJECT_ID, taskId: 'c1', ts: 'T', ...over })
 const childTask = (id: string, parentId: string) => evt({
   taskId: id,
-  payload: { task: { id, parentId, workspaceId: TEST_WORKSPACE_ID, type: 'split', title: id, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 1, createdAt: 'T' } },
+  payload: { task: { id, parentId, workspaceId: TEST_WORKSPACE_ID, type: TaskType.split, title: id, spec: '', status: 'draft', zone: [], budgetUSD: null, depth: 1, createdAt: 'T' } },
 })
 
 describe('composeSplitResult', () => {
@@ -82,7 +82,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
   })
 
   const taskNode = (id: string, parentId: string | null): TaskNode =>
-    ({ id, parentId, workspaceId: TEST_WORKSPACE_ID, type: parentId ? 'split' : 'root', title: id, spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null, depth: parentId ? 1 : 0, createdAt: 'T' })
+    ({ id, parentId, workspaceId: TEST_WORKSPACE_ID, type: parentId ? TaskType.split : TaskType.generic, title: id, spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null, depth: parentId ? 1 : 0, createdAt: 'T' })
 
   // parent + child tasks and the split that binds them (runToken = the parent step's send target)
   const seedSplit = async (): Promise<void> => {

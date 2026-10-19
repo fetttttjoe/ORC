@@ -1,6 +1,6 @@
 /**
  * Ranks and lanes → pixel boxes, including one CONTAINER box per rank (the wave). Pure arithmetic,
- * zero imports (the topo.ts / cluster.ts shape) — no renderer, no framework, no plan vocabulary.
+ * zero imports (the topo.ts shape) — no renderer, no framework, no plan vocabulary.
  *
  * Split from plan-layout on purpose: layout answers "what depends on what" (graph theory, stable
  * forever), geometry answers "how big is a node" (presentation, changes with the design). Mixing

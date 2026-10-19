@@ -1,6 +1,5 @@
-import { EVENT_KIND, NOTE_TIER, PAYLOAD_SCHEMAS, noteLabel, type EventKind, type EventRecord, type KnowledgeWrittenPayload, type Plan } from '@orc/contracts'
+import { EVENT_KIND, PAYLOAD_SCHEMAS, type EventKind, type EventRecord, type KnowledgeWrittenPayload, type Plan } from '@orc/contracts'
 import { z } from 'zod'
-import { noteNodeId } from './graph'
 import type { LogRow as WireLogRow } from './wire'
 
 // the row IS the wire schema the browser parses — two declarations drifted once (`failure`)
@@ -27,7 +26,7 @@ const decisionLine = (p: Pick<KnowledgeWrittenPayload, 'decisionsRecorded' | 'de
 }
 
 // the fields a kind's summary may fill in; everything else on the row comes off the envelope
-type PartialRow = Partial<Pick<LogRow, 'line' | 'noteRef' | 'authorTaskId' | 'exchange'>>
+type PartialRow = Partial<Pick<LogRow, 'line' | 'authorTaskId' | 'exchange'>>
 type Handler = (e: EventRecord) => PartialRow | null
 
 // the schema is an argument: indexing PAYLOAD_SCHEMAS by a type parameter widens payload to every kind (measured)
@@ -77,32 +76,6 @@ const SUMMARIZE = {
   })),
   [EVENT_KIND.tool_result]: entry(PAYLOAD_SCHEMAS.tool_result, p => ({
     line: `${p.toolName} ${p.isError ? 'ERROR ' : ''}${snip(p.output, 110)}`,
-  })),
-  [EVENT_KIND.memory_written]: entry(PAYLOAD_SCHEMAS.memory_written, p => {
-    const nt = p.note
-    return {
-      line: `${nt.id} kind=${noteLabel(nt)} links=${nt.links.length} sources=${nt.tier === NOTE_TIER.semantic ? nt.sources.length : 0}`,
-      noteRef: noteNodeId(nt.scope, nt.id),
-      authorTaskId: p.author.taskId ?? null,
-    }
-  }),
-  [EVENT_KIND.memory_deleted]: entry(PAYLOAD_SCHEMAS.memory_deleted, p => ({
-    line: p.id,
-    noteRef: noteNodeId(p.scope, p.id),
-    authorTaskId: p.author.taskId ?? null,
-  })),
-  [EVENT_KIND.memory_accessed]: entry(PAYLOAD_SCHEMAS.memory_accessed, p => ({
-    line: `${p.id} ${p.mode}`,
-    noteRef: noteNodeId(p.scope, p.id),
-  })),
-  [EVENT_KIND.memory_topic_accessed]: entry(PAYLOAD_SCHEMAS.memory_topic_accessed, p => ({
-    line: `${p.label} (${p.topicKey})`,
-  })),
-  [EVENT_KIND.memory_verified]: entry(PAYLOAD_SCHEMAS.memory_verified, p => ({
-    line: `${p.id} verified @ ${p.stamp.revision.slice(0, 8)} by ${p.stamp.by}`,
-  })),
-  [EVENT_KIND.memory_outcome]: entry(PAYLOAD_SCHEMAS.memory_outcome, p => ({
-    line: `${p.id} → ${p.outcome}`,
   })),
   [EVENT_KIND.knowledge_delivered]: entry(PAYLOAD_SCHEMAS.knowledge_delivered, p => ({
     line: `${p.mode} ${p.ids.length} claim(s) · ${snip(p.subject, 80)}`,
@@ -176,6 +149,9 @@ const SUMMARIZE = {
   [EVENT_KIND.workspace_merged]: entry(PAYLOAD_SCHEMAS.workspace_merged, p => ({
     line: `${p.workspaceId} merged ${p.mergeCommit.slice(0, 8)} → ${p.trunk}`,
   })),
+  [EVENT_KIND.project_identified]: entry(PAYLOAD_SCHEMAS.project_identified, p => ({
+    line: `project '${p.name}' at ${p.dir}`,
+  })),
   [EVENT_KIND.chat_opened]: entry(PAYLOAD_SCHEMAS.chat_opened, p => ({
     line: `${p.kind} "${p.title}"${p.taskId ? ` on ${p.taskId}` : ''}`,
   })),
@@ -197,7 +173,6 @@ export function summarizeEvent(e: EventRecord): LogRow {
     seq: e.seq, ts: e.ts, kind: e.kind, taskId: e.taskId, stepId: e.stepId, chatId: e.chatId, door: e.door,
     line: r?.line ?? snip(e.payload, 90),
     authorTaskId: r?.authorTaskId ?? null,
-    noteRef: r?.noteRef ?? null,
     ...(r?.exchange ? { exchange: r.exchange } : {}),
   }
 }

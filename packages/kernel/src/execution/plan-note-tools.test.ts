@@ -1,13 +1,12 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { Door, EVENT_KIND, NO_CHAT, PlanNote, PlanNoteToolName, STEP_ID, STEP_ROLE } from '@orc/contracts'
+import { Door, EVENT_KIND, NO_CHAT, PlanNote, PlanNoteToolName, STEP_ID, STEP_ROLE, TaskType } from '@orc/contracts'
 import { must, planNoteFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '../test-helpers'
 import { planNoteTools } from './plan-note-tools'
 import { runOrigin } from './run-chat'
-import { GROUNDED_TASK_TYPE } from './strategies/grounded-plan'
 
 const SEED = NO_CHAT(Door.cli)
 const NoteOutput = z.object({ note: PlanNote })
@@ -23,7 +22,7 @@ async function planStep() {
   cleanup.push(() => db.drop(), () => storage.close())
   await seedTestWorkspace(storage.events, SEED)
   const kernel = new Kernel(storage.events)
-  const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: GROUNDED_TASK_TYPE }, SEED)
+  const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: TaskType.grounded }, SEED)
   const p = { taskId: t.id, stepId: STEP_ID.plan, runToken: `step:${t.id}:plan:a1`, role: STEP_ROLE.auditor, origin: runOrigin(`run:${t.id}:v1`) }
   const tool = (name: PlanNoteToolName) => must(planNoteTools({ kernel, p }).find(x => x.name === name), name)
   const written = async (): Promise<number> => (await storage.events.byTask(t.id)).filter(e => e.kind === EVENT_KIND.plan_note_written).length

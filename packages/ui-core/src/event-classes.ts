@@ -28,27 +28,9 @@ export const STATE_CHANGE: ReadonlySet<string> = new Set<string>([
   EVENT_KIND.analysis_completed,
   EVENT_KIND.feedback_requested,
   EVENT_KIND.feedback_provided,
-  EVENT_KIND.memory_written,
-  EVENT_KIND.memory_deleted,
-  EVENT_KIND.memory_verified,
   EVENT_KIND.models_discovered,
-  // both move a rendered pane: an artifact appears in the task view, a pull bumps its counter
+  // an artifact appears in the task view
   EVENT_KIND.artifact_produced,
-  EVENT_KIND.memory_accessed,
-])
-
-/**
- * Kinds that move the memory CORPUS, and with it every corpus-level reading derived from it — the
- * drift ratio, the pending backlog, the note counts.
- *
- * memory_accessed is deliberately ABSENT. A read moves `hits`, never currency, and preloads arrive
- * at agent-loop cadence — treating each as a corpus change would put a whole-corpus git probe on
- * exactly the cadence STATE_CHANGE exists to keep reads off.
- */
-export const CORPUS_CHANGE: ReadonlySet<string> = new Set<string>([
-  EVENT_KIND.memory_written,
-  EVENT_KIND.memory_verified,
-  EVENT_KIND.memory_deleted,
 ])
 
 /**

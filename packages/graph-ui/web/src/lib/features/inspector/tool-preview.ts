@@ -8,7 +8,7 @@
 /**
  * The fields that identify a call, most-specific first. Tool inputs are open shapes (each tool
  * defines its own), so this is a preference order over what the shipped tools actually send —
- * `path` for fs_*, `command` for exec, `query`/`id`/`seed` for the memory tools — not a schema.
+ * `path` for fs_*, `command` for exec, `query`/`id`/`seed` for the knowledge tools — not a schema.
  */
 const IDENTIFYING_KEYS = ['path', 'command', 'query', 'id', 'seed', 'taskId', 'title'] as const
 

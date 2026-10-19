@@ -15,7 +15,7 @@ import type { KnowledgeClaim, PreloadedClaim } from './knowledge'
 // beats through boot since 601bca7), a stale row = it died without cleanup, no row = nothing will
 // run until `orc serve`. Lives in contracts because the CLI derives it and both UI doors render it.
 // [derived: 2026-08-01 live session — every incident began as "is anything actually driving?"]
-export { SUPERVISOR_HEALTH, type SupervisorHealth, type SupervisorHealthState } from './health'
+export { KnowledgeHealth, KnowledgeHealthState, SUPERVISOR_HEALTH, type SupervisorHealth, type SupervisorHealthState } from './health'
 
 export const Usage = z.object({
   inputTokens: z.number().int().nonnegative(),
@@ -234,16 +234,6 @@ export function modelIdsFrom(body: unknown, listKey: string, idKey: string): str
     const id = z.string().safeParse(entry.success ? entry.data[idKey] : undefined)
     return id.success ? [id.data] : []
   })
-}
-
-// The embedding seam — a plugin-provided text→vector encoder, mirroring ModelProvider so any
-// backend (a local Ollama model today, a hosted encoder tomorrow) plugs in behind ONE interface.
-// Optional across the system: when no embedder is configured, memory retrieval degrades to
-// keyword-only (the whole memory subsystem is already degraded-tolerant).
-export interface EmbeddingProvider {
-  // one cosine-ready vector per input, in order and of equal length to `texts`. May reject on a
-  // backend failure; callers catch and fall back to keyword rather than failing the operation.
-  embed(texts: string[]): Promise<number[][]>
 }
 
 // the ONE parse of 'provider/model' refs — resolveModel and plan validation must agree

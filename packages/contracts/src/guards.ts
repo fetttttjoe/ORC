@@ -41,5 +41,5 @@ export const nonEmptyLines = (text: string): string[] =>
 
 // mermaid labels: double quotes end the label, a newline ends the STATEMENT — an agent-authored
 // title carrying one escapes the graph and renders as live markdown in human-facing views.
-// The ONE escaper for every mermaid-producing view (vault, ui-core diagrams, memory index).
+// The ONE escaper for every mermaid-producing view (vault, ui-core diagrams).
 export const mermaidLabel = (s: string): string => s.replaceAll('"', "'").replaceAll(/[\r\n]+/g, ' ')

@@ -7,11 +7,10 @@ A workspace is one checkout per request — a plain git checkout, or an orc-crea
 .orc/worktrees. Every task belongs to exactly one.
 
 1. `workspace_list` first — read-only, ordered attention-first (the order below). Each row
-   carries its state, when it last saw activity, its task counts, and how many notes it holds
-   that are still pending a merge.
+   carries its state, when it last saw activity, and its task counts.
 2. What each state means and asks for, attention-first:
-   - dangling — not merged, and either the checkout is gone or nothing is open in it while notes
-     written there still wait on a merge. A human's call in the terminal: merge it or archive it.
+   - dangling — not merged, and the checkout is gone. A human's call in the terminal: merge it or
+     archive it.
    - waiting — a task here is awaiting approval, or has an open question. Approve or reply.
    - active — a task here is running. Nothing to do.
    - idle — quiet: nothing running, nothing waiting, not merged, not dangling. Resume it or
@@ -25,9 +24,10 @@ A workspace is one checkout per request — a plain git checkout, or an orc-crea
    from a title; base optional — defaults to this checkout's HEAD).
    The session must then work in the returned directory — file operations run elsewhere land in
    the wrong checkout and are not part of this request.
-5. Knowledge written from a workspace — decisions included — is provisional until the workspace
-   merges: a note or decision read back from an unmerged checkout may still be rewritten or
-   reverted before it lands. Read it as a working draft, not settled project knowledge.
+5. Knowledge written in a workspace — decisions included — lives in that branch's files until the
+   workspace merges: a claim or decision read back from an unmerged checkout may still be
+   rewritten or reverted before it lands. Read it as a working draft, not settled project
+   knowledge.
 6. Merging and archiving are terminal commands the human runs (orc ws merge, orc ws archive) —
    there is no MCP tool for either. Tell the user to run them rather than implying this session
    can do it.

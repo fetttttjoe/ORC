@@ -20,13 +20,9 @@ export const TYPE_COLORS: Record<NodeType, string> = {
   // amber-adjacent, deliberately softer than --color-human (#e8a33d) so an artifact never
   // reads as a gate awaiting the operator
   artifact: '#d9a66a',
-  // violet — outside the two-temperature axis entirely; notes carry no lifecycle
-  note: '#9e8cfb',
-  // WORKER hue, outside the two-temperature axis on the same reasoning notes are: a model carries
-  // no lifecycle either — it is the actor that does the work, not a state something is in. It was
-  // --color-mist (#8b93a1), the same grey as ordinary chrome, so the thing actually running the
-  // step read as background. Dusty orchid: clearly apart from note violet (#9e8cfb, blue-violet)
-  // and from artifact amber (#d9a66a), and muted enough for the ink background.
+  // WORKER hue, outside the two-temperature axis: a model carries no lifecycle — it is the actor
+  // that does the work, not a state something is in. Dusty orchid, clearly apart from artifact
+  // amber (#d9a66a), and muted enough for the ink background.
   model: '#bd82a8',
 }
 
@@ -39,8 +35,8 @@ export const STATUS_COLORS: Record<string, string> = {
   cancelled: '#5c6472', // --color-fog
 }
 
-// only task/step carry a lifecycle in `detail`; a note's detail is its kind, an artifact's its
-// size — recoloring those on a coincidental string was the bug the legacy test pinned against
+// only task/step carry a lifecycle in `detail`; an artifact's detail is its size, a model's its
+// provider — recoloring those on a coincidental string was the bug the legacy test pinned against
 export const colorFor = (type: NodeType, detail: string): string =>
   ((type === 'task' || type === 'step') ? STATUS_COLORS[detail] : undefined) ?? TYPE_COLORS[type]
 
@@ -51,9 +47,6 @@ export const isActive = (type: NodeType, detail: string): boolean =>
 export const EDGE_COLOR = '#2e3742' // --color-rule
 export const LABEL_COLOR = '#e6e1d6' // --color-paper
 
-// brightness from heat: lerp the dim base edge toward paper — a walked connection reads as lit,
-// an untouched one stays in the chrome background. heat 0 renders the same color as EDGE_COLOR
-// (as an rgb() triplet, which canvas treats identically to the hex literal).
 // A `uses` edge — the one that says WHICH worker ran a step — is drawn in the worker's own hue
 // instead of the shared chrome, so the relationship is legible without clicking a node. Dimmed well
 // below the node itself: an edge is still chrome, and a graph where every connection shouts is one
@@ -69,16 +62,7 @@ export const EDGE_BASE: Partial<Record<EdgeType, string>> = { uses: '#5c3f55' }
 // exactly the thing that is not guaranteed.
 const EDGE_BASE_BY_NAME = new Map<string, string>(Object.entries(EDGE_BASE))
 
-export const edgeColorFor = (heat: number, type?: string): string => {
-  const h = Math.min(Math.max(heat, 0), 1)
-  const e = parseInt(((type !== undefined ? EDGE_BASE_BY_NAME.get(type) : undefined) ?? EDGE_COLOR).slice(1), 16)
-  const p = parseInt(LABEL_COLOR.slice(1), 16)
-  const mix = (shift: number): number => {
-    const c = (e >> shift) & 0xff
-    return Math.round(c + (((p >> shift) & 0xff) - c) * h)
-  }
-  return `rgb(${mix(16)}, ${mix(8)}, ${mix(0)})`
-}
+export const edgeColorFor = (type: string): string => EDGE_BASE_BY_NAME.get(type) ?? EDGE_COLOR
 
 /** the newest event's nodes flash in the human colour — attention, not status */
 export const FLASH_COLOR = '#e8a33d' // --color-human

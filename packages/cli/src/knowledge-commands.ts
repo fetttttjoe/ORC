@@ -3,9 +3,9 @@ import {
   AUTHOR_SOURCE, CheckVerdict, ClaimClass, ClaimState, Door, errorMessage, KNOWLEDGE_DEFAULTS, KNOWLEDGE_REFUSAL, KnowledgePatch, NO_CHAT,
   type ClaimDrift, type KnowledgeAccess, type KnowledgeClaim, type KnowledgeProblem, type MemoryAuthor,
 } from '@orc/contracts'
-import { ALL_EVIDENCE_KINDS, BASIS_EVIDENCE_KINDS, type Evidence } from '@orc/knowledge-core'
+import { ALL_EVIDENCE_KINDS, BASIS_EVIDENCE_KINDS, driftCounts, type Evidence } from '@orc/knowledge-core'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
-import { cwdAuthor, type WorkspaceFold } from './cwd-workspace'
+import { knowledgeAuthor, type WorkspaceFold } from './cwd-workspace'
 import { enumArg } from './enum-arg'
 import { parsePositiveInteger } from './int-arg'
 import { CommandFailure, NO_PROJECT_ERROR } from './exit'
@@ -102,12 +102,6 @@ export const driftRows = (drifts: readonly ClaimDrift[]): DriftRow[] =>
     anchors: d.anchors.filter(a => a.state !== ClaimState.clean).map(a => ({ path: a.path, symbol: a.symbol, state: a.state })),
   }))
 
-export const driftCounts = (drifts: readonly ClaimDrift[]): Record<ClaimState, number> => {
-  const counts: Record<ClaimState, number> = { [ClaimState.clean]: 0, [ClaimState.suspect]: 0, [ClaimState.unknown]: 0, [ClaimState.unanchored]: 0 }
-  for (const d of drifts) counts[d.state]++
-  return counts
-}
-
 export async function runDrift(access: KnowledgeAccess, author: MemoryAuthor, paths: string[], json: boolean, withoutLog: string | null = null): Promise<string[]> {
   const drifts = await requirePort(access).drift({ author, idempotencyKey: null }, paths.length === 0 ? {} : { paths })
   const rows = driftRows(drifts)
@@ -148,9 +142,6 @@ export async function runVerify(access: KnowledgeAccess, author: MemoryAuthor, i
     failed: false,
   }
 }
-
-export const knowledgeAuthor = (fold: WorkspaceFold, dir: string): Promise<MemoryAuthor> =>
-  cwdAuthor(fold, dir, AUTHOR_SOURCE.cli, NO_CHAT(Door.cli))
 
 export interface KnowledgeProject { config: Pick<ProjectConfig, 'knowledge' | 'dir'>; log?: Pick<EventLog, 'append' | 'after' | 'earliestSeq'>; logUnreachable?: { reason: string; error: unknown } }
 

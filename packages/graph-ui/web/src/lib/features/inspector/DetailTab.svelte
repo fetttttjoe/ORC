@@ -6,7 +6,6 @@
   import { Separator } from '$lib/components/ui/separator'
   import { Skeleton } from '$lib/components/ui/skeleton'
   import Payload from '$lib/components/Payload.svelte'
-  import NoteView from './NoteView.svelte'
   import KeyValue from '$lib/components/KeyValue.svelte'
   import NodeLink from '$lib/components/NodeLink.svelte'
   import StatusPill from '$lib/components/StatusPill.svelte'
@@ -69,7 +68,6 @@
           </span>
         </KeyValue>
       {/if}
-      {#if t.memoryPulls !== undefined}<KeyValue label="memory pulls" mono>{t.memoryPulls}</KeyValue>{/if}
 
       {#if t.task.spec}
         <Separator class="my-2" />
@@ -128,8 +126,6 @@
         </details>
       {/if}
     </dl>
-  {:else if d.type === NODE_KIND.note}
-    <NoteView note={d} />
   {:else if d.type === NODE_KIND.artifact}
     {@const a = d}
     {@const owner = taskIdOf(nodeId)}

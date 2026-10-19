@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, FailureClass, TASK_STATUS, planScope, type EventRecord, type PlanNote, type TaskStatus } from '@orc/contracts'
-import { authorFixture, eventFixture, must, planFixture, planNoteFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
-import { artifactNodeId, modelNodeId, noteNodeId, stepNodeId } from '../graph'
+import { EVENT_KIND, FailureClass, TASK_STATUS, type EventRecord, type PlanNote, type TaskStatus } from '@orc/contracts'
+import { eventFixture, must, planFixture, planNoteFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
+import { artifactNodeId, modelNodeId, stepNodeId } from '../graph'
 import { modelOf } from '../test-helpers'
 import { models } from './models'
 import { node } from './node'
@@ -14,9 +14,6 @@ import { NODE_KIND } from '../wire'
 const ev = (seq: number, kind: EventRecord['kind'], taskId: string | null, payload: Record<string, unknown> = {}): EventRecord =>
   eventFixture({ seq, kind, taskId, payload })
 
-const author = authorFixture()
-const wrote = (seq: number, scope: string, id: string, note: Record<string, unknown> = {}) =>
-  ev(seq, EVENT_KIND.memory_written, null, { note: { id, title: id, scope, ...note }, author })
 // a run's envelope: the fold keys a step's run state off runToken/stepId, not off the payload
 const ran = (seq: number, kind: EventRecord['kind'], stepId: string, payload: Record<string, unknown>): EventRecord =>
   eventFixture({ seq, kind, taskId: 'C', stepId, runToken: 'r1', payload })
@@ -55,18 +52,6 @@ describe('what one event makes stale', () => {
     expect(transcript.touches(e, m)).toEqual([])
   })
 
-  it('a memory write touches the note node', () => {
-    expect(node.touches(wrote(13, 'project', 'n'), m)).toEqual([{ id: noteNodeId('project', 'n') }])
-  })
-
-  // A write's OWN node is not the only one it stales: a note that links to another note changes
-  // what the TARGET's own `backlinks` field renders (node.ts's note branch), and nothing about the
-  // target's envelope or payload says so — the write names the target only inside `note.links`.
-  it('a write that links to another note touches the target too, for its backlinks', () => {
-    const linked = ev(13, EVENT_KIND.memory_written, null, { note: { id: 'b', title: 'b', scope: 'project', links: [{ id: 'a' }] }, author })
-    expect(node.touches(linked, m)).toEqual([{ id: noteNodeId('project', 'b') }, { id: noteNodeId('project', 'a') }])
-  })
-
   // agent_call is deliberately off STATE_CHANGE (task-touch.ts), so taskAndParent never fires for
   // it — but it is the only event that moves usage/stepUsage/iterations, which the task node, its
   // running step and the model it ran under all return. Leaving it untouched freezes a live run's
@@ -80,23 +65,6 @@ describe('what one event makes stale', () => {
     ])
     const call = eventFixture({ seq: 4, kind: EVENT_KIND.agent_call, taskId: 'C', stepId: 's1', payload: { stepId: 's1', iteration: 1 } })
     expect(node.touches(call, withPlan)).toEqual([{ id: 'C' }, { id: stepNodeId('C', 's1') }, { id: modelNodeId(ref) }])
-  })
-
-  // Every memory kind that names a note changes what the node view ANSWERS for it: a write or a
-  // delete changes the note and its backlinks, a verification changes its stamp, and a read moves
-  // the `hits` count the view returns. A kind left out here is a pane that never refreshes.
-  it('a delete, a verification and a read touch it too', () => {
-    const stamp = { revision: 'abc', at: '2026-09-18T00:00:00.000Z', by: 'cli' }
-    expect(node.touches(ev(14, EVENT_KIND.memory_deleted, null, { id: 'n', scope: 'project', author }), m))
-      .toEqual([{ id: noteNodeId('project', 'n') }])
-    expect(node.touches(ev(15, EVENT_KIND.memory_verified, null, { id: 'n', scope: 'project', stamp, author }), m))
-      .toEqual([{ id: noteNodeId('project', 'n') }])
-    expect(node.touches(ev(16, EVENT_KIND.memory_accessed, null, { id: 'n', scope: 'project', mode: 'read', author }), m))
-      .toEqual([{ id: noteNodeId('project', 'n') }])
-  })
-
-  it('a memory payload that does not parse touches nothing, rather than a node id built from undefined', () => {
-    expect(node.touches(ev(17, EVENT_KIND.memory_written, null, { note: { title: 'no id' } }), m)).toEqual([])
   })
 
   it('models are touched only by a discovery', () => {
@@ -125,45 +93,27 @@ describe('node view', () => {
         payload: { stepId: 's1', iteration: 1 },
         usage: { inputTokens: 1, outputTokens: 1, costUSD: null, estimated: false },
       }),
-      wrote(6, 'project', 'n'),
     ])
     const kindOf = (id: string) => node.read(whole, { id })?.type ?? null
     expect(kindOf('C')).toBe(NODE_KIND.task)
     expect(kindOf(stepNodeId('C', 's1'))).toBe(NODE_KIND.step)
     expect(kindOf(artifactNodeId('C', 'out.txt'))).toBe(NODE_KIND.artifact)
-    expect(kindOf(noteNodeId('project', 'n'))).toBe(NODE_KIND.note)
     expect(kindOf(modelNodeId(ref))).toBe(NODE_KIND.model)
   })
 
-  it('reads a task with its steps, artifacts and memory pulls', () => {
+  it('reads a task with its steps and artifacts', () => {
     const withRun = modelOf([
       ev(1, EVENT_KIND.task_created, 'C', { task: taskFixture({ id: 'C', title: 'child' }) }),
       ev(2, EVENT_KIND.plan_proposed, 'C', { plan: planFixture({ taskId: 'C' }) }),
       ev(3, EVENT_KIND.plan_approved, 'C', { taskId: 'C', version: 1 }),
       ran(4, EVENT_KIND.step_started, 's1', { stepId: 's1', attempt: 1 }),
       ran(5, EVENT_KIND.artifact_produced, 's1', { path: 'out.txt', sha256: 'a'.repeat(64), size: 3 }),
-      ev(6, EVENT_KIND.memory_accessed, 'C', { id: 'n', scope: 'project', mode: 'read', author }),
     ])
     expect(node.read(withRun, { id: 'C' })).toMatchObject({
       type: NODE_KIND.task,
       task: { id: 'C', title: 'child' },
       steps: [{ stepId: 's1', status: 'running' }],
       artifacts: [{ path: 'out.txt' }],
-      memoryPulls: 1,
-    })
-  })
-
-  it('reads a note with its access count and the notes that link to it', () => {
-    const withNotes = modelOf([
-      wrote(1, 'project', 'target'),
-      ev(2, EVENT_KIND.memory_written, null, { note: { id: 'pointer', title: 'pointer', links: [{ id: 'target' }] }, author }),
-      ev(3, EVENT_KIND.memory_accessed, null, { id: 'target', scope: 'project', mode: 'read', author }),
-    ])
-    expect(node.read(withNotes, { id: noteNodeId('project', 'target') })).toMatchObject({
-      type: NODE_KIND.note,
-      note: { id: 'target' },
-      hits: 1,
-      backlinks: [{ id: 'pointer' }],
     })
   })
 
@@ -235,10 +185,6 @@ describe('plan notes view', () => {
 
   it('a plan note written on a child touches the child and its parent', () => {
     expect(planNotes.touches(planned(3, 'C', planNoteFixture({ id: 'sub-a' })), m)).toEqual([{ taskId: 'C' }, { taskId: 'P' }])
-  })
-
-  it('a memory write touches nothing, even in the scope plan notes once lived in', () => {
-    expect(planNotes.touches(wrote(4, planScope('C'), 'sub-a'), m)).toEqual([])
   })
 })
 

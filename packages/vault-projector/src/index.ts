@@ -3,7 +3,6 @@ import { fold, type EventLog } from '@orc/kernel'
 import { renderRootIndex, renderTaskFiles } from './render'
 import { writeVaultFiles } from './write'
 
-export { frontmatter } from './frontmatter'
 export { parsePlanFile } from './plan-md'
 
 export interface VaultProjector {
@@ -44,7 +43,7 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
       // subscribe BEFORE the initial render: an event landing between renderAll's reads and a
       // later subscribe would fall below the subscription's start cursor and never arrive
       unsub = await log.subscribe({}, e => {
-        if (!e.taskId) return // ponytail: memory events are project-scoped, not task-scoped
+        if (!e.taskId) return // project-scoped events (knowledge, identity) belong to no task
         const taskId = e.taskId
         const prev = timers.get(taskId)
         if (prev) clearTimeout(prev)

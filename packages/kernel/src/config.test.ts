@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { ApprovalMode, AutoHealMode, GroundedApprovalDoor } from '@orc/contracts'
-import { deriveSystemUrl, IDENTITY_FILE, initializeProject, loadConfig, projectDatabaseName, requireProject, SETTINGS_FILE, type OrcConfig } from './config'
+import { deriveSystemUrl, IDENTITY_FILE, initializeProject, loadConfig, requireProject, SETTINGS_FILE } from './config'
 import { sh, tmpGitRepo } from './test-helpers'
 
 describe('loadConfig', () => {
@@ -121,25 +121,6 @@ describe('loadConfig', () => {
     expect(c.vaultDir).toBe(path.join(d, 'kb'))
     expect(c.skillsDir).toBe(path.join(d, 'kb', 'skills'))
   })
-  const projectDbCases: Array<{ key: keyof OrcConfig; dflt: string; env: string; override: string }> = [
-    // memoryEmbedModel defaults to the LARGE local encoder: SEMANTIC_FLOOR (0.495) was tuned on
-    // mxbai vectors, and under all-minilm a known-good probe measured best cosine 0.4015 — the
-    // semantic arm silently returned nothing on the out-of-the-box config.
-    { key: 'memoryEmbedModel', dflt: 'ollama/mxbai-embed-large', env: 'ORC_MEMORY_EMBED_MODEL', override: 'ollama/nomic-embed-text' },
-    { key: 'projectDbUrl', dflt: 'ws://127.0.0.1:8000/rpc', env: 'ORC_PROJECT_DB_URL', override: 'ws://db:8000/rpc' },
-    { key: 'projectDbName', dflt: 'memory', env: 'ORC_PROJECT_DB_NAME', override: 't_isolated' },
-    { key: 'projectDbNamespace', dflt: 'orc', env: 'ORC_PROJECT_DB_NAMESPACE', override: 't_ns' },
-    { key: 'projectDbUser', dflt: 'root', env: 'ORC_PROJECT_DB_USER', override: 'admin' },
-    { key: 'projectDbPassword', dflt: 'orc', env: 'ORC_PROJECT_DB_PASSWORD', override: 'secret' },
-  ]
-  for (const { key, dflt, env, override } of projectDbCases) {
-    it(`defaults ${key} and honors the ${env} override`, () => {
-      expect(loadConfig('/tmp/x')[key]).toBe(dflt)
-      withEnv({ [env]: override }, () => {
-        expect(loadConfig('/tmp/x')[key]).toBe(override)
-      })
-    })
-  }
   it('autoHealIterations defaults lean (15) and honors ORC_AUTO_HEAL_ITERATIONS', () => {
     // deliberately far below maxIterations: the sweep is the one recurring auto-drafted spend,
     // and a sweep that genuinely needs more signals 'partial' and continues under runtime grants
@@ -372,11 +353,6 @@ describe('project-derived infrastructure boundaries', () => {
   const p1 = '00000000-0000-4000-8000-000000000001'
   const p2 = '00000000-0000-4000-8000-000000000002'
 
-  it('different projects get different Surreal database names', () => {
-    expect(projectDatabaseName('memory', p1)).not.toBe(projectDatabaseName('memory', p2))
-    expect(projectDatabaseName('memory', p1)).toBe(`memory_${p1.replaceAll('-', '')}`)
-  })
-
   it('different projects get different DBOS system database urls', () => {
     const url = 'postgresql://postgres:orc@localhost:5433/orc'
     expect(deriveSystemUrl(url, p1)).not.toBe(deriveSystemUrl(url, p2))
@@ -387,7 +363,6 @@ describe('project-derived infrastructure boundaries', () => {
     const url = `postgresql://postgres:orc@localhost:5433/${'x'.repeat(60)}`
     const dbName = new URL(deriveSystemUrl(url, p1)).pathname.slice(1)
     expect(dbName.length).toBeLessThanOrEqual(63)
-    expect(projectDatabaseName('y'.repeat(60), p1).length).toBeLessThanOrEqual(63)
   })
 
   it('requireProject derives systemDatabaseUrl from databaseUrl and projectId', () => {

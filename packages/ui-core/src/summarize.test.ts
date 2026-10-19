@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, CheckVerdict, Confidence, DeliveryMode, EVENT_KIND } from '@orc/contracts'
+import { AUTHOR_SOURCE, CheckVerdict, Confidence, DeliveryMode, EVENT_KIND, TaskType } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, authorFixture, eventFixture, planFixture, planNoteFixture, stepFixture, taskFixture } from '@orc/contracts/fixtures'
 import { summarizeEvent } from './summarize'
 
@@ -12,28 +12,6 @@ describe('summarizeEvent', () => {
     expect(row.line).toContain('iter 3')
     expect(row.line).toContain('fs_write,signal')
     expect(row.seq).toBe(9)
-    expect(row.noteRef).toBeNull()
-  })
-
-  it('memory events resolve a noteRef for direct navigation', () => {
-    const row = summarizeEvent(eventFixture({
-      kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'auth-map', title: 'Auth map', scope: 'project', kind: 'fact', links: [{ id: 'other-note' }], sources: [] }, author: authorFixture() },
-    }))
-    expect(row.line).toContain('auth-map')
-    expect(row.noteRef).toBe('note:project\u0000auth-map')
-  })
-
-  it('a payload that fails its contract schema degrades to the generic snip — no noteRef', () => {
-    // the note lacks a title and the payload lacks its author: the store refuses such an append
-    // today, so this shape only exists as pre-schema history — it must render as a snip, not as
-    // "undefined"-laced fields with a noteRef pointing at a note the fold also refused
-    const row = summarizeEvent(eventFixture({
-      kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'half-a-note' } },
-    }))
-    expect(row.noteRef).toBeNull()
-    expect(row.line).toContain('half-a-note')
   })
 
   it('any kind whose payload fails its schema falls back to the exact generic snip of the raw payload', () => {
@@ -52,22 +30,6 @@ describe('summarizeEvent', () => {
     expect(row.line).toContain('run it')
     expect(row.line).toContain('(1 tools)')
     expect(row.exchange?.assistant).toBe('which task?')
-  })
-
-  it('memory_written surfaces payload.author.taskId as authorTaskId (the writing task)', () => {
-    const row = summarizeEvent(eventFixture({
-      kind: EVENT_KIND.memory_written, taskId: null,
-      payload: { note: { id: 'auth-map', title: 'Auth map', scope: 'project', kind: 'fact', links: [], sources: [] }, author: authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'task-A' }) },
-    }))
-    expect(row.authorTaskId).toBe('task-A')
-  })
-
-  it('memory_deleted surfaces payload.author.taskId as authorTaskId', () => {
-    const row = summarizeEvent(eventFixture({
-      kind: EVENT_KIND.memory_deleted, taskId: null,
-      payload: { id: 'gone', scope: 'project', author: authorFixture({ source: AUTHOR_SOURCE.agent, taskId: 'task-B' }) },
-    }))
-    expect(row.authorTaskId).toBe('task-B')
   })
 
   it('knowledge_delivered and knowledge_written surface payload.author.taskId as authorTaskId', () => {
@@ -104,20 +66,20 @@ describe('summarizeEvent', () => {
     }))
     const superseding = summarizeEvent(eventFixture({
       kind: EVENT_KIND.knowledge_written, taskId: null,
-      payload: { ...base, decisionsRecorded: [{ id: 'use-files', location: 'docs/decisions/2026-09-29-use-files.md' }], decisionsSuperseded: [{ id: 'use-surreal', location: 'docs/decisions/2026-01-01-use-surreal.md' }] },
+      payload: { ...base, decisionsRecorded: [{ id: 'use-files', location: 'docs/decisions/2026-09-29-use-files.md' }], decisionsSuperseded: [{ id: 'use-sqlite', location: 'docs/decisions/2026-01-01-use-sqlite.md' }] },
     }))
-    expect([recorded.line, superseding.line]).toEqual(['decision use-files', 'decision use-files supersedes use-surreal'])
+    expect([recorded.line, superseding.line]).toEqual(['decision use-files', 'decision use-files supersedes use-sqlite'])
   })
 
-  it('an ownerless (cli/human) memory row has authorTaskId null', () => {
+  it('an ownerless (cli/human) knowledge row has authorTaskId null', () => {
     const row = summarizeEvent(eventFixture({
-      kind: EVENT_KIND.memory_written, taskId: null,
-      payload: { note: { id: 'global', title: 'Global', scope: 'project', kind: 'fact', links: [], sources: [] }, author: authorFixture() },
+      kind: EVENT_KIND.knowledge_written, taskId: null,
+      payload: { added: [], changed: [], retired: [], files: [], why: null, decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author: authorFixture() },
     }))
     expect(row.authorTaskId).toBeNull()
   })
 
-  it('a non-memory (step) row has authorTaskId null — it is attributed by the envelope taskId', () => {
+  it('a non-authored (step) row has authorTaskId null — it is attributed by the envelope taskId', () => {
     const row = summarizeEvent(eventFixture({ kind: EVENT_KIND.step_started, taskId: 'task-A', stepId: 's1', payload: { stepId: 's1', attempt: 1 } }))
     expect(row.authorTaskId).toBeNull()
     expect(row.taskId).toBe('task-A')
@@ -128,9 +90,9 @@ describe('summarizeEvent', () => {
   it('task_created names the task, its type and status', () => {
     const row = summarizeEvent(eventFixture({
       kind: EVENT_KIND.task_created,
-      payload: { task: taskFixture({ title: 'Add ledger summaries', type: 'feature' }) },
+      payload: { task: taskFixture({ title: 'Add ledger summaries', type: TaskType.grounded }) },
     }))
-    expect(row.line).toBe('Add ledger summaries (feature) status=draft')
+    expect(row.line).toBe('Add ledger summaries (grounded) status=draft')
   })
 
   it('plan_note_written names the note by id and title', () => {
@@ -215,30 +177,6 @@ describe('summarizeEvent', () => {
     expect(row.line).toBe('t1.s1.c1 → done: fixed the bug')
   })
 
-  it('memory_topic_accessed names the topic label and key', () => {
-    const row = summarizeEvent(eventFixture({
-      kind: EVENT_KIND.memory_topic_accessed,
-      payload: { topicKey: 'a1b2c3d4e5f6', label: 'Auth patterns', author: authorFixture() },
-    }))
-    expect(row.line).toBe('Auth patterns (a1b2c3d4e5f6)')
-  })
-
-  it('memory_verified names the note, the verified revision and who verified it', () => {
-    const row = summarizeEvent(eventFixture({
-      kind: EVENT_KIND.memory_verified,
-      payload: { id: 'auth-map', scope: 'project', stamp: { revision: 'abc123def456', at: '2026-07-18T00:00:00.000Z', by: 'auditor' }, author: authorFixture() },
-    }))
-    expect(row.line).toBe('auth-map verified @ abc123de by auditor')
-  })
-
-  it('memory_outcome names the note and the reported outcome', () => {
-    const row = summarizeEvent(eventFixture({
-      kind: EVENT_KIND.memory_outcome,
-      payload: { id: 'auth-map', scope: 'project', outcome: 'useful', author: authorFixture() },
-    }))
-    expect(row.line).toBe('auth-map → useful')
-  })
-
   it('plan_annotated names the target note, plan version and annotation text', () => {
     const row = summarizeEvent(eventFixture({
       kind: EVENT_KIND.plan_annotated,
@@ -307,6 +245,14 @@ describe('summarizeEvent', () => {
       payload: { workspaceId: 'ws-1', title: 'renamed workspace' },
     }))
     expect(row.line).toBe('ws-1 → "renamed workspace"')
+  })
+
+  it('project_identified names the project and its directory', () => {
+    const row = summarizeEvent(eventFixture({
+      kind: EVENT_KIND.project_identified,
+      payload: { name: 'orc', dir: '/work/orc' },
+    }))
+    expect(row.line).toBe("project 'orc' at /work/orc")
   })
 
   it('workspace_archived says archived or restored', () => {

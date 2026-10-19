@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { ChatKind, Door, EVENT_KIND, ScopeType, TASK_STATUS, type EventRecord } from '@orc/contracts'
+import { ChatKind, CheckVerdict, Door, EVENT_KIND, ScopeType, TASK_STATUS, type EventRecord } from '@orc/contracts'
 import { authorFixture, eventFixture, taskFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { modelOf } from '../test-helpers'
 import { chats } from './chats'
@@ -61,7 +61,6 @@ describe('chats view read', () => {
 // found in review. Every kind the fold reads gets a row here.
 describe('chats view touches', () => {
   const m = modelOf(tree)
-  const note = { note: { id: 'n', title: 'n', scope: 'project' }, author }
   const KINDS: Array<[EventRecord['kind'], Record<string, unknown>]> = [
     [EVENT_KIND.chat_opened, { chatId: 'c1', kind: ChatKind.copilot, workspaceId: null, taskId: null, title: 'c1', parent: null, externalRef: null }],
     [EVENT_KIND.task_created, { task: taskFixture({ id: 'C' }) }],
@@ -69,9 +68,8 @@ describe('chats view touches', () => {
     [EVENT_KIND.task_status_changed, { taskId: 'C', from: TASK_STATUS.running, to: TASK_STATUS.done }],
     [EVENT_KIND.step_completed, { stepId: 's1', summary: 'done' }],
     [EVENT_KIND.copilot_exchange, { user: 'u', assistant: 'a', toolCalls: [], modelRef: 'x/y', taskId: null, workspaceId: null }],
-    [EVENT_KIND.memory_written, note],
-    [EVENT_KIND.memory_verified, { id: 'n', scope: 'project', stamp: { revision: 'abc', at: '2026-09-18T00:00:00.000Z', by: 'cli' }, author }],
-    [EVENT_KIND.memory_deleted, { id: 'n', scope: 'project', author }],
+    [EVENT_KIND.knowledge_written, { added: [], changed: [], retired: [{ id: 'abcd1234', location: 'knowledge/a.md' }], files: [], why: null, decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author }],
+    [EVENT_KIND.knowledge_checked, { id: 'abcd1234', verdict: CheckVerdict.holds, text: 'T.', anchors: [], why: 'read it', author }],
     [EVENT_KIND.commit_recorded, { sha: 'a'.repeat(40), workspaceId: TEST_WORKSPACE_ID, message: 'm', files: [] }],
     [EVENT_KIND.artifact_produced, { path: 'out.txt', sha256: 'a'.repeat(64), size: 3 }],
     [EVENT_KIND.feedback_requested, { topic: 't', question: 'q' }],

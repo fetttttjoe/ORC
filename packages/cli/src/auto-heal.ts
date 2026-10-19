@@ -1,4 +1,4 @@
-import { AutoHealMode, CheckVerdict, ClaimState, errorMessage, FS_LIST_TOOL_NAME, KnowledgeToolName, STEP_ROLE, STRATEGY, type ClaimAnchor, type ClaimDrift, type PlanDraft } from '@orc/contracts'
+import { AutoHealMode, CheckVerdict, ClaimState, errorMessage, FS_LIST_TOOL_NAME, KnowledgeToolName, STEP_ROLE, STRATEGY, type ClaimDrift, type KnowledgeAnchor, type PlanDraft } from '@orc/contracts'
 import { DEFAULT_TEMPLATE_MODEL, singleStepDraft } from './plan-template'
 
 export interface AutoHealDeps {
@@ -14,7 +14,7 @@ export interface AutoHealDeps {
 export const AUTO_SWEEP_TITLE = 'auto-heal: sweep drifted knowledge'
 export const SWEEP_LISTED_IDS = 50
 
-const anchorRef = (a: Pick<ClaimAnchor, 'path' | 'symbol'>): string => `@${a.path}${a.symbol === null ? '' : `#${a.symbol}`}`
+const anchorRef = (a: KnowledgeAnchor): string => `@${a.path}${a.symbol === null ? '' : `#${a.symbol}`}`
 
 const listing = (d: ClaimDrift): string => `${[d.claim.id, ...d.claim.anchors.map(anchorRef)].join(' ')} (${d.claim.location})`
 

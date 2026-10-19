@@ -53,48 +53,6 @@ export async function runtimeLockHeld(url: string, projectId: string): Promise<b
   }
 }
 
-// One LIVE memory projector per project — the runtime lock's mechanics (session-scoped advisory
-// lock, crash-released) applied to the read model's standing machinery instead of the execution
-// runtime. Three long-lived processes (supervisor, graph server, mcp serve) each ran a full
-// projector against one SurrealDB: every event woke three subscriptions, each debounce re-ran the
-// whole-corpus repartition (~13s a pass), and a supervisor boot's initial drain starved behind
-// them for 18 minutes (boot line: memory-projection 1073669ms, measured 2026-08-04). The read
-// model has ONE writer, so it gets one live projector; everyone else follows the holder's cursor.
-//
-// Non-throwing, unlike acquireRuntimeLock: losing this race is the NORMAL follower path, not an
-// error. tryAcquire is idempotent per handle, and a probe that cannot reach Postgres reports
-// not-acquired — the caller degrades to follower, whose bounded wait has its own drain fallback.
-const projectorLeaseKey = (projectId: string): string => `orc:memory-projector:${projectId}`
-
-export interface ProjectorLease { tryAcquire(): Promise<boolean>; release(): Promise<void> }
-
-export function projectorLease(url: string, projectId: string): ProjectorLease {
-  let client: pg.Client | null = null
-  return {
-    async tryAcquire() {
-      if (client) return true
-      const c = new pg.Client({ connectionString: url })
-      try {
-        await c.connect()
-        const r = await c.query<{ locked: boolean }>(
-          'SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked', [projectorLeaseKey(projectId)])
-        if (r.rows[0]?.locked === true) { client = c; return true }
-        await c.end().catch(() => {})
-        return false
-      } catch {
-        await c.end().catch(() => {})
-        return false
-      }
-    },
-    async release() {
-      if (!client) return
-      const c = client
-      client = null
-      await c.end().catch(() => {})
-    },
-  }
-}
-
 export async function acquireRuntimeLock(url: string, projectId: string): Promise<RuntimeLock> {
   const client = new pg.Client({ connectionString: url })
   await client.connect()

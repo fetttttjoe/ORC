@@ -187,14 +187,17 @@ describe('fold — execution kinds', () => {
     expect(state.usage.size).toBe(0)
   })
 
-  it('ignores memory events and does not create a task', () => {
+  it('ignores knowledge events and does not create a task', () => {
     const base = fold([])
-    const withMem = fold([eventFixture({
-      taskId: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' }, author: authorFixture() },
+    const withKnowledge = fold([eventFixture({
+      taskId: null, kind: EVENT_KIND.knowledge_written,
+      payload: {
+        added: [{ id: 'abcd1234', location: 'knowledge/a.md' }], changed: [], retired: [], files: [], why: null, decision: null,
+        decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author: authorFixture(),
+      },
       ts: '2026-07-18T00:00:00Z',
     })])
-    expect(withMem.tasks.size).toBe(base.tasks.size)
+    expect(withKnowledge.tasks.size).toBe(base.tasks.size)
   })
 
   it('dedups crash-boundary duplicates by (runToken, kind, iteration, toolCallId)', () => {
@@ -764,5 +767,28 @@ describe('startedAttempts vs nextAttempts — cancel targets the running attempt
     expect(startedAttempts(stateOf(TASK_STATUS.running), 't1', plan)).not.toHaveProperty('b')
     // nextAttempts fills it with 1 — right for starting, wrong for cancelling
     expect(nextAttempts(stateOf(TASK_STATUS.running), 't1', plan).b).toBe(1)
+  })
+})
+
+describe('project identity fold', () => {
+  const first = { name: 'a', dir: '/a' }
+  const second = { name: 'b', dir: '/b' }
+
+  it('is null on an empty fold', () => {
+    expect(emptyFold().state.project).toBeNull()
+  })
+
+  it('takes the latest identity', () => {
+    const state = fold([evt(1, EVENT_KIND.project_identified, first), evt(2, EVENT_KIND.project_identified, second)])
+    expect(state.project).toEqual(second)
+  })
+
+  it('skips a payload that fails the schema', () => {
+    const state = fold([
+      evt(1, EVENT_KIND.project_identified, first),
+      evt(2, EVENT_KIND.project_identified, second),
+      evt(3, EVENT_KIND.project_identified, { name: '', dir: '/c' }),
+    ])
+    expect(state.project).toEqual(second)
   })
 })

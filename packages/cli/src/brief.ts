@@ -1,4 +1,5 @@
 import { BRIEF_LIMITS, BRIEF_TASK_STATUSES, TASK_STATUS, WORKSPACE_STATE, type Brief, type BriefTask, type BriefTaskStatus, type TaskNode, type TaskStatus, type WorkspaceWithHealth } from '@orc/contracts'
+import { knowledgeHealthLine } from './knowledge-health-line'
 import { AGE_UNKNOWN, relativeAge } from './relative-age'
 
 // The brief: what a session is told about a project before it has asked anything, and how that
@@ -17,8 +18,7 @@ export interface BriefInput {
   // Decisions in force, in listing order. null = the decision files could not be read — kept apart
   // from [] all the way to the text, because the two call for opposite behaviour from a reader.
   decisions: readonly { id: string; title: string; summary: string }[] | null
-  // Already gated by the caller: non-null only when the re-ground advisory fires.
-  drift: NonNullable<Brief['drift']> | null
+  knowledge: Brief['knowledge']
 }
 
 const isBriefStatus = (s: TaskStatus): s is BriefTaskStatus => BRIEF_TASK_STATUSES.some(b => b === s)
@@ -59,17 +59,13 @@ export function buildBrief(input: BriefInput): Brief {
       shown: input.decisions.slice(0, BRIEF_LIMITS.decisions).map(d => ({ id: d.id, title: d.title, summary: d.summary })),
       total: input.decisions.length,
     },
-    drift: input.drift,
+    knowledge: input.knowledge,
   }
 }
 
 export interface RenderBriefOptions {
   // A PARAMETER for relativeAge's reason: one clock for the whole block.
   now: Date
-  // How a drift reading reads to a human is the CLI's vocabulary (it names plan files and commands),
-  // and `orc status` prints the same sentence. Passed in so there is one spelling of it and this
-  // module never learns what a plan file is.
-  driftText: (d: NonNullable<Brief['drift']>) => string
   oneLine: (text: string, maxChars: number) => string
   // The commands the text points at, built by the command module from the subcommand constants —
   // importing them here would pull commander into a file that prints nothing.
@@ -77,12 +73,9 @@ export interface RenderBriefOptions {
 }
 
 function workspaceLine({ workspace: w, health: h }: WorkspaceWithHealth, now: Date): string {
-  // Both unknowns in WORDS rather than `ws ls`'s '-' and '?' cells: that table explains its marks
-  // in a footnote, and a line read by a model has no footnote — "0" and "could not count" must
-  // differ in the sentence itself. relativeAge answers AGE_UNKNOWN for a stamp it cannot read.
+  // An unknown age in WORDS rather than `ws ls`'s '-' cell: a line read by a model has no legend.
   const age = h.lastActivityAt === null ? AGE_UNKNOWN : relativeAge(h.lastActivityAt, now)
-  const prov = h.provisionalNotes === null ? 'provisional notes unknown' : `${h.provisionalNotes} provisional notes`
-  const facts = [h.state, `last activity ${age === AGE_UNKNOWN ? 'unknown' : age}`, prov, ...(h.clean === false ? ['uncommitted changes'] : []), ...(h.merged ? ['merged'] : [])]
+  const facts = [h.state, `last activity ${age === AGE_UNKNOWN ? 'unknown' : age}`, ...(h.clean === false ? ['uncommitted changes'] : []), ...(h.merged ? ['merged'] : [])]
   return `workspace: ${w.title} (${w.kind}, ${w.branch ?? 'detached'}) — ${facts.join(', ')}`
 }
 
@@ -120,6 +113,6 @@ export function renderBrief(brief: Brief, opts: RenderBriefOptions): string[] {
     }
   }
 
-  if (brief.drift !== null) lines.push(opts.driftText(brief.drift))
+  lines.push(knowledgeHealthLine(brief.knowledge))
   return lines
 }

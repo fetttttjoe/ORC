@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { KnowledgeHealth } from './health'
 import { TASK_STATUS } from './task'
 import { WorkspaceWithHealth } from './workspace-entity'
 
@@ -55,8 +56,6 @@ export const Brief = z.object({
   // nothing" and "the files could not be read" must not render the same, or an outage silently licenses
   // re-opening every settled question.
   decisions: z.object({ shown: z.array(BriefDecision), total: z.number().int() }).nullable(),
-  // Present only when the corpus has fallen far enough behind the code for the re-ground advisory
-  // to fire; a ratio below that is `orc status`'s to print, not something to open every session with.
-  drift: z.object({ checkable: z.number().int(), drifted: z.number().int(), ratio: z.number() }).nullable(),
+  knowledge: KnowledgeHealth,
 })
 export type Brief = z.infer<typeof Brief>

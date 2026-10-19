@@ -1,33 +1,18 @@
-import { authorSourceOf, decisionSummaryOf, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, NOTE_KIND, TASK_STATUS, costUSDFor, parseModelRef, type EventInput, type ModelOption, type Origin, type TaskStatus } from '@orc/contracts'
-import { Kernel, blockingVerdicts, canRetry, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, subtreeTaskIds, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
-import { cwdAuthor, cwdWorkspace, cwdWorkspaceId, type AuthorExtras } from './cwd-workspace'
+import { authorSourceOf, decisionSummaryOf, errorMessage, EVENT_KIND, ModelsDiscoveredPayload, TASK_STATUS, costUSDFor, parseModelRef, type ModelOption, type Origin, type TaskStatus } from '@orc/contracts'
+import { Kernel, blockingVerdicts, canRetry, deriveSystemUrl, dropSystemDatabase, initializeProject, liveSupervisors, loadConfig, openStorage, resetSystemDatabase, type EventLog, type ProjectConfig, type Storage } from '@orc/kernel'
+import { cwdAuthor, cwdWorkspace, cwdWorkspaceId } from './cwd-workspace'
 import { adoptCwd } from './workspace-adopt'
 import { createRequestWorkspace, HEAD_REF, requireLiveWorkspace } from './workspace-ops'
 import { listWorkspaceHealth } from './workspace-health'
 import { seedRegistries } from './runtime'
 import { singleStepDraft } from './plan-template'
-import { createMemory, openKnowledge, orphanedNotes } from '@orc/memory'
-import { knowledgeAccess, openKnowledge as openKnowledgeBackend } from './knowledge-open'
-import { openMemory, withMemory } from './memory-open'
-import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, type OrcActions, type PlanSource } from '@orc/ui-core'
+import { knowledgeAccess, openKnowledge } from './knowledge-open'
+import type { OrcActions, PlanSource } from '@orc/ui-core'
 import type { PlanDraft } from '@orc/contracts'
 import type { MemoryAuthor, Workspace } from '@orc/contracts'
 import { createVaultProjector } from '@orc/vault-projector'
 import { existsSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
-
-// ui metadata notes are plain memory events — appended directly so they work even when the
-// Surreal read model is down (the projector catches up on its own)
-// The author is a PARAMETER even here, where the note is project metadata rather than knowledge:
-// MemoryAuthor is ONE shape, and the workspace has to be the checkout the append actually lands in
-// — which for newProject/purgeProject is NOT the fold this process booted against.
-const uiNote = (id: string, title: string, summary: string, author: MemoryAuthor, origin: Origin): EventInput => ({
-  ...origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-  payload: { note: { id, title, kind: NOTE_KIND.fact, summary }, author },
-})
-const nameNote = (name: string, author: MemoryAuthor, origin: Origin) => uiNote(PROJECT_NAME_NOTE_ID, name, 'display name for the project chat', author, origin)
-const dirNote = (dir: string, author: MemoryAuthor, origin: Origin) => uiNote(PROJECT_DIR_NOTE_ID, dir, 'working directory of the project', author, origin)
-
 
 // The statuses startRunAt (dbos-port.ts) admits — anything else is terminal or waiting on a human,
 // so a run_requested naming it could never be served. ONE set, so "can this be driven?" means the
@@ -229,17 +214,16 @@ export function buildOrcActions(deps: {
 }): OrcActions {
   const { kernel, ensureRuntime, plugin, listModels, listModelOptions } = deps
 
-  // Every memory write this layer makes names the checkout the process is serving — ONE spelling,
-  // so the web and MCP doors agree with the terminal instead of each growing their own lookup.
+  // Every knowledge write this layer makes names the checkout the process is serving — ONE spelling.
   // Folded per call, not captured: `orc ws new` can mint a workspace mid-session.
   // The SOURCE is derived from the door the call came in by — there is no `via` dep to disagree
   // with the origin the same call stamps on its events.
-  const doorAuthor = (origin: Origin, extra: AuthorExtras = {}): Promise<MemoryAuthor> =>
-    cwdAuthor(kernel, plugin?.config.dir, authorSourceOf(origin.door), origin, extra)
+  const doorAuthor = (origin: Origin): Promise<MemoryAuthor> =>
+    cwdAuthor(kernel, plugin?.config.dir, authorSourceOf(origin.door), origin)
 
   const decisionPort = async () => {
     if (!plugin) throw new Error('decisions need a project context')
-    const access = knowledgeAccess(openKnowledgeBackend(plugin.config), plugin.log, plugin.config.dir)
+    const access = knowledgeAccess(openKnowledge(plugin.config), plugin.log, plugin.config.dir)
     if ('unavailable' in access) throw new Error(access.unavailable)
     return access.port
   }
@@ -428,18 +412,6 @@ export function buildOrcActions(deps: {
       return { topic }
     },
 
-    async writeNote(note, origin) {
-      if (!plugin) throw new Error('writing notes needs a project context')
-      if (note.id === PROJECT_NAME_NOTE_ID || note.id === PROJECT_DIR_NOTE_ID)
-        throw new Error(`'${note.id}' is a reserved ui-metadata note id`)
-      return withMemory({ log: plugin.log, config: plugin.config }, async memory => {
-        const written = await memory.store.write(note, await doorAuthor(origin))
-        // event committed — the read model heals on the next drain if this catch-up fails
-        await memory.projector.catchUp().catch(() => {})
-        return { id: written.id, scope: written.scope }
-      })
-    },
-
     async listDecisions(filter, origin) {
       const port = await decisionPort()
       return (await port.decisions({ author: await doorAuthor(origin), idempotencyKey: null }, filter)).map(decisionSummaryOf)
@@ -455,20 +427,9 @@ export function buildOrcActions(deps: {
       return { id: r.recorded.id, status: r.status, superseded: r.superseded?.id ?? null }
     },
 
-    async deleteNote(id, scope, origin) {
-      if (!plugin) throw new Error('deleting notes needs a project context')
-      if (id === PROJECT_NAME_NOTE_ID || id === PROJECT_DIR_NOTE_ID)
-        throw new Error(`'${id}' is a reserved ui-metadata note id`)
-      return withMemory({ log: plugin.log, config: plugin.config }, async memory => {
-        await memory.store.remove(id, scope, await doorAuthor(origin))
-        await memory.projector.catchUp().catch(() => {})
-        return { id }
-      })
-    },
-
     async renameProject(name, origin) {
       if (!plugin) throw new Error('renaming needs a project context')
-      await plugin.log.append(nameNote(name, await doorAuthor(origin), origin))
+      await kernel.identifyProject({ name, dir: plugin.config.dir }, origin)
       return { name }
     },
 
@@ -485,19 +446,18 @@ export function buildOrcActions(deps: {
       // already answers `null` for a plain, uninitialized directory, so it alone is the check.
       const existing = loadConfig(abs).projectId
       const projectId = existing ?? initializeProject(abs, name).projectId
-      // first events = name + dir notes: listable, named, and locatable immediately
+      // first events = the checkout and the identity: listable, named, and locatable immediately
       const storage = await openStorage(plugin.config.databaseUrl, { projectId })
       try {
         // Adopt the new project's own checkout into its OWN log before writing into it. Not
-        // `cliAuthor()`: that names the workspace of the directory THIS process serves, which is a
+        // `doorAuthor()`: that names the workspace of the directory THIS process serves, which is a
         // different project entirely — its id means nothing in the log being seeded here. Adoption
         // is idempotent (ensureWorkspace keys on cwd), so reusing an existing project re-finds the
         // record instead of minting a second one.
         const created = loadConfig(abs)
-        const workspace = await adoptCwd(new Kernel(storage.events), created, origin)
-        const author: MemoryAuthor = { source: authorSourceOf(origin.door), workspaceId: workspace.id, origin }
-        await storage.events.append(nameNote(name, author, origin))
-        await storage.events.append(dirNote(abs, author, origin))
+        const projectKernel = new Kernel(storage.events)
+        await adoptCwd(projectKernel, created, origin)
+        await projectKernel.identifyProject({ name, dir: abs }, origin)
       } finally {
         await storage.close()
       }
@@ -508,11 +468,7 @@ export function buildOrcActions(deps: {
       if (!plugin?.storage) throw new Error('purging needs a project context')
       await refuseWhileSupervised(plugin.storage, 'purge')
       const warnings: string[] = []
-      // Read BEFORE the wipe, because the wipe takes workspace_created with everything else. The
-      // whole RECORD, not the id: it is re-appended below so the identity notes' author names a
-      // workspace the log still carries, and so this checkout keeps the id it already had — boot
-      // adoption would otherwise mint a fresh uuid for the same directory on the next command and
-      // orphan the notes we are about to write.
+      // read before the wipe, which removes workspace_created; the restore keeps the checkout's id
       // the REASON travels with the miss: "no workspace is recorded" is only one of the ways this
       // can fail (an unreadable log, a fold that threw), and reporting that sentence for all of them
       // sends an operator to re-adopt a checkout that was never the problem
@@ -530,34 +486,19 @@ export function buildOrcActions(deps: {
       }
       // 2. the history: every event + journal row, one locked transaction
       const counts = await plugin.storage.purge()
-      // re-seed identity FIRST: "the empty chat stays" — without these notes the project has
-      // zero events, drops off the chats list, and the UI strands the user in a foreign chat.
-      // The workspace record leads, because the notes' author names it.
-      //
-      // A WARNING rather than a throw when this checkout was never adopted: the wipe above is
-      // already committed, so failing here would leave the project worse off than not re-seeding —
-      // the same posture the system-db and vault steps take. Nothing is invented: with no workspace
-      // to name there is no author, so no note is written, and the next command in the checkout
-      // adopts it and restores the chat.
       if (home.workspace === null) {
-        warnings.push(`project identity not re-seeded (${home.reason}) — run any orc command from the project checkout to restore it`)
+        warnings.push(`workspace not restored (${home.reason}) — run any orc command from the project checkout to restore it`)
       } else {
-        // GUARDED as a whole — the restore and the two notes are one re-seed, and the wipe above is
-        // already committed, so a throw here would leave the project worse off than a skipped
-        // re-seed. The refusal this catches is real and is the race the comment above names: a boot
-        // adoption landing between the pre-wipe read and this restore re-occupies the cwd, and the
-        // kernel then correctly refuses a second live record for one directory.
         try {
-          // through the KERNEL, never a raw append: it is the one writer of workspace records, and
-          // the "one active record per cwd" rule only holds when the check and the append share a
-          // transaction — that racing adoption would otherwise get a duplicate forced in beside it.
-          const seated = await kernel.restoreWorkspace(home.workspace, origin)
-          const reseedAuthor: MemoryAuthor = { source: authorSourceOf(origin.door), workspaceId: seated.id, origin }
-          if (plugin.config.projectName) await plugin.log.append(nameNote(plugin.config.projectName, reseedAuthor, origin))
-          if (plugin.config.dir) await plugin.log.append(dirNote(plugin.config.dir, reseedAuthor, origin))
+          await kernel.restoreWorkspace(home.workspace, origin)
         } catch (err) {
-          warnings.push(`project identity not re-seeded (${errorMessage(err)}) — another workspace now holds ${plugin.config.dir}, so this project's name and directory notes were not rewritten`)
+          warnings.push(`workspace not restored (${errorMessage(err)}) — another workspace now holds ${plugin.config.dir}`)
         }
+      }
+      try {
+        await kernel.identifyProject({ name: plugin.config.projectName, dir: plugin.config.dir }, origin)
+      } catch (err) {
+        warnings.push(`project identity not re-seeded (${errorMessage(err)})`)
       }
       // 3. vault task traces: dead task folders would linger — drop them, re-render the index
       try {
@@ -565,20 +506,6 @@ export function buildOrcActions(deps: {
         await createVaultProjector({ log: plugin.log, config: plugin.config }).renderAll()
       } catch (err) {
         warnings.push(`vault trace not cleared (${errorMessage(err)})`)
-      }
-      // 4. read model + memory vault files: rebuild over the now-empty log clears both. Best-effort —
-      //    the log purge is committed; a down Surreal heals on the next projector run.
-      let memory: Awaited<ReturnType<typeof createMemory>> | undefined
-      try {
-        memory = await openMemory({ log: plugin.log, config: plugin.config })
-        const { degraded } = await memory.projector.rebuild()
-        if (degraded) {
-          warnings.push('memory read model rebuilt after purge but is degraded — some notes did not reproject')
-        }
-      } catch (err) {
-        warnings.push(`memory read model not cleared (${errorMessage(err)}) — run 'orc memory rebuild' once it is reachable`)
-      } finally {
-        await memory?.close().catch(() => {})
       }
       return { ...counts, warnings }
     },
@@ -603,26 +530,12 @@ export function buildOrcActions(deps: {
       const storage = await openStorage(plugin.config.databaseUrl, { projectId })
       try {
         const counts = await storage.purge()
-        // The knowledge goes with the chat. This read model lives in a PROJECT-DERIVED SurrealDB
-        // database, so the home project's memory instance cannot reach it. Leaving it is not inert
-        // garbage: a deleted project's notes stay live in `orc memory ls`, memory_search and the graph
-        // UI, with no events behind them, until a later rebuild silently drops them.
-        // Deleting a chat means the data goes too.
-        try {
-          const knowledge = await openKnowledge({ ...plugin.config, projectId })
-          // drop, not clear: the database object goes with the project. Clearing rows left one
-          // empty Surreal database per deleted project that nothing ever collected — the exact
-          // litter dropSystemDatabase above avoids on the Postgres side.
-          try { await knowledge.drop() } finally { await knowledge.close() }
-        } catch (err) {
-          warnings.push(`memory read model not cleared (${errorMessage(err)}) — its notes will vanish on the next rebuild`)
-        }
-        // …and its rendered trace. Only for the HOME project: its vault path comes from config and
+        // The rendered trace goes only for the HOME project: its vault path comes from config and
         // is trusted, while a foreign project's vault lives in ITS directory, which this server has
         // no business deleting from — so that case is reported rather than guessed at.
         if (projectId === plugin.config.projectId) {
           try {
-            for (const dir of ['memory', 'tasks']) rmSync(path.join(plugin.config.vaultDir, dir), { recursive: true, force: true })
+            rmSync(path.join(plugin.config.vaultDir, 'tasks'), { recursive: true, force: true })
           } catch (err) {
             warnings.push(`vault trace not cleared (${errorMessage(err)})`)
           }
@@ -639,33 +552,7 @@ export function buildOrcActions(deps: {
       // The append half only: stamping the subtree cancelled is what a client can do without a
       // runtime, and the supervisor's router does the DBOS half off each cancelled status. With no
       // supervisor up there is nothing running to cancel, and the next one to boot sweeps it.
-      await kernel.cancelSubtree(taskId, origin)
-      // Cancel is terminal — nothing will resume this subtree, so its still-owned, unreferenced
-      // notes are garbage. Deterministic sweep (no agent): fold the memory log, keep adopted or
-      // still-referenced ids. Each delete appends memory_deleted with the cancelled task as
-      // provenance — the note's full content stays in the immutable log (orc log / replay).
-      if (!plugin) return { swept: [], sweepError: null }
-      // best-effort: the cancel is already committed, so a sweep failure reports instead of
-      // failing the command
-      let memory: Awaited<ReturnType<typeof createMemory>> | undefined
-      try {
-        const cancelled = new Set(subtreeTaskIds(await kernel.state(), taskId))
-        const goes = orphanedNotes(await plugin.log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted]), cancelled)
-        if (goes.length === 0) return { swept: [], sweepError: null }
-        memory = await openMemory({ log: plugin.log, config: plugin.config })
-        // one author for the whole sweep — the cancelled task is the provenance, the workspace is
-        // this checkout, and folding it once per note would re-read the log N times
-        const author = await doorAuthor(origin, { taskId })
-        for (const n of goes) await memory.store.remove(n.id, n.scope, author)
-        // deletes are committed (event-first) — the read-model catch-up is best-effort; the
-        // projector self-heals on the next invocation
-        await memory.projector.catchUp().catch(() => {})
-        return { swept: goes.map(({ id, scope, title }) => ({ id, scope, title })), sweepError: null }
-      } catch (err) {
-        return { swept: [], sweepError: errorMessage(err) }
-      } finally {
-        await memory?.close().catch(() => {})
-      }
+      return { cancelled: await kernel.cancelSubtree(taskId, origin) }
     },
   }
 }

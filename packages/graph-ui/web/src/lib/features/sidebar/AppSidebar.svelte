@@ -10,8 +10,6 @@
   import { Button } from '$lib/components/ui/button'
   import ChevronIcon from '@lucide/svelte/icons/chevron-down'
   import PlusIcon from '@lucide/svelte/icons/plus'
-  import NoteIcon from '@lucide/svelte/icons/notebook-pen'
-  import NewNoteForm from '$lib/features/forms/NewNoteForm.svelte'
 
   // finished work collapses by default: 20+ settled requests otherwise bury what needs attention
   const GROUPS = [
@@ -28,7 +26,6 @@
   let { children }: { children?: import('svelte').Snippet<[{ close: () => void }]> } = $props()
 
   let composerOpen = $state(false)
-  let noteOpen = $state(false)
 
   const gated = $derived(new Set(operator.state.openQuestions.map(g => g.taskId)))
 
@@ -60,9 +57,7 @@
 
 <Sidebar.Root collapsible="none" role="navigation" aria-label="requests" class="w-72 shrink-0 overflow-hidden border-r border-line bg-bureau">
   {#if children}
-    <!-- the two things an operator authors by hand. Each dialog is its OWN root — nesting one
-         inside another put the note trigger outside the rail entirely. -->
-    <Sidebar.Header class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 p-2">
+    <Sidebar.Header class="p-2">
       <Dialog.Root bind:open={composerOpen}>
         <Dialog.Trigger class="min-w-0">
           {#snippet child({ props })}
@@ -78,23 +73,6 @@
             <Dialog.Description>describe the outcome — a grounded request analyses the repo and decomposes it before asking you to approve.</Dialog.Description>
           </Dialog.Header>
           {@render children({ close: () => (composerOpen = false) })}
-        </Dialog.Content>
-      </Dialog.Root>
-
-      <Dialog.Root bind:open={noteOpen}>
-        <Dialog.Trigger>
-          {#snippet child({ props })}
-            <Button {...props} variant="outline" size="icon" class="size-8 shrink-0" title="capture a knowledge note by hand" aria-label="capture a knowledge note by hand">
-              <NoteIcon />
-            </Button>
-          {/snippet}
-        </Dialog.Trigger>
-        <Dialog.Content class="sm:max-w-lg">
-          <Dialog.Header>
-            <Dialog.Title>new note</Dialog.Title>
-            <Dialog.Description>a fact worth keeping — it joins the knowledge graph the agents read from.</Dialog.Description>
-          </Dialog.Header>
-          <NewNoteForm onsubmitted={() => (noteOpen = false)} />
         </Dialog.Content>
       </Dialog.Root>
     </Sidebar.Header>

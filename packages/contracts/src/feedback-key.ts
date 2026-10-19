@@ -1,7 +1,5 @@
-// Zero imports on purpose — a leaf module, so a browser bundle can take it directly.
-// feedback-open.ts (its only importer besides here) pulls in ./events -> ./memory -> ./claim,
-// and claim.ts opens with `import { createHash } from 'node:crypto'`, which a browser build
-// cannot resolve. This one function has no such dependency, so it lives on its own.
+// Zero imports on purpose — a leaf module, so a browser bundle can take it directly:
+// feedback-open.ts pulls in ./events, which reaches node:crypto through ./knowledge.
 
 /**
  * The identity of an open question: one (task, topic) pair, spelled ONCE.

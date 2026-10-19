@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { QueryClient } from '@tanstack/query-core'
 import { ScopeType } from '@orc/contracts/scope'
-import { TOUCHABLE, VIEW } from '@orc/ui-core/wire'
+import { VIEW } from '@orc/ui-core/wire'
 import { type ApiError, setApiErrorHandler } from './client'
 import { allViewsKey, fetchView, healthKey, touchKey, viewKey } from './view-client'
 
@@ -47,7 +47,7 @@ describe('allViewsKey', () => {
 
     expect(isStale(qc, viewKey('p', VIEW.node, { id: 'a' }))).toBe(true)
     expect(isStale(qc, viewKey('other-project', VIEW.plans, { taskId: 'x' }))).toBe(true)
-    expect(isStale(qc, viewKey('p', TOUCHABLE.health, {}))).toBe(true)
+    expect(isStale(qc, healthKey('p'))).toBe(true)
   })
 })
 
@@ -62,7 +62,7 @@ describe('fetchView — a subject that no longer exists', () => {
     )
     globalThis.fetch = notFound
     try {
-      const answer = await fetchView('p', VIEW.node, { id: 'note:project\u0000deleted-note' })
+      const answer = await fetchView('p', VIEW.node, { id: 'artifact:t1:deleted.txt' })
       expect(answer.data).toBeNull()
       expect(reported).toEqual([])
     } finally {

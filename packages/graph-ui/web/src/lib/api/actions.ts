@@ -58,11 +58,6 @@ export const actions = {
   /** annotate every note in `scope`, then wake the plan agent to revise just those */
   revise: (taskId: string, text: string, scope: string[]): Promise<unknown> => api.act('revise', { taskId, text, scope }),
 
-  writeNote: (draft: { id: string; title: string; summary?: string; body?: string; tags?: string[]; links?: unknown[] }): Promise<{ id: string }> =>
-    api.act<{ id: string }>('writeNote', draft, S.NoteWritten),
-
-  deleteNote: (id: string, scope: string): Promise<unknown> => api.act('deleteNote', { id, scope }),
-
   renameProject: (name: string): Promise<unknown> => api.act('renameProject', { name }),
   newProject: (dir: string, name: string): Promise<unknown> => api.act('newProject', { dir, name }),
   purgeProject: (): Promise<PurgeReport> => api.act<PurgeReport>('purgeProject', {}, S.PurgeReport),

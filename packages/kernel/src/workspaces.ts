@@ -118,12 +118,11 @@ function hasOpenQuestion(events: ReadonlyArray<FeedbackEvent>, taskIds: Readonly
 }
 
 /**
- * One workspace's state, from the fold plus what only the caller can see (the filesystem, the note
- * read model). Pure: same inputs, same verdict, on any machine.
+ * One workspace's state, from the fold plus what only the caller can see (the filesystem). Pure:
+ * same inputs, same verdict, on any machine.
  *
  * The rungs are an if-else CHAIN and their order IS the rule — each one names why it sits where it
- * does. `events` is the project's log in log order; `notesByWorkspace` counts STILL-PROVISIONAL
- * notes per workspace, and is null when the read model could not be asked at all.
+ * does. `events` is the project's log in log order.
  *
  * ponytail: two passes over the whole log per workspace, so listing a project costs
  * O(workspaces × events) — nothing at a handful of checkouts, and unmeasured past that. The upgrade
@@ -133,16 +132,12 @@ function hasOpenQuestion(events: ReadonlyArray<FeedbackEvent>, taskIds: Readonly
 export function workspaceHealth(
   state: Pick<State, 'tasks' | 'workspaces' | 'workspaceMerges'>,
   events: ReadonlyArray<Pick<EventRecord, 'taskId' | 'ts' | 'kind' | 'payload'>>,
-  notesByWorkspace: ReadonlyMap<string, number> | null,
   w: Workspace,
   probes: WorkspaceProbes,
 ): WorkspaceHealth {
   const tasks = [...state.tasks.values()].filter(t => t.workspaceId === w.id)
   const taskIds = new Set(tasks.map(t => t.id))
   const open = tasks.filter(t => !TERMINAL_TASK_STATUS.has(t.status))
-  // A workspace with nothing pending counts 0; one we could not COUNT is null. The two must not
-  // collapse, or "the read model is down" would render as "nothing pending here".
-  const provisionalNotes = notesByWorkspace === null ? null : notesByWorkspace.get(w.id) ?? 0
 
   let lastActivityAt: string | null = null
   for (const e of events) {
@@ -159,7 +154,7 @@ export function workspaceHealth(
   // workspace that never landed — which is the one question the workspace transaction exists to
   // answer, so it travels beside the state rather than being encoded in it.
   const merged = state.workspaceMerges.has(w.id)
-  const base = { lastActivityAt, taskCount: tasks.length, openTaskCount: open.length, merged, provisionalNotes, ...probes }
+  const base = { lastActivityAt, taskCount: tasks.length, openTaskCount: open.length, merged, ...probes }
   // Something IS moving here — the one state that needs no further reading.
   if (tasks.some(t => t.status === TASK_STATUS.running)) return { state: WORKSPACE_STATE.active, ...base }
   // Below `active` on purpose: a gate in a checkout where another task is already working is not
@@ -171,11 +166,8 @@ export function workspaceHealth(
   // fails the dirExists probe as a matter of course and would otherwise be reported as the one
   // thing it is not — abandoned.
   if (merged) return { state: WORKSPACE_STATE.merged, ...base }
-  // Work that will never land unless someone acts: the checkout is gone with the branch unmerged,
-  // or nothing is open in it any more while knowledge written there still waits on a merge.
-  // `provisionalNotes !== null` keeps ignorance from reading as evidence.
-  if (!probes.dirExists || (open.length === 0 && provisionalNotes !== null && provisionalNotes > 0))
-    return { state: WORKSPACE_STATE.dangling, ...base }
+  // Work that will never land unless someone acts: the checkout is gone with the branch unmerged.
+  if (!probes.dirExists) return { state: WORKSPACE_STATE.dangling, ...base }
   return { state: WORKSPACE_STATE.idle, ...base }
 }
 

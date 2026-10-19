@@ -118,7 +118,7 @@
 <ConfirmDialog
   bind:open={purgeOpen}
   title="purge"
-  description={`purge “${name}” — cancels running work and deletes ALL requests, history and knowledge. The empty chat stays.`}
+  description={`purge “${name}” — cancels running work and deletes the project's history: ALL requests and their events. Knowledge files in the repository stay, and so does the empty chat.`}
   confirmWord={name}
   confirmLabel={`type “${name}” to confirm`}
   onconfirm={async () => {

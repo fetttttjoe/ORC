@@ -1,4 +1,4 @@
-// The search seam, shaped like ModelProvider/EmbeddingProvider: adding Brave or Exa is a new
+// The search seam, shaped like ModelProvider: adding Brave or Exa is a new
 // implementation plus a registry entry, not another branch in the server.
 import { z } from 'zod'
 import { stripHtml } from './html-text'
@@ -72,8 +72,8 @@ export function createTavilySearch(apiKey: string): SearchProvider {
 
 export type SearchEnv = Readonly<Record<string, string | undefined>>
 
-// The composition root for this seam (cf. buildEmbeddingProvider). Env arrives as a value so the
-// choice is testable without mutating a global. A broken key fails loudly rather than downgrading:
+// The composition root for this seam. Env arrives as a value so the choice is testable without
+// mutating a global. A broken key fails loudly rather than downgrading:
 // a run that silently changed corpus mid-way is worse than one that stops.
 export function selectSearchProvider(env: SearchEnv): SearchProvider {
   const key = env.TAVILY_API_KEY?.trim() ?? ''

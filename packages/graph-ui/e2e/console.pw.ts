@@ -154,17 +154,8 @@ test('the rail measures what it declares and keeps its controls inside', async (
   // layout to 84%, so panes rendered narrower than declared and their contents spilled out.
   const railBox = must(await rail(page).boundingBox(), 'rail bounding box')
   expect(railBox.width).toBe(288)
-  const note = must(await rail(page).getByRole('button', { name: /knowledge note/ }).boundingBox(), 'knowledge note bounding box')
-  expect(note.x + note.width).toBeLessThanOrEqual(railBox.x + railBox.width)
-})
-
-test('a note shows its claims — the statements retrieval actually matches on', async ({ page }) => {
-  await open(page)
-  // notes only exist once something writes one; the fixture writes none, so this asserts the
-  // schema path rather than the seed: an unrecognised shape would show the raw-record fallback
-  await rail(page).getByRole('button', { name: new RegExp(SEEDED_REQUEST) }).click()
-  await inspector(page).getByRole('tab', { name: 'detail' }).click()
-  await expect(inspector(page).getByRole('tabpanel').getByText('unrecognised shape — raw record')).toHaveCount(0)
+  const compose = must(await rail(page).getByRole('button', { name: /new request/ }).boundingBox(), 'new request bounding box')
+  expect(compose.x + compose.width).toBeLessThanOrEqual(railBox.x + railBox.width)
 })
 
 test('a tall gate question never pushes the panes over each other', async ({ page }) => {

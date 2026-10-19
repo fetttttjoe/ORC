@@ -1,11 +1,11 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { AUTHOR_SOURCE, ChatKind, Door, EVENT_KIND, MEMORY_ACCESS, MessageRole, NO_CHAT, ScopeType, type EventInput } from '@orc/contracts'
+import { AUTHOR_SOURCE, ChatKind, Door, EVENT_KIND, KnowledgeHealth as KnowledgeHealthSchema, KnowledgeHealthState, MessageRole, NO_CHAT, ScopeType, type EventInput, type KnowledgeHealth } from '@orc/contracts'
 import { must } from '@orc/contracts/fixtures'
-import { Kernel, openStorage } from '@orc/kernel'
+import { Kernel, openStorage, type EventLog } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, waitFor, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { MockLanguageModelV4 } from 'ai/test'
-import { noteNodeId, type OrcActions } from '@orc/ui-core'
+import type { OrcActions } from '@orc/ui-core'
 import { CopilotFrameType, CopilotPart, Envelope, LogRows, VIEW, ViewEnvelope, viewPath } from '@orc/ui-core/wire'
 import { appendCopilotExchange } from './copilot-journal'
 import { startGraphUi } from './server'
@@ -38,20 +38,17 @@ afterAll(async () => {
 const CLI = NO_CHAT(Door.cli)
 const AGENT = NO_CHAT(Door.supervisor)
 
-const noteEvent = (id: string): EventInput => ({
-  ...CLI,
-  taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-  payload: { note: { id, title: id }, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
-})
+// a graph-visible append: one task_created, whose seq is the log's new tip
+async function appendTask(storage: { events: EventLog }, title: string): Promise<{ id: string; seq: number }> {
+  const { id } = await new Kernel(storage.events).createTask({ workspaceId: TEST_WORKSPACE_ID, title, spec: '' }, CLI)
+  return { id, seq: (await storage.events.all()).at(-1)?.seq ?? 0 }
+}
 
 // Asserted subsets of the SSE stream contract (ui-core StreamEnvelope) — runtime-parsed
 // because the test reads raw frames; shapes are named here, never cast at a call site.
 const NodeRefView = z.object({ id: z.string() })
 const AddNodesPatch = z.object({ addNodes: z.array(NodeRefView) })
-const WriteSummary = z.object({ kind: z.string(), noteRef: z.string() })
-const WriteEnvelope = z.object({ patch: AddNodesPatch, summary: WriteSummary })
-const HeatNodeView = z.object({ id: z.string(), heat: z.number().optional() })
-const HeatEnvelope = z.object({ patch: z.object({ updateNodes: z.array(HeatNodeView) }), summary: z.object({ line: z.string() }) })
+const LiveEnvelope = z.object({ patch: AddNodesPatch, summary: z.object({ kind: z.string() }) })
 const CatchUpEnvelope = z.object({ patch: AddNodesPatch })
 // the pane's feed row = ui-core's summary plus the failure this adapter lifts off the raw event
 const FailureEnvelope = z.object({
@@ -92,7 +89,6 @@ function stubActions(over: Partial<OrcActions>): OrcActions {
     newTask: unsupported('newTask'), propose: unsupported('propose'), edit: unsupported('edit'),
     approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
     retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
-    writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
     recordDecision: unsupported('recordDecision'), listDecisions: unsupported('listDecisions'), readDecision: unsupported('readDecision'),
     renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
     listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
@@ -193,32 +189,18 @@ describe('graph-ui web adapter', () => {
 
     // live: open at the current seq, then append — the envelope must carry patch AND summary
     const live = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${g.seq}`)
-    const appended = await storage.events.append(noteEvent('live-note'))
-    const liveMsg = await readSse(live, m => m.data.includes('live-note'))
+    const appended = await appendTask(storage, 'live-task')
+    const liveMsg = await readSse(live, m => m.data.includes('live-task'))
     expect(liveMsg?.id).toBe(appended.seq)
-    const env = WriteEnvelope.parse(JSON.parse(must(liveMsg, 'live envelope').data))
-    expect(env.patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
-    expect(env.summary.kind).toBe(EVENT_KIND.memory_written)
-    expect(env.summary.noteRef).toBe(noteNodeId('project', 'live-note'))
+    const env = LiveEnvelope.parse(JSON.parse(must(liveMsg, 'live envelope').data))
+    expect(env.patch.addNodes.map(n => n.id)).toEqual([appended.id])
+    expect(env.summary.kind).toBe(EVENT_KIND.task_created)
 
-    // a memory access is NOT graph-invisible since activation heat: the touched note re-patches
-    // with heat > 0 (the "graph re-weights from use" contract), and the summary still streams
-    const accessed = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${appended.seq}`)
-    await storage.events.append({
-      ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_accessed,
-      payload: { id: 'live-note', scope: 'project', mode: MEMORY_ACCESS.read, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
-    })
-    const heated = await readSse(accessed, m => m.data.includes('memory_accessed'))
-    const heatedEnv = HeatEnvelope.parse(JSON.parse(must(heated, 'heated envelope').data))
-    const heatedNote = heatedEnv.patch.updateNodes.find(n => n.id === noteNodeId('project', 'live-note'))
-    expect(heatedNote?.heat).toBeGreaterThan(0)
-    expect(heatedEnv.summary.line).toContain('read')
-
-    // resume: a NEW stream with the OLD fromSeq gets the note in its catch-up patch
+    // resume: a NEW stream with the OLD fromSeq gets the task in its catch-up patch
     const resumed = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${g.seq}`)
-    const catchUp = await readSse(resumed, m => m.data.includes('live-note'))
+    const catchUp = await readSse(resumed, m => m.data.includes('live-task'))
     expect(catchUp).not.toBeNull()
-    expect(CatchUpEnvelope.parse(JSON.parse(must(catchUp, 'catch-up envelope').data)).patch.addNodes.map(n => n.id)).toEqual([noteNodeId('project', 'live-note')])
+    expect(CatchUpEnvelope.parse(JSON.parse(must(catchUp, 'catch-up envelope').data)).patch.addNodes.map(n => n.id)).toEqual([appended.id])
 
     await ui.stop(); await storage.close()
   })
@@ -392,20 +374,20 @@ describe('graph-ui web adapter', () => {
       payload: { topic: 'plan-gate', question: 'approve this plan?' },
     })
     // a graph-visible event too, so the catch-up patch is non-empty and a catch-up frame exists
-    const noted = await storage.events.append(noteEvent('catch-up-note'))
+    const tip = await appendTask(storage, 'catch-up-task')
     // the session absorbs appends over LISTEN/NOTIFY — attach only once it is at the tip, or the
     // events arrive live and this tests the wrong path
     for (let i = 0; i < 40; i++) {
       const g = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
-      if (g.seq >= noted.seq) break
+      if (g.seq >= tip.seq) break
       await Bun.sleep(50)
     }
 
     const stream = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${before.seq}`)
     const frames: Array<{ id: number; data: string }> = []
-    const catchUp = await readSse(stream, m => m.data.includes('catch-up-note'), m => frames.push(m))
+    const catchUp = await readSse(stream, m => m.data.includes('catch-up-task'), m => frames.push(m))
     expect(catchUp).not.toBeNull()
-    expect(must(catchUp, 'catch-up frame').id).toBe(noted.seq)
+    expect(must(catchUp, 'catch-up frame').id).toBe(tip.seq)
     const env = Envelope.parse(JSON.parse(must(catchUp, 'catch-up frame').data))
     expect(env.operator?.openQuestions.map(q => q.taskId)).toEqual([taskId])
     // and nothing id-less carried it first, where the client could have discarded it
@@ -423,7 +405,7 @@ describe('graph-ui web adapter', () => {
     const other = crypto.randomUUID()
     const foreign = await openStorage(url, { projectId: other })
     openStores.push(foreign)
-    await foreign.events.append(noteEvent('foreign-born'))
+    await foreign.events.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.project_identified, payload: { name: 'foreign-born', dir: '/foreign' } })
 
     // one reader pass: collect every frame until the growth frame lands
     const frames: Array<{ id: number; data: string }> = []
@@ -481,6 +463,21 @@ describe('graph-ui web adapter', () => {
     })
     expect(blocked.status).toBe(501)
     await ro.stop()
+  })
+
+  it('/api/health answers the probe, null without one, and unavailable with the reason when the probe throws', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const HealthView = z.object({ knowledge: KnowledgeHealthSchema.nullable() })
+    const healthOf = async (health?: () => Promise<{ knowledge: KnowledgeHealth }>) => {
+      const ui = startGraphUi({ url: db.url, port: 0, ...(health && { health }) })
+      openServers.push(ui)
+      try { return HealthView.parse(await (await fetch(`http://127.0.0.1:${ui.port}/api/health`)).json()) } finally { await ui.stop() }
+    }
+    expect(await healthOf(async () => ({ knowledge: { state: KnowledgeHealthState.ok, claims: 4, suspect: 1 } })))
+      .toEqual({ knowledge: { state: KnowledgeHealthState.ok, claims: 4, suspect: 1 } })
+    expect(await healthOf()).toEqual({ knowledge: null })
+    expect(await healthOf(async () => { throw new Error('no checkout') })).toEqual({ knowledge: { state: KnowledgeHealthState.unavailable, reason: 'no checkout' } })
   })
 
   // A click in the inspector comes from no copilot conversation, so /api/act stamps NO_CHAT — the

@@ -15,8 +15,8 @@
   },
   "devDependencies": {
     "@orc/executor-api-loop": "workspace:*",
+    "@orc/knowledge-core": "workspace:*",
     "@orc/mcp-client": "workspace:*",
-    "@orc/memory": "workspace:*",
     "@orc/vault-projector": "workspace:*",
     "@types/pg": "^8.20.0"
   }

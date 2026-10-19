@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { ClaimClass } from './claim'
 import { EVENT_KIND } from './event-kinds'
 import { PAYLOAD_SCHEMAS } from './events'
 import { errorMessage } from './guards'
 import {
-  DeliveryMode, KNOWLEDGE_DEFAULTS, KNOWLEDGE_ID_RE, KNOWLEDGE_LIMITS, KnowledgeAnchor, KnowledgeConfig, KnowledgeDraft, KnowledgePatch,
+  ClaimClass, DeliveryMode, KNOWLEDGE_DEFAULTS, KNOWLEDGE_ID_RE, KNOWLEDGE_LIMITS, KnowledgeAnchor, KnowledgeConfig, KnowledgeDraft, KnowledgePatch,
   knowledgeIdFrom, newKnowledgeId,
 } from './knowledge'
 
@@ -54,7 +53,7 @@ describe('KnowledgeAnchor', () => {
   it('normalises the path and defaults the symbol to null', () => {
     expect(KnowledgeAnchor.parse({ path: './src\\a.ts' })).toEqual({ path: 'src/a.ts', symbol: null })
   })
-  it.each([['/etc/passwd'], ['../x.ts'], ['.'], ['src/a b.ts'], ['src/a#b.ts'], ['src/{a}.ts'], ['src/@a.ts']])(
+  it.each([['/etc/passwd'], ['C:\\secret.txt'], ['../x.ts'], ['a/../x.ts'], ['a\0b'], ['.'], ['src/a b.ts'], ['src/a#b.ts'], ['src/{a}.ts'], ['src/@a.ts']])(
     'refuses the path %p', path => {
       expect(KnowledgeAnchor.safeParse({ path }).success).toBe(false)
     })

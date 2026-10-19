@@ -1,57 +1,12 @@
 import { z } from 'zod'
-// The health vocabulary every surface reports through — CLI status line, /api/health, the MCP
-// door's project_status, and the browser header. Zero imports so the browser bundle can take it
-// without pulling the memory domain (and node:crypto with it).
 
-// The tuple is the definition and the map is derived from it, so a state is added in ONE place and
-// every consumer — including the browser's zod schemas, which parse the wire — follows. Spelled as
-// a second literal list in the web app, adding `client` meant editing two files and svelte-check
-// caught only the one it happened to compare.
-export const MEMORY_HEALTH_STATES = ['ok', 'catching_up', 'unreachable'] as const
-export const MEMORY_HEALTH = { ok: 'ok', catchingUp: 'catching_up', unreachable: 'unreachable' } as const
-export type MemoryHealthState = (typeof MEMORY_HEALTH)[keyof typeof MEMORY_HEALTH]
-
-export interface MemoryHealth {
-  state: MemoryHealthState
-  pending: number // knowledge events not yet applied to the read model
-  reason?: string
-  // How far the graph has fallen behind the working tree. `pending` measures the read model
-  // catching up with the LOG — a lag orc creates and fixes by itself. This measures the corpus
-  // catching up with the CODE, which orc cannot fix by itself: when the repo moves without going
-  // through orc (another editor, a merge, a refactor landed elsewhere) old claims stay. Absent when
-  // it could not be measured (no repo, no checkable notes) — never a fabricated zero.
-  drift?: { checkable: number; drifted: number; ratio: number }
-  // WHAT it is doing right now, when it is doing something slow. `pending` only measures the event
-  // replay; the stages after it — re-linking every note's edges, and re-partitioning the whole claim
-  // corpus through the embedder — run with pending already at 0, so a boot spent minutes in ollama
-  // with nothing on screen to say so. Absent when idle: a permanent label would stop meaning work.
-  //
-  // `progress` is carried by the REPLAYING stage alone, and it is not decoration: a reader shown
-  // only "replaying (40s so far)" has lost the one number that says whether it is moving. The other
-  // two stages have no countable unit — they are one whole-corpus pass each — so they omit it
-  // rather than fake a denominator.
-  stage?: { name: MemoryStageName; sinceMs: number; progress?: StageProgress }
-}
-
-export interface StageProgress { applied: number; total: number }
-
-// The slow derived stages, named. Both run after the replay and neither is reflected in `pending`.
-// crosses a process boundary (projector publishes, another process reads), so it is parsed, never hand-checked
-export enum MemoryStageName {
-  replaying = 'replaying',   // draining knowledge events into the read model
-  linking = 'linking',       // re-RELATEing every note's out-edges (Surreal I/O)
-  clustering = 'clustering', // re-partitioning the claim corpus through the embedder (ollama)
-}
-
-/** the published row, parsed rather than trusted — an unrecognised stage is simply absent */
-export const MemoryStage = z.object({
-  name: z.enum(MemoryStageName),
-  startedAt: z.number(),
-  pid: z.number(),
-  // Both halves or neither: a lone `applied` renders as "240/" and a lone `total` says nothing about
-  // movement, so the pair is one field. Optional because only `replaying` counts anything.
-  progress: z.object({ applied: z.number(), total: z.number() }).optional(),
-})
+// The health vocabulary every surface reports through, zod-only so the browser bundle can take it.
+export enum KnowledgeHealthState { ok = 'ok', unavailable = 'unavailable' }
+export const KnowledgeHealth = z.discriminatedUnion('state', [
+  z.object({ state: z.literal(KnowledgeHealthState.ok), claims: z.number().int().nonnegative(), suspect: z.number().int().nonnegative() }),
+  z.object({ state: z.literal(KnowledgeHealthState.unavailable), reason: z.string() }),
+])
+export type KnowledgeHealth = z.infer<typeof KnowledgeHealth>
 
 // Whether anything can DRIVE a run right now — the question every silent project raises first.
 // Derived from the supervisor heartbeat row plus the pid file the serve process writes only once

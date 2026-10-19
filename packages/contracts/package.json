@@ -10,7 +10,6 @@
     "./check-commands": "./src/check-commands.ts",
     "./guards": "./src/guards.ts",
     "./feedback-key": "./src/feedback-key.ts",
-    "./memory": "./src/memory.ts",
     "./execution": "./src/execution.ts",
     "./approval-answer": "./src/approval-answer.ts",
     "./plan": "./src/plan.ts",

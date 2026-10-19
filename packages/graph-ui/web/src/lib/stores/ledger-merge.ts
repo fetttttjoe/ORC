@@ -8,7 +8,7 @@ import type { LogRow } from '$lib/api/types'
  * collapse into the working line, except a failed one, which is never noise. Without this, paging
  * backward rendered what the live feed suppresses — observed 2026-08-03: a 150-row page was mostly
  * tool_call/operation_* rows, burying the lifecycle rows the ledger is read by. The ticker set is
- * a parameter so this file keeps zero runtime imports (the cluster.ts shape).
+ * a parameter so this file keeps zero runtime imports.
  */
 export function dropTicker(rows: readonly LogRow[], ticker: ReadonlySet<string>): LogRow[] {
   return rows.filter(r => !ticker.has(r.kind) || Boolean(r.failure))

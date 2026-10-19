@@ -10,9 +10,9 @@ describe('formatLine', () => {
   it('writes id, anchors in order, sorted tags, sources in order, then the decision', () => {
     expect(formatLine(claim({
       id: 'k7f3a2x9', text: 'The store is the only writer.',
-      anchors: [{ path: 'plugins/memory/src/store.ts', symbol: 'createMemoryStore' }, { path: 'docs', symbol: null }],
+      anchors: [{ path: 'plugins/memory/src/store.ts', symbol: 'createEventStore' }, { path: 'docs', symbol: null }],
       tags: ['zeta', 'events'], sources: ['https://example.com/a#b'], decision: 'merge-base-from-log',
-    }))).toBe('- The store is the only writer. {k7f3a2x9 @plugins/memory/src/store.ts#createMemoryStore @docs #events #zeta <https://example.com/a#b> adr:merge-base-from-log}')
+    }))).toBe('- The store is the only writer. {k7f3a2x9 @plugins/memory/src/store.ts#createEventStore @docs #events #zeta <https://example.com/a#b> adr:merge-base-from-log}')
   })
 })
 

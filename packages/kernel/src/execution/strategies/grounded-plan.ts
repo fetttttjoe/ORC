@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { COMMIT_STEP_ID, EVENT_KIND, MASTERPLAN_NOTE_ID, PAYLOAD_SCHEMAS, PlanNote, PlanNoteToolName, ROLE_SKILL, STEP_ID, STEP_ROLE, STRATEGY, VERIFY_STEP_ID, isApprovalAnswer, type ChildPlanDraft, type EventRecord, type TaskNode } from '@orc/contracts'
+import { COMMIT_STEP_ID, EVENT_KIND, MASTERPLAN_NOTE_ID, PAYLOAD_SCHEMAS, PlanNote, PlanNoteToolName, ROLE_SKILL, STEP_ID, STEP_ROLE, STRATEGY, TaskType, VERIFY_STEP_ID, isApprovalAnswer, type ChildPlanDraft, type EventRecord, type TaskNode } from '@orc/contracts'
 import { withFinishStep } from '../../finish-step'
 
 // the grounded plan step's role, stamped by createGroundedTask
@@ -9,8 +9,6 @@ export const PLAN_STEP_ROLE = STEP_ROLE.auditor
 // the check that it did cannot drift apart.
 export const PLAN_STEP_ID = STEP_ID.plan
 
-export const GROUNDED_TASK_TYPE = 'grounded'
-
 // the line a frozen step's instructions and the split's spec carry the plan's rationale on
 export const WHY_PREFIX = 'Why: '
 
@@ -19,7 +17,7 @@ export const WHY_PREFIX = 'Why: '
 // so the generic conversational-feedback path (Kernel.replyFeedback, which runs for every task
 // type) asks this strategy the question instead of re-deriving its step/task shape inline.
 export function planApprovalStamp(task: TaskNode, event: EventRecord, text: string): boolean {
-  return task.type === GROUNDED_TASK_TYPE && event.stepId === PLAN_STEP_ID && isApprovalAnswer(text)
+  return task.type === TaskType.grounded && event.stepId === PLAN_STEP_ID && isApprovalAnswer(text)
 }
 
 // A grounded plan step's whole job is to PRODUCE a plan: a decomposition the human approved, which
@@ -50,8 +48,7 @@ export function groundedPlanOmission(events: EventRecord[], stepId: string, runT
       + `then call ${PlanNoteToolName.finalize}. Doing the work yourself instead of decomposing it defeats the grounded-plan strategy.`
 }
 
-// The grounded analyze step's role (agentAnalyzer.analysisStep stamps it; runtime maps it → the
-// scout memory tier). report_coverage is only meaningful for THIS step, so its gate reads this one
+// The grounded analyze step's role (agentAnalyzer.analysisStep stamps it). report_coverage is only meaningful for THIS step, so its gate reads this one
 // source rather than a scattered 'scout' literal.
 export const ANALYZE_STEP_ROLE = STEP_ROLE.scout
 

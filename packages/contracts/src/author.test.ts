@@ -18,11 +18,7 @@ describe('composeAuthor', () => {
     expect(composeAuthor(authorFixture({ source: AUTHOR_SOURCE.human }))).toBe('human')
     expect(composeAuthor(authorFixture({ source: AUTHOR_SOURCE.cli }))).toBe('cli')
   })
-  // A door with nothing to compose from renders as ITSELF. The old `|| 'agent'` fallthrough made a
-  // bare `{ source: 'mcp', workspaceId }` — exactly what cwdAuthor builds for the MCP door, which
-  // has no executor/model/role — render as 'agent', and deriveNoteProvenance stamps that into
-  // createdBy, which is STICKY across rewrites: every decision recorded over MCP would have read as
-  // an agent's forever.
+  // A door with nothing to compose from renders as ITSELF, never as 'agent'.
   it('a bare door composes to its own source, never to agent; a pipeline still composes', () => {
     expect(composeAuthor(authorFixture({ source: AUTHOR_SOURCE.mcp }))).toBe('mcp')
     expect(composeAuthor(authorFixture({ source: AUTHOR_SOURCE.agent }))).toBe('agent')

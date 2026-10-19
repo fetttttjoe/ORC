@@ -1,49 +1,33 @@
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { ApprovalPolicy, AUTHOR_SOURCE, CHECKS_STEP_ID, Confidence, Door, EVENT_KIND, NO_CHAT, MEMORY_ACCESS, MemoryAccessedPayload, MemoryDeletedPayload, MemoryWrittenPayload, NOTE_TIER, OperationKind, ROLE_SKILL, RunOutcome, TASK_STATUS, WORKSPACE_KIND, claimId, type ExecutionPort, type MemoryAuthor, type OperationSpec, type TaskNode, type TaskStatus, LINK_KIND } from '@orc/contracts'
-import { claimFixture, must } from '@orc/contracts/fixtures'
-import { loadConfig, requireProject, type EventLog, type ProjectConfig } from '@orc/kernel'
+import { ApprovalPolicy, CHECKS_STEP_ID, Confidence, Door, EVENT_KIND, NO_CHAT, OperationKind, ROLE_SKILL, RunOutcome, TASK_STATUS, TaskType, WORKSPACE_KIND, type ExecutionPort, type OperationSpec, type TaskNode, type TaskStatus } from '@orc/contracts'
+import { must } from '@orc/contracts/fixtures'
+import { loadConfig, requireProject, type EventLog } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID, testOrcConfig } from '@orc/kernel/test-helpers'
 import { singleStepDraft } from './plan-template'
 import { buildProgram, openKernel, runInit } from './main'
 import { buildOrcActions } from './actions'
-import { withMemory } from './memory-open'
 import { CommandFailure } from './exit'
-import { cli, dropSurrealDb, testSurrealDbName } from './test-helpers'
+import { cli } from './test-helpers'
 import { watchSubtree } from './watch'
-import { buildPlugins } from './runtime'
 import { archivedRefusal } from './workspace-ops'
 
-// memory_written / memory_deleted payloads parsed through their owning schemas at the read
-// boundary, the same way main.ts's claims fold reads them.
-const notePayloadId = (payload: unknown): string => MemoryWrittenPayload.parse(payload).note.id
-// Read the kind off the LOG rather than through `memory cat`, which would record a memory_accessed
-// event and throw off the access-count assertions this same test makes.
-const notePayloadKind = (payload: unknown): string | undefined => {
-  const note = MemoryWrittenPayload.parse(payload).note
-  return note.tier === NOTE_TIER.semantic ? note.kind : undefined
-}
-const deletedAuthorTaskId = (payload: unknown): string | null | undefined =>
-  MemoryDeletedPayload.parse(payload).author.taskId
-
 const dbs: Array<{ drop: () => Promise<void> }> = []
-const surrealConfigs: ProjectConfig[] = []
 // Process-scoped resources (a real plugin host, an MCP hub, an event-log pool) registered the
 // moment they are created and drained LIFO. A bare `await host.shutdown()` as the last statement
 // of an it() is SKIPPED when an assertion above it throws, which leaks the host into every later
 // test file in the process — that is what turned one failed assertion on this branch into a
-// 22-failure mystery, and it is why the db.drop() below got skipped too. Same idiom as
-// kernel/src/execution/memory-access.integration.test.ts.
+// 22-failure mystery, and it is why the db.drop() below got skipped too.
 const cleanup: Array<() => Promise<void> | void> = []
-// Teardown drops one Postgres DB per makeCli/openKernel (14+ here) plus each throwaway Surreal db.
+// Teardown drops one Postgres DB per makeCli/openKernel (14+ here).
 // Each pg drop runs its handle's registered closers first (createTestDb.onClose) and then DROPs on
 // its own admin connection; serial drops blew bun's default 5s hook budget under a contended pg
 // (same fix as kernel.test.ts) — the dbs are distinct, so drop them concurrently.
 afterAll(async () => {
   for (const c of cleanup.reverse()) await c()
-  await Promise.all([...dbs.map(d => d.drop()), ...surrealConfigs.map(c => dropSurrealDb(c))])
+  await Promise.all(dbs.map(d => d.drop()))
 }, 30_000)
 
 // these tests drive the CLI door; SUPERVISOR is the half they fake (what a RUN appends)
@@ -342,7 +326,7 @@ describe('orc CLI', () => {
   it('tasks prints an orphaned task under a loud heading, never hidden', async () => {
     const { run, storage } = await makeCli()
     const orphan: TaskNode = {
-      id: 'orphan-1', parentId: null, workspaceId: 'workspace-the-fold-never-saw', type: 'generic',
+      id: 'orphan-1', parentId: null, workspaceId: 'workspace-the-fold-never-saw', type: TaskType.generic,
       title: 'ghost task', spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null,
       depth: 0, createdAt: '2026-09-14T00:00:00.000Z',
     }
@@ -558,11 +542,13 @@ describe('orc CLI', () => {
     expect(sent).toEqual([{ id: runToken, message: 'use argon2', topic: 'feedback:auth-1' }])
   })
 
-  // memory commands need `needPlugin()` to resolve, so this injects a plugin the way
-  // plugin-commands.test.ts does — host/hub are untouched stubs, config/log are real.
-  // config.projectDbName is a per-test throwaway SurrealDB db (dropped in afterAll below),
-  // so this test is isolated from the shared `orc/memory` db and from any other test —
-  // `rebuild` is safe to call since it only ever clears this test's own db.
+  it('cancel stamps a live task cancelled and prints that it did', async () => {
+    const { run, kernel } = await makeCli()
+    const taskId = must((await run('new', 'stop me', '--workspace', TEST_WORKSPACE_ID))[0], 'task id')
+    expect(await run('cancel', taskId)).toEqual(['cancelled'])
+    expect((await kernel.getTask(taskId))?.status).toBe(TASK_STATUS.cancelled)
+  })
+
   // A DBOS-cancelled workflow's getResult() rejects. Every stub port in this file has
   // `wait: async () => outcome`, so no test ever exercised the rejecting path — and `orc run`
   // only handled the resolve branch, printing a raw driver error and exit 1 for an advertised
@@ -885,463 +871,6 @@ describe('orc CLI', () => {
     expect(await watchSubtree(kernel, parent.id))
       .toEqual({ parked: true, taskId: child.childTaskId, question: 'may I overwrite it?' })
   }, 15_000)
-
-  it('memory add/rebuild/ls/search/cat/rm round-trip against an isolated throwaway SurrealDB db', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-cli-'))
-    const projectDbName = testSurrealDbName()
-    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
-    surrealConfigs.push(config)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
-    // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
-    // workspace by matching the process's directory, and refuses when nothing claims it
-    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
-    const { host, hub } = await buildPlugins(config) // real plugin wiring — no stub casts
-    cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
-    const { run } = cli(kernel, undefined, { host, hub, config, log })
-
-    const id = `cli-test-${Math.random().toString(36).slice(2, 10)}`
-    await run('memory', 'add', '--id', id, '--title', 'T', '--summary', 'S', '--body', 'B', '--tags', 'x')
-
-    // Primary isolated assertion: this test's own (per-test Postgres) log recorded the append —
-    // true independent of SurrealDB, which every other assertion below depends on.
-    const written = (await log.all()).find(e => e.kind === EVENT_KIND.memory_written)
-    expect(written).toBeDefined()
-    const writtenEvent = must(written, 'memory written event')
-    expect(notePayloadId(writtenEvent.payload)).toBe(id)
-
-    // Isolated db — safe to clear-and-replay from this test's own event log only.
-    await run('memory', 'rebuild')
-
-    expect((await run('memory', 'ls')).join('\n')).toContain(id)
-
-    const note = JSON.parse((await run('memory', 'cat', id)).join('\n'))
-    expect(note.id).toBe(id)
-    expect(note.title).toBe('T')
-    expect(note.summary).toBe('S')
-    expect(note.body).toBe('B')
-    // Unflagged notes still take the schema default — unchanged behaviour, pinned so --kind cannot
-    // accidentally become required.
-    expect(note.kind).toBe('fact')
-
-    // --kind is what makes a human-authored DECISION possible at all. Without it every note either
-    // human door produced landed as 'fact', so only an agent mid-step could mint a decision, and a
-    // human who disagreed with a recorded one had no way to correct it.
-    // Asserted off the LOG, not via `memory cat` — cat records an access, and the access-count
-    // assertions further down this test count exactly one.
-    const decisionId = `${id}-decision`
-    await run('memory', 'add', '--id', decisionId, '--title', 'A real decision', '--kind', 'decision')
-    const decisionWrite = (await log.all())
-      .filter(e => e.kind === EVENT_KIND.memory_written)
-      .find(e => notePayloadId(e.payload) === decisionId)
-    expect(decisionWrite).toBeDefined()
-    const decisionWriteEvent = must(decisionWrite, 'decision write event')
-    expect(notePayloadKind(decisionWriteEvent.payload)).toBe('decision')
-    // removed immediately: the end of this test asserts `ls` reads '_no notes_', so a note left
-    // behind here would fail an assertion that has nothing to do with kinds
-    await run('memory', 'rm', decisionId)
-
-    // An unknown kind is a friendly parse-time error naming the valid set, never a silent default
-    // to 'fact' — the discipline --tier and `neighbors --kinds` already apply. 'adr' is the exact
-    // near-miss this catches: it is a tag, never a kind.
-    await expect(run('memory', 'add', '--id', 'k1', '--title', 'K', '--kind', 'adr')).rejects.toThrow(/unknown kind/)
-
-    expect((await run('memory', 'search', 'x')).join('\n')).toContain(id) // matches the 'x' tag
-
-    // `cat` is a read: it records one access, and `ls` surfaces the count so a human can see
-    // which knowledge is actually load-bearing. A miss records nothing — the note wasn't read.
-    const accesses = () => log.all().then(es => es.filter(e => e.kind === EVENT_KIND.memory_accessed))
-    expect(await accesses()).toHaveLength(1)
-    expect((await run('memory', 'ls')).join('\n')).toContain('hits 1')
-
-    await expect(run('memory', 'cat', 'no-such-note-here')).rejects.toThrow()
-    expect(await accesses()).toHaveLength(1)
-
-    await run('memory', 'rm', id) // rm's action already runs catchUp() itself
-    await expect(run('memory', 'cat', id)).rejects.toThrow(`no note '${id}'`)
-    expect(await accesses()).toHaveLength(1) // a deleted note is a miss, not a read
-
-    // Empty results print a sentinel, the way `tasks` does. Zero bytes reads as "no such note"
-    // when the honest answer is "the read model returned nothing" — the agent-facing tools
-    // already say exactly that, so the human must not get less.
-    expect((await run('memory', 'ls')).join('\n').trim()).toBe('_no notes_')
-    expect((await run('memory', 'search', 'definitely-not-present-anywhere')).join('\n').trim()).toBe('_no notes_')
-
-    // --- neighbors traversal (M4b) -------------------------------------------------------------
-    // memory add has no --links flag, so seed a linked graph the way the cancel-sweep test seeds
-    // notes: append memory_written directly, then rebuild the read model from this test's own log.
-    // Chain: seed --depends_on--> hop1 --relates_to--> hop2, plus seed --refines--> other.
-    const seedNote = (nid: string, links: Array<{ id: string; kind: string }> = []) =>
-      log.append({
-        ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-        payload: { note: { id: nid, title: nid, links }, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
-      })
-    await seedNote('nb-seed', [{ id: 'nb-hop1', kind: LINK_KIND.depends_on }, { id: 'nb-other', kind: LINK_KIND.refines }])
-    await seedNote('nb-hop1', [{ id: 'nb-hop2', kind: LINK_KIND.relates_to }])
-    await seedNote('nb-hop2')
-    await seedNote('nb-other')
-    await seedNote('nb-isolated') // no links either way
-    await run('memory', 'rebuild')
-
-    const accessCount = () => log.all().then(es => es.filter(e => e.kind === EVENT_KIND.memory_accessed).length)
-
-    // 1. bare neighbors prints the linked neighbor with its via/depth/score/title row.
-    const beforeHit = await accessCount()
-    const nbLines = await run('memory', 'neighbors', 'nb-seed')
-    const nbOut = nbLines.join('\n')
-    expect(nbOut).toContain('nb-hop1')
-    expect(nbOut).toContain('nb-other')
-    // row shape: id\t<dir> via\tdepth\tscore(2dp)\ttitle  (dir: → seed→n, ← n→seed)
-    const hop1Row = must(nbLines.find(l => l.startsWith('nb-hop1\t')), 'hop1 row in neighbors output')
-    expect(hop1Row).toBeDefined()
-    const cols = hop1Row.split('\t')
-    expect(cols[1]).toMatch(/^[→←] depends_on$/) // direction-tagged link kind
-    expect(cols[2]).toBe('1')               // depth (1 hop from the seed)
-    expect(cols[3]).toMatch(/^\d+\.\d{2}$/) // score, 2 decimals
-    expect(cols[4]).toMatch(/^act \d+\.\d\d$/) // activation column (2 decimals)
-    expect(cols[5]).toBe('nb-hop1')         // title
-
-    // Acceptance #3: a hit records exactly one memory_accessed(mode:neighbors) against the SEED.
-    const afterHit = await accessCount()
-    expect(afterHit).toBe(beforeHit + 1)
-    const accessed = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_accessed)
-    const lastAccessEvent = must(accessed.at(-1), 'last memory accessed event')
-    const lastAccess = MemoryAccessedPayload.parse(lastAccessEvent.payload)
-    expect(lastAccess.mode).toBe(MEMORY_ACCESS.neighbors)
-    expect(lastAccess.id).toBe('nb-seed')
-
-    // 2. --kinds depends_on narrows: nb-other (refines) is excluded, nb-hop1 (depends_on) stays.
-    const kindsOut = (await run('memory', 'neighbors', 'nb-seed', '--kinds', 'depends_on')).join('\n')
-    expect(kindsOut).toContain('nb-hop1')
-    expect(kindsOut).not.toContain('nb-other')
-
-    // an unknown kind is a friendly error, not a silent empty result (matches --strategy).
-    await expect(run('memory', 'neighbors', 'nb-seed', '--kinds', 'not-a-kind')).rejects.toThrow(/unknown --kinds/)
-
-    // 3. --depth 1 bounds traversal: the 2-hop nb-hop2 is absent at depth 1, present by default (2).
-    expect((await run('memory', 'neighbors', 'nb-seed', '--depth', '1')).join('\n')).not.toContain('nb-hop2')
-    expect((await run('memory', 'neighbors', 'nb-seed', '--depth', '2')).join('\n')).toContain('nb-hop2')
-
-    // depth < 1 is rejected at parse time (store default is 2, rank needs a positive hop count).
-    await expect(run('memory', 'neighbors', 'nb-seed', '--depth', '0')).rejects.toThrow(/positive integer/)
-
-    // 4. --scope selects: the seeded notes live in the default 'project' scope; an explicit
-    // --scope project still finds them.
-    expect((await run('memory', 'neighbors', 'nb-seed', '--scope', 'project')).join('\n')).toContain('nb-hop1')
-
-    // 6. empty case: an isolated seed prints the sentinel and records NO new access.
-    const beforeMiss = await accessCount()
-    expect((await run('memory', 'neighbors', 'nb-isolated')).join('\n').trim()).toBe('_no neighbors_')
-    expect(await accessCount()).toBe(beforeMiss) // a miss records nothing
-
-    // quick capture: same plugin wiring, zero ceremony, slugged-title id
-    expect((await run('note', 'Quick Capture Works!', '--summary', 'from the test')).join('\n')).toContain("noted 'quick-capture-works'")
-    expect((await run('memory', 'cat', 'quick-capture-works')).join('\n')).toContain('from the test')
-    // an explicit budget like every other slow test here: this one drives a real plugin host, a
-    // real Surreal db and ~20 CLI invocations, and bun's 5s default puts it one contended
-    // SurrealDB away from a timeout that reads as an assertion failure
-  }, 60_000)
-
-  // Every one-shot memory command routes through withMemory, so this finally IS the guarantee
-  // that a body that throws (a Surreal query mid-flight, a missing note, a failed distill) does
-  // not leak the connection for the life of the process — seven commands used to close only
-  // after a successful body.
-  it('withMemory closes the Surreal connection even when the body throws', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-withmem-'))
-    const projectDbName = testSurrealDbName()
-    // keyword-only, same reason as the claims tests: nothing here needs an embedder
-    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
-    surrealConfigs.push(config)
-    const { log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
-    cleanup.push(() => log.close())
-
-    let leaked: Parameters<Parameters<typeof withMemory>[1]>[0] | undefined
-    await expect(withMemory({ log, config }, async memory => {
-      leaked = memory
-      await memory.store.list() // the connection works while the body runs
-      throw new Error('body boom')
-    })).rejects.toThrow('body boom')
-    // close ran: the same read now fails because the connection is gone. Without the finally,
-    // this list() succeeds — the leaked handle stays live, which is exactly the defect.
-    expect(leaked).toBeDefined()
-    const leakedMemory = must(leaked, 'leaked memory store')
-    await expect(leakedMemory.store.list()).rejects.toThrow()
-  }, 15_000)
-
-  // The other half of that bracket: the close must not be able to FAIL the command. Every door
-  // through here has ALREADY committed its event by the time the finally runs — `orc memory add`,
-  // `orc adr new`, the actions layer — so a close that throws (a dropped socket, a projector still
-  // draining) would exit non-zero for a write that is in the log, and the operator's retry would
-  // then meet a refusal for the very note they were told had failed.
-  it('withMemory warns about a failing close instead of failing the command', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-closefail-'))
-    const projectDbName = testSurrealDbName()
-    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
-    surrealConfigs.push(config)
-    const { log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
-    cleanup.push(() => log.close())
-    const warnings: string[] = []
-    spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warnings.push(a.join(' ')) })
-
-    const answer = await withMemory({ log, config }, async memory => {
-      // A healthy Surreal cannot be made to fail its close (measured: a second close resolves), so
-      // the failure is injected on the handle withMemory holds — after delegating to the REAL close,
-      // which keeps this test from leaking the connection it just opened.
-      const real = memory.close
-      memory.close = async () => { await real(); throw new Error('socket gone') }
-      return 'the body answered'
-    })
-    expect(answer).toBe('the body answered') // the body's value is returned, not lost to the close
-    expect(warnings.join('\n')).toContain('socket gone')
-  }, 15_000)
-
-  it('memory claims drains before it reads, and --history recovers a retired claim', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-claims-cli-'))
-    const projectDbName = testSurrealDbName()
-    // Keyword-only ON PURPOSE: `topics` is derived from claim EMBEDDINGS, so leaving the default
-    // ollama embedder wired would make the empty-inventory assertion below depend on whether a
-    // local Ollama happens to be running. The claims command itself never touches an embedder.
-    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
-    surrealConfigs.push(config)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
-    // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
-    // workspace by matching the process's directory, and refuses when nothing claims it
-    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
-    const { host, hub } = await buildPlugins(config)
-    cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
-    const { run } = cli(kernel, undefined, { host, hub, config, log })
-
-    // `memory add` has no claim flag, so state them the way the store's own payload does: the note
-    // carries the LIVE set and the EVENT carries the tombstone. Two writes, so the second retires
-    // what the first stated — the only shape from which --history has something to recover.
-    const noteId = 'claims-cli-note'
-    const liveText = 'the projector drains before every read'
-    const retiredText = 'the read model is the source of truth'
-    const write = (texts: string[], invalidates: string[] = []) => log.append({
-      ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: {
-        note: { id: noteId, title: 'claims', claims: texts.map(t => claimFixture(t)) },
-        author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI }, invalidates,
-      },
-    })
-    await write([retiredText])
-    await write([liveText], [claimId(retiredText)])
-
-    // REGRESSION: nothing has drained the projector yet, so the claim rows do not exist. The
-    // command only finds them if it catches up itself, the way every sibling read command does —
-    // and its empty case is a THROW, so the missing drain reads as "this note has no claims".
-    const drained = await run('memory', 'claims', noteId)
-    expect(drained.join('\n')).toContain(liveText)
-    expect(drained.join('\n')).not.toContain(retiredText) // retired: gone from the read model
-
-    // --history folds the LOG instead, which is the only surface a retired claim survives on
-    const history1 = await run('memory', 'claims', noteId, '--history')
-    expect(history1.join('\n')).toContain(liveText)
-    expect(history1.join('\n')).toContain(retiredText)
-    expect(history1.find(l => l.includes(retiredText))).toContain('RETIRED')
-
-    // Deleting the note ends its claims' stretches too — the projector drops their rows with it, so
-    // a fold that saw only memory_written would keep reporting the live one as live forever.
-    await log.append({
-      ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted,
-      payload: { id: noteId, scope: 'project', author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI } },
-    })
-    const history2 = await run('memory', 'claims', noteId, '--history')
-    expect(history2.find(l => l.includes(liveText))).toContain('RETIRED')
-
-    await expect(run('memory', 'claims', 'no-such-note-at-all')).rejects.toThrow(/no claims on/)
-
-    // No embedder → no claim vectors → no partition. The empty message must name the cause an
-    // operator upgrading onto claims actually hits (a corpus whose claims were all legacy-derived),
-    // not only the two it used to name.
-    await expect(run('memory', 'topics')).rejects.toThrow(/legacy rules\[\] decoder/)
-    // an unknown key is the store's own error, surfaced by the CLI rather than swallowed
-    await expect(run('memory', 'topics', 'deadbeef1234')).rejects.toThrow(/no topic/)
-
-    // `memory add --claim/--invalidate`: the flags are ADDITIVE like the tool they mirror — a later
-    // write states what to add and retire, and must not disturb the claims it did not name.
-    const cliNote = 'cli-authored-claims'
-    await run('memory', 'add', '--id', cliNote, '--title', 'CLI claims', '--claim', 'first from the cli', '--claim', 'second from the cli')
-    const claims1 = await run('memory', 'claims', cliNote)
-    const first = claims1.find(l => l.includes('first from the cli'))
-    const secondId = claims1.find(l => l.includes('second from the cli'))?.split(/\s+/)[0]
-    expect(first).toBeDefined()
-    expect(secondId).toMatch(/^[a-f0-9]{12}$/)
-
-    await run('memory', 'add', '--id', cliNote, '--title', 'CLI claims', '--claim', 'third from the cli', '--invalidate', secondId ?? '')
-    const live = (await run('memory', 'claims', cliNote)).join('\n')
-    expect(live).toContain('third from the cli')
-    expect(live).toContain('first from the cli')   // untouched by a write that never named it
-    expect(live).not.toContain('second from the cli') // retired by --invalidate
-    // and the retired one is still recoverable from the log, which is the only place it survives
-    const history3 = await run('memory', 'claims', cliNote, '--history')
-    expect(history3.find(l => l.includes('second from the cli'))).toContain('RETIRED')
-  }, 30_000)
-
-  it('memory claims --json emits the raw claim array for both the live and the --history form', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-claims-json-cli-'))
-    const projectDbName = testSurrealDbName()
-    // Keyword-only, same reason as the sibling claims test: nothing here needs an embedder, and
-    // leaving the default ollama one wired makes the test depend on whether a local Ollama runs.
-    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
-    surrealConfigs.push(config)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
-    // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
-    // workspace by matching the process's directory, and refuses when nothing claims it
-    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
-    const { host, hub } = await buildPlugins(config)
-    cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
-    const { run } = cli(kernel, undefined, { host, hub, config, log })
-
-    // Two writes, so the second retires what the first stated — the only shape in which the live
-    // form and the --history form return DIFFERENT arrays, which is what makes this test able to
-    // tell the two --json branches apart.
-    const noteId = 'claims-json-cli-note'
-    const liveText = 'json output is the raw domain value'
-    const retiredText = 'json output was wrapped in an envelope'
-    const write = (texts: string[], invalidates: string[] = []) => log.append({
-      ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: {
-        note: { id: noteId, title: 'claims json', claims: texts.map(t => claimFixture(t)) },
-        author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI }, invalidates,
-      },
-    })
-    await write([retiredText])
-    await write([liveText], [claimId(retiredText)])
-
-    // (a) live form: stdout is exactly one parseable JSON value — the raw Claim[], no envelope.
-    const live = JSON.parse((await run('memory', 'claims', noteId, '--json')).join('\n'))
-    expect(Array.isArray(live)).toBe(true)
-    expect(live.map((c: { text: string }) => c.text)).toEqual([liveText]) // retired one is not live
-    expect(live[0].id).toBe(claimId(liveText))
-    expect(typeof live[0].validFrom).toBe('string')
-
-    // (b) --history --json folds the LOG: the retired claim survives, carrying its tombstone.
-    const history = JSON.parse((await run('memory', 'claims', noteId, '--history', '--json')).join('\n'))
-    expect(history.map((c: { text: string }) => c.text).sort()).toEqual([liveText, retiredText].sort())
-    const retired = history.find((c: { text: string }) => c.text === retiredText)
-    expect(typeof retired.invalidatedAt).toBe('string') // RETIRED in the human form
-    expect(history.find((c: { text: string }) => c.text === liveText).invalidatedAt).toBeNull()
-
-    // (c) the human forms are UNCHANGED: tab-free `id  validFrom  text` rows, not JSON.
-    const humanLive = await run('memory', 'claims', noteId)
-    expect(humanLive.join('\n')).toContain(liveText)
-    expect(humanLive.join('\n').trim().startsWith('[')).toBe(false)
-    const humanHistory = await run('memory', 'claims', noteId, '--history')
-    expect(humanHistory.find(l => l.includes(retiredText))).toContain('RETIRED')
-    expect(humanHistory.join('\n').trim().startsWith('[')).toBe(false)
-
-    // (d) absence is DATA under --json (the settled `topics --json` rule): [] and exit 0, so a
-    // script reads an empty array instead of parsing a thrown diagnostic. The no-flag form keeps
-    // the throw that names the note and the command a person can act on.
-    expect(JSON.parse((await run('memory', 'claims', 'no-such-note-at-all', '--json')).join('\n'))).toEqual([])
-    expect(JSON.parse((await run('memory', 'claims', 'no-such-note-at-all', '--history', '--json')).join('\n'))).toEqual([])
-    await expect(run('memory', 'claims', 'no-such-note-at-all')).rejects.toThrow(/no claims on/)
-    await expect(run('memory', 'claims', 'no-such-note-at-all', '--history')).rejects.toThrow(/no claims in the log/)
-  }, 30_000)
-
-  it('memory topics --json emits raw JSON, keeps the human throws, and rejects an unknown key', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const dir = mkdtempSync(path.join(tmpdir(), 'orc-memory-topics-cli-'))
-    const projectDbName = testSurrealDbName()
-    // Keyword-only ON PURPOSE (same reason as the claims test): `topics` is derived from claim
-    // EMBEDDINGS, so leaving the default ollama embedder wired would make the empty-inventory
-    // assertions depend on whether a local Ollama happens to be running. With no embedder there
-    // are no claim vectors and thus no topics — the deterministic empty inventory this test needs.
-    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test', memoryEmbedModel: '' })
-    surrealConfigs.push(config)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
-    // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
-    // workspace by matching the process's directory, and refuses when nothing claims it
-    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
-    const { host, hub } = await buildPlugins(config)
-    cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
-    const { run } = cli(kernel, undefined, { host, hub, config, log })
-
-    // (a) --json on the EMPTY inventory is [] and exit 0, not a throw. A script wants absence as
-    // data; stdout must be exactly one parseable JSON value.
-    expect(JSON.parse((await run('memory', 'topics', '--json')).join('\n'))).toEqual([])
-
-    // (c) the human (no --json) form is UNCHANGED: the empty listing still throws the three-cause
-    // diagnostic, naming the legacy rules[] decoder cause an upgrading operator hits.
-    await expect(run('memory', 'topics')).rejects.toThrow(/legacy rules\[\] decoder/)
-
-    // (b) an unknown key still throws WITH --json — the store's own 'no topic' error, surfaced by
-    // the CLI rather than swallowed into an empty JSON document.
-    await expect(run('memory', 'topics', 'deadbeef1234', '--json')).rejects.toThrow(/no topic/)
-    // and without --json too, matching the sibling claims test
-    await expect(run('memory', 'topics', 'deadbeef1234')).rejects.toThrow(/no topic/)
-
-    // The per-topic --json path (a real key) would go through store.topicClaims and append exactly
-    // one memory_topic_accessed event. That assertion is UNREACHABLE from a CLI-level test: a
-    // non-empty topic inventory needs claim embeddings, and openMemory builds the embedder from
-    // config.memoryEmbedModel via buildEmbeddingProvider (ollama only) with no injection seam — so
-    // a real topicKey cannot be produced here without a live Ollama. That per-topic access-event
-    // assertion lives in plugins/memory, which constructs SurrealMemory directly. Asserted here:
-    // no topic access event is appended by any of the paths above (empty listing / unknown key).
-    const topicAccesses = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_topic_accessed)
-    expect(topicAccesses).toHaveLength(0)
-  }, 30_000)
-})
-
-describe('cancel-sweep wiring (real plugin, stub port)', () => {
-  it('cancel sweeps the task-owned orphan, keeps the adopted id, and stamps provenance', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const dir = mkdtempSync(path.join(tmpdir(), 'orc-cancel-sweep-'))
-    const projectDbName = testSurrealDbName()
-    const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'test' })
-    surrealConfigs.push(config)
-    const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
-    // the workspace must sit at THIS config's dir: every CLI memory write resolves its author's
-    // workspace by matching the process's directory, and refuses when nothing claims it
-    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
-    const { host, hub } = await buildPlugins(config)
-    // this describe never shut its host down at all — same leak, unconditional
-    cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
-    const stubPort: ExecutionPort = {
-      startRun: async () => { throw new Error('unused') },
-      retry: async () => { throw new Error('unused') },
-      cancelRun: async () => {},
-    }
-    const { run } = cli(kernel, async () => stubPort, { host, hub, config, log })
-
-    const taskId = must((await run('new', 'sweep wiring', '--workspace', TEST_WORKSPACE_ID))[0], 'task id')
-    const write = (id: string, author: MemoryAuthor) => log.append({
-      ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id, title: id }, author },
-    })
-    await write('wiring-orphan', { source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID, taskId, origin: SUPERVISOR })
-    await write('wiring-adopted', { source: AUTHOR_SOURCE.agent, workspaceId: TEST_WORKSPACE_ID, taskId, origin: SUPERVISOR })
-    await write('wiring-adopted', { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: CLI }) // re-written by a live writer -> adopted
-
-    const out = (await run('cancel', taskId)).join('\n')
-    expect(out).toContain('cancelled')
-    expect(out).toContain('swept wiring-orphan')
-    expect(out).not.toContain('swept wiring-adopted')
-    const deleted = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_deleted)
-    expect(deleted.map(e => e.payload.id)).toEqual(['wiring-orphan'])
-    const deletedEvent = must(deleted[0], 'first deleted event')
-    expect(deletedAuthorTaskId(deletedEvent.payload)).toBe(taskId)
-
-    // failure path: a sweep failure warns; the cancel itself still exits clean
-    const warns: string[] = []
-    const warnSpy = spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
-    const afterSpy = spyOn(log, 'after').mockImplementation(async () => { throw new Error('surreal down') })
-    expect((await run('cancel', taskId)).join('\n')).toContain('cancelled') // must not reject
-    expect(warns.join('\n')).toContain('sweep skipped: surreal down')
-    afterSpy.mockRestore(); warnSpy.mockRestore()
-  })
 })
 
 describe('destructive commands name their target', () => {

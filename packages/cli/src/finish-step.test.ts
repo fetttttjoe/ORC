@@ -9,19 +9,16 @@ import {
   RunOutcome,
 } from '@orc/contracts'
 import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
-import { dbosSend, openStorage, Kernel, type ProjectConfig } from '@orc/kernel'
+import { dbosSend, openStorage, Kernel } from '@orc/kernel'
 import { createTestDb, fakeProvider, seedTestWorkspace, sh, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE_ID, waitFor } from '@orc/kernel/test-helpers'
 import { buildPlugins, buildRuntime } from './runtime'
 import { seedShippedSkills } from './shipped-skills'
-import { dropSurrealDb, testSurrealDbName } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-const surrealBases: ProjectConfig[] = []
 const checkouts: string[] = []
 afterAll(async () => {
   for (const c of checkouts) rmSync(c, { recursive: true, force: true })
   for (const d of dbs) await d.drop()
-  await Promise.all(surrealBases.map(c => dropSurrealDb(c)))
 })
 
 // The finish step's own question and the decision it records, named once so the assertions below
@@ -86,7 +83,7 @@ const finishExecutor: AgentExecutor<unknown> = {
   },
 }
 
-// End to end over the REAL runtime (Postgres event log, SurrealDB read model, DBOS workflows): the
+// End to end over the REAL runtime (Postgres event log, DBOS workflows): the
 // kernel appends the finish step, the port hands that step the reconcile tools, the step's question
 // parks the run, `orc reply`'s kernel path resumes it, and the approved decision lands in the log
 // attributed to the step. Each half is unit-tested elsewhere; only this composition can show that
@@ -96,13 +93,11 @@ describe('the finish step, end to end', () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-finish-'))
-    const projectDbName = testSurrealDbName()
-    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName, knowledge: { plugin: DEFAULT_KNOWLEDGE_PLUGIN, options: {} } })
+    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), knowledge: { plugin: DEFAULT_KNOWLEDGE_PLUGIN, options: {} } })
     // Seeded the way `orc init` seeds a real project: the finish step declares ROLE_SKILL.finisher,
     // and a temp skills dir that nothing seeds fails the run at step init with "unknown skill
     // 'role-finisher'".
     seedShippedSkills(config.skillsDir)
-    surrealBases.push(config)
     const checkout = realpathSync(mkdtempSync(path.join(tmpdir(), 'orc-finish-checkout-')))
     checkouts.push(checkout)
     sh(checkout, 'init', '-q')

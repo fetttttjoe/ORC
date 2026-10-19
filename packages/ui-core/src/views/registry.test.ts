@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { EVENT_KIND, ScopeType, type EventRecord } from '@orc/contracts'
 import { authorFixture, eventFixture, must, taskFixture } from '@orc/contracts/fixtures'
 import { modelOf } from '../test-helpers'
-import { NODE_KIND, TOUCHABLE, VIEW } from '../wire'
+import { NODE_KIND, TOUCHABLE, TouchableName, VIEW, ViewName } from '../wire'
 import { readView, touchesOf, viewOf } from './registry'
 
 const events: EventRecord[] = [
@@ -79,20 +79,9 @@ describe('touchesOf', () => {
       ])
   })
 
-  // Corpus health answers here without being a view: its read probes SurrealDB and git, so it has
-  // no entry in WIRE and no `read` — only a staleness rule. A client that refetched it off the
-  // browser's own event-kind table is exactly the disagreement this registry removes.
-  const note = { note: { id: 'n', title: 'n', scope: 'project' }, author: authorFixture() }
-  it('names corpus health as stale after a write, though it is no view', () => {
-    const touched = touchesOf(eventFixture({ seq: 4, kind: EVENT_KIND.memory_written, taskId: null, payload: note }), model)
-    expect(touched).toContainEqual({ name: TOUCHABLE.health, params: {} })
-  })
-
-  // A read moves `hits`, never currency, and preloads arrive at agent-loop cadence — health's read
-  // is a whole-corpus git probe, so admitting this kind would put it on exactly that cadence.
-  it('a memory READ leaves corpus health alone', () => {
-    const read = eventFixture({ seq: 5, kind: EVENT_KIND.memory_accessed, taskId: null, payload: { id: 'n', scope: 'project', mode: 'read', author: note.author } })
-    expect(touchesOf(read, model).map(t => t.name)).not.toContain(TOUCHABLE.health)
+  it('names exactly the views as touchable, and nothing else', () => {
+    expect([...TouchableName.options].sort()).toEqual([...ViewName.options].sort())
+    expect(Object.keys(TOUCHABLE).sort()).toEqual(Object.keys(VIEW).sort())
   })
 })
 

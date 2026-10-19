@@ -1,8 +1,6 @@
-import { emptyMemoryFold, errorMessage, foldMemory, foldMemoryInto, noteKey, type EventRecord, type MemoryFold } from '@orc/contracts'
+import { errorMessage, type EventRecord } from '@orc/contracts'
 import { emptyFold, fold, foldInto, listProjectIds, openStorage, watchProjectIds, type FoldAcc, type ProjectIdsWatch, type Storage } from '@orc/kernel'
-// the project's display name / working directory live in memory notes — event-sourced,
-// rebuild-safe, no schema; ids + view filtering live in graph.ts
-import { PROJECT_DIR_NOTE_ID, PROJECT_NAME_NOTE_ID, buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
+import { buildGraph, diffGraphs, emptyPatch, type Graph, type GraphPatch } from './graph'
 import { summarizeEvent, type LogRow } from './summarize'
 import type { ReadModel } from './views/view'
 
@@ -22,14 +20,14 @@ export interface SessionSnapshot { seq: number; graph: Graph }
  *
  * It carries the same contract as ProjectSessions.model, with the callback's tick as the window:
  * CONSUME IT INSIDE THE CALLBACK, never keep it, never mutate it. The arrays and maps are the
- * session's own: the next event appends to `events`/`state`/`memory` in place and replaces `graph`
+ * session's own: the next event appends to `events`/`state` in place and replaces `graph`
  * wholesale (a fresh `buildGraph` result each fold) — either way, a held reference stops tracking,
  * so consume it inside the callback.
  */
 export interface SessionUpdate { seq: number; patch: GraphPatch; event: EventRecord | null; summary: LogRow | null; model: ReadModel }
 export type Unsubscribe = () => void
 
-// One chats-list entry: id always; name/dir resolve from the project's identity notes and are
+// One chats-list entry: id always; name/dir resolve from the project's identity event and are
 // null until that project's session has been opened (foreign, never-viewed projects).
 export interface ProjectEntry { id: string; name: string | null; dir: string | null }
 
@@ -74,7 +72,6 @@ interface Session {
   storage: Storage
   events: EventRecord[]
   acc: FoldAcc
-  mem: MemoryFold
   graph: Graph
   seq: number
   subscribers: Set<(u: SessionUpdate) => void>
@@ -84,25 +81,21 @@ interface Session {
 export function createProjectSessions(opts: {
   url: string
   cwdProject?: { id: string; name: string; dir?: string }
-  // feeds buildGraph heat — the graph server passes the project's memoryHalfLifeDays so heat
-  // and store ranking share one decay rate
-  halfLifeDays?: number
 }): ProjectSessions {
   const sessions = new Map<string, Promise<Session>>()
 
   // The session's own arrays under the narrow face a view reads — no copy, so this is only as
   // current as the tick it is read in. The ONE place the model is assembled, shared by model() and
   // by every notification.
-  const liveModel = (s: Session): ReadModel => ({ seq: s.seq, events: s.events, state: s.acc.state, memory: s.mem, graph: s.graph })
+  const liveModel = (s: Session): ReadModel => ({ seq: s.seq, events: s.events, state: s.acc.state, graph: s.graph })
 
   async function open(projectId: string): Promise<Session> {
     const storage = await openStorage(opts.url, { projectId })
     const events = await storage.events.all()
     const acc = events.reduce(foldInto, emptyFold())
-    const mem = events.reduce(foldMemoryInto, emptyMemoryFold())
     const session: Session = {
-      storage, events, acc, mem,
-      graph: buildGraph(acc.state, mem, { halfLifeDays: opts.halfLifeDays }),
+      storage, events, acc,
+      graph: buildGraph(acc.state),
       seq: events.at(-1)?.seq ?? 0,
       subscribers: new Set(),
       unsubscribe: async () => {},
@@ -111,15 +104,14 @@ export function createProjectSessions(opts: {
     // applyEvent behind this same interface when a log gets big
     // The cached log is append-only in memory, but the real one can be TRUNCATED out of band —
     // `orc purge`, deleting a chat — and no event announces that. Without this the server keeps
-    // folding deleted history: the UI shows tasks and notes that no longer exist, and cannot
+    // folding deleted history: the UI shows tasks that no longer exist, and cannot
     // recover until the process restarts. One indexed lookup per event, against the oldest row we
     // still believe in; when it is gone, the cache is rebuilt from the log and the diff removes
     // the ghosts like any other change.
     const reload = async (): Promise<void> => {
       session.events = await storage.events.all()
       session.acc = session.events.reduce(foldInto, emptyFold())
-      session.mem = session.events.reduce(foldMemoryInto, emptyMemoryFold())
-      session.graph = buildGraph(session.acc.state, session.mem, { halfLifeDays: opts.halfLifeDays })
+      session.graph = buildGraph(session.acc.state)
       session.seq = session.events.at(-1)?.seq ?? 0
     }
     // Every notification carries the state it notified ABOUT, built here — after the fold, before
@@ -145,8 +137,7 @@ export function createProjectSessions(opts: {
       }
       session.events.push(e)
       foldInto(session.acc, e)
-      foldMemoryInto(session.mem, e)
-      const next = buildGraph(session.acc.state, session.mem, { halfLifeDays: opts.halfLifeDays })
+      const next = buildGraph(session.acc.state)
       const patch = diffGraphs(session.graph, next)
       session.graph = next
       session.seq = e.seq
@@ -171,22 +162,19 @@ export function createProjectSessions(opts: {
   // on ProjectSessions.model — lets them describe two.
   const modelFor = async (projectId: string): Promise<ReadModel> => liveModel(await sessionFor(projectId))
 
-  // listed = has events. Purge keeps its project listed by re-seeding identity notes;
+  // listed = has events. Purge keeps its project listed by re-seeding its identity event;
   // a DELETED project has zero events and correctly disappears — even the server's own.
   const listProjects = async (ids?: string[]): Promise<ProjectEntry[]> => {
     return Promise.all((ids ?? await listProjectIds(opts.url)).map(async id => {
-      // notes (in already-open sessions) win over the cwd config values; unopened
+      // the identity event (in already-open sessions) wins over the cwd config values; unopened
       // foreign projects show a short id until first opened
       let name = id === opts.cwdProject?.id ? opts.cwdProject.name : null
       let dir = id === opts.cwdProject?.id ? opts.cwdProject.dir ?? null : null
       const cached = sessions.get(id)
       if (cached) {
         const s = await cached.catch(() => null)
-        const live = s?.mem.notes
-        const nameNote = live?.get(noteKey('project', PROJECT_NAME_NOTE_ID))
-        if (nameNote) name = nameNote.note.title
-        const dirNote = live?.get(noteKey('project', PROJECT_DIR_NOTE_ID))
-        if (dirNote) dir = dirNote.note.title
+        const identity = s?.acc.state.project
+        if (identity) ({ name, dir } = identity)
       }
       return { id, name, dir }
     }))
@@ -240,7 +228,7 @@ export function createProjectSessions(opts: {
       const s = await sessionFor(projectId)
       if (fromSeq >= s.seq) return null
       const past = s.events.filter(e => e.seq <= fromSeq)
-      const patch = diffGraphs(buildGraph(fold(past), foldMemory(past), { halfLifeDays: opts.halfLifeDays }), s.graph)
+      const patch = diffGraphs(buildGraph(fold(past)), s.graph)
       // the model beside the patch is the state the catch-up brings the caller UP TO, taken in the
       // same tick as the `seq` it is labelled with
       return emptyPatch(patch) ? null : { seq: s.seq, patch, event: null, summary: null, model: liveModel(s) }

@@ -1,18 +1,16 @@
-import { AUTHOR_SOURCE, AutoHealMode, CHECKS_EXECUTOR_REF, Door, errorMessage, HookName, KNOWLEDGE_REFUSAL, NO_CHAT, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor, type TreeStamps } from '@orc/contracts'
+import { AUTHOR_SOURCE, AutoHealMode, CHECKS_EXECUTOR_REF, Door, HookName, KNOWLEDGE_REFUSAL, NO_CHAT, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { configuredProviders } from './providers'
 import { agentAnalyzer } from '@orc/analyzer-agent'
 import { createMcpHub, type McpHub } from '@orc/mcp-client'
-import { createMemory, treeStamps } from '@orc/memory'
 import { AUTO_HEAL_DEBOUNCE_MS, AUTO_SWEEP_TITLE, createAutoHeal, sweepPlanDraft, sweepSpec } from './auto-heal'
 import { suspectAtFor } from './suspect-at'
-import { openMemory } from './memory-open'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
 import { bindStepKnowledge } from '@orc/knowledge-core'
 import { cwdAuthor } from './cwd-workspace'
 import { createHealTarget } from './heal-target'
 import { createVaultProjector } from '@orc/vault-projector'
-import { checksExecutor, commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, planNoteTools, projectorLease, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, taskPlanTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import { checksExecutor, commitTool, createDbosPort, createPluginHost, dbosSend, execTool, finalizePlanTool, isMcpTrusted, loadConfig, loadTrust, openStorage, planNoteTools, readAnnotationsTool, reportCoverageTool, requireProject, scopedChangesTool, splitTool, taskPlanTool, Kernel, type DbosPort, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 
 const AUTO_HEAL_EXECUTOR = 'auto-heal'
 
@@ -37,10 +35,7 @@ export async function buildPlugins(config = loadConfig()): Promise<{ host: Plugi
   return { host, hub }
 }
 
-// Boot is unbounded and blocks every run, and the banner could only ever say "starting": the
-// memory projector publishes its own stages, but a drain under the report floor announces nothing
-// and the remaining phases (DBOS launch and its recovery of interrupted workflows) had no
-// vocabulary at all. Timing every phase is what turns "it hung" into "it is in recovery".
+// Timing every boot phase is what turns "it hung" into "it is in recovery".
 // Exported so callers that open storage themselves (bin.ts's openKernel path, which threads an
 // already-open storage into buildRuntime below) can time that open with the SAME instrument and
 // hand the result back in as `storageMs` — otherwise that phase is invisible to the boot line.
@@ -83,28 +78,12 @@ export function warnMissingRoleSkills(indexed: string[], skillsDir: string, warn
   }
 }
 
-// one supervisor serves every workspace: a note's stamps come from the AUTHOR's checkout, never this process's
-export function workspaceStamps(dirOf: (workspaceId: string) => Promise<string | null>): (author: MemoryAuthor) => TreeStamps {
-  const stampsIn = async (workspaceId: string): Promise<TreeStamps | null> => {
-    const dir = await dirOf(workspaceId)
-    return dir === null ? null : treeStamps(dir)
-  }
-  return author => {
-    const stamps = stampsIn(author.workspaceId)
-    return {
-      revision: async () => (await stamps)?.revision() ?? null,
-      blob: async path => (await stamps)?.blob(path) ?? null,
-    }
-  }
-}
-
 export async function buildRuntime(
   shared?: { host: PluginHost; hub: McpHub; config?: ProjectConfig; storage?: Storage; storageMs?: number; kernel?: Kernel; executorId?: string },
 ): Promise<DbosPort> {
   const config = shared?.config ?? requireProject(loadConfig())
   const { host, hub } = shared ?? (await buildPlugins(config))
-  // first thing after the host exists, so the notice lands before the boot line rather than after
-  // a minute of projection catch-up — see warnMissingRoleSkills
+  // first thing after the host exists, so the notice lands before the boot line
   warnMissingRoleSkills(host.skills.list().map(s => s.name), config.skillsDir, m => console.warn(m))
   const knowledgeOpening = openKnowledge(config)
   if ('unavailable' in knowledgeOpening && config.knowledge !== null) console.warn(KNOWLEDGE_REFUSAL.unavailable(knowledgeOpening.unavailable))
@@ -124,26 +103,9 @@ export async function buildRuntime(
   const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend, config.groundedApprovalDoors, config.finishChecks)
   log.onAppend = e => host.hooks.dispatch(HookName.event_appended, e)
 
-  // Startup order: projections FIRST — DBOS recovery may emit events the
-  // moment it launches, and they must already be observed. Surreal failure degrades memory
-  // but never blocks history, execution, or the vault trace.
+  // the vault projection starts FIRST: DBOS recovery may emit events the moment it launches
   const projector = createVaultProjector({ log, config })
   await bootPhase('vault-projection', () => projector.start(), phases)
-  let memory: Awaited<ReturnType<typeof createMemory>> | null = null
-  try {
-    // The projector LEASE: one live projector per project. Every buildRuntime caller (serve, the
-    // graph server, mcp serve) used to run the full standing machinery; three of them against one
-    // SurrealDB starved a supervisor boot's drain for 18 minutes. Losers follow the holder's
-    // cursor — see createMemoryProjector's follower mode.
-    memory = await openMemory({
-      log, config, lease: projectorLease(config.databaseUrl, config.projectId),
-      stampsFor: workspaceStamps(async id => (await kernel.listWorkspaces({ includeArchived: true })).find(w => w.id === id)?.cwd ?? null),
-    })
-    const mem = memory // narrowed once here so bootPhase's callback needs no `!`
-    await bootPhase('memory-projection', () => mem.projector.start(), phases)
-  } catch (err) {
-    console.warn(`memory unavailable; continuing in degraded mode: ${errorMessage(err)}`)
-  }
 
   const healTarget = createHealTarget({ kernel, dir: config.dir })
 
@@ -232,7 +194,6 @@ export async function buildRuntime(
     shutdown: async (opts?: { drain?: boolean }) => {
       await port.shutdown(opts)
       autoHeal?.close() // disarm a pending debounce window — a timer firing into closed stores warns, but why let it
-      if (memory) await memory.close()
       await projector.close()
       await host.shutdown() // drains hooks, fires session_shutdown, deactivates extensions, stops the watcher
       await hub.close()

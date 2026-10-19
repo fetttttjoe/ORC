@@ -1,4 +1,4 @@
-// The ONE frontmatter builder for the whole vault (plan files, task files, memory notes).
+// The ONE frontmatter builder for the whole vault (plan files, task files).
 // Block style (Bun.YAML.stringify(obj, null, 2)) + trimEnd is load-bearing: flow style glues
 // the closing fence to content and breaks Obsidian frontmatter parsing.
 export function frontmatter(obj: Record<string, unknown>): string {

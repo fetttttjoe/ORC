@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, MemoryAuthor, NO_CHAT, PAYLOAD_SCHEMAS, TaskNode } from './index'
+import { AUTHOR_SOURCE, CheckVerdict, Door, EVENT_KIND, MemoryAuthor, NO_CHAT, PAYLOAD_SCHEMAS, TaskNode } from './index'
 import { authorFixture } from './fixtures'
 import { WORKSPACE_KIND, Workspace, WorkspaceArchivedPayload } from './workspace-entity'
 
@@ -68,10 +68,11 @@ describe('MemoryAuthor.workspaceId', () => {
     expect(authorFixture().origin).toEqual(NO_CHAT(Door.cli))
   })
   it('the required key reaches every author-bearing payload, not just the write', () => {
-    const note = { id: 'n', title: 'N' }
-    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_written].safeParse({ note, author: { source: AUTHOR_SOURCE.cli } }).success).toBe(false)
-    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_written].safeParse({ note, author: authorFixture({ workspaceId: ws.id }) }).success).toBe(true)
-    expect(PAYLOAD_SCHEMAS[EVENT_KIND.memory_deleted].safeParse({ id: 'n', scope: 'project', author: { source: AUTHOR_SOURCE.cli } }).success).toBe(false)
+    const written = { added: [], changed: [], retired: [], files: [], why: null, decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [] }
+    const checked = { id: 'abcd1234', verdict: CheckVerdict.holds, text: 'T.', anchors: [], why: 'read it' }
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.knowledge_written].safeParse({ ...written, author: { source: AUTHOR_SOURCE.cli } }).success).toBe(false)
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.knowledge_written].safeParse({ ...written, author: authorFixture({ workspaceId: ws.id }) }).success).toBe(true)
+    expect(PAYLOAD_SCHEMAS[EVENT_KIND.knowledge_checked].safeParse({ ...checked, author: { source: AUTHOR_SOURCE.cli } }).success).toBe(false)
     expect(PAYLOAD_SCHEMAS[EVENT_KIND.feedback_provided].safeParse({ topic: 't', text: 'yes', author: { source: AUTHOR_SOURCE.cli } }).success).toBe(false)
   })
 })

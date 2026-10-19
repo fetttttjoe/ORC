@@ -9,11 +9,11 @@ import {
 import { authorFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { gitFilesPlugin } from '@orc/knowledge-git'
 import { createTreeSitterStructure } from '@orc/structure-treesitter'
-import type { WorkspaceFold } from './cwd-workspace'
+import { knowledgeAuthor, type WorkspaceFold } from './cwd-workspace'
 import { CommandFailure } from './exit'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
 import {
-  addPatch, DRIFT_WITHOUT_LOG, NO_LOG_OPEN, NO_PROJECT_CONTEXT, VERIFY_REFUSAL, KNOWLEDGE_SUBCOMMAND, knowledgeAuthor, knowledgeCommand, parseAnchorArg, renderClaims, renderProblems,
+  addPatch, DRIFT_WITHOUT_LOG, NO_LOG_OPEN, NO_PROJECT_CONTEXT, VERIFY_REFUSAL, KNOWLEDGE_SUBCOMMAND, knowledgeCommand, parseAnchorArg, renderClaims, renderProblems,
   runAdd, runCard, runCheck, runDrift, runFormat, runRetire, runSearch,
 } from './knowledge-commands'
 

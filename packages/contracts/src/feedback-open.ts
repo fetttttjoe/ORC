@@ -16,7 +16,7 @@ export { feedbackKey }
 // cannot be run. Either one drifting turns a task parked in DBOS.recv into a workspace that reads
 // `idle`, which is the one state that tells an operator to look elsewhere.
 //
-// Pure in the sense cluster.ts is: no log, no db, no clock, no transaction — it takes the events it
+// Pure: no log, no db, no clock, no transaction — it takes the events it
 // is given and returns a value. It is NOT import-free, and deliberately so: the kinds and the
 // payload shapes are project vocabulary, and hand-spelling 'feedback_requested' or reading `.topic`
 // off an untyped payload here would break the two rules that outrank file purity in this repo (all

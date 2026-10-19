@@ -10,9 +10,9 @@ import * as S from '../web/src/lib/api/schemas'
  *
  * These exist because type-level shapes are erased: four separate bugs shipped where the server
  * renamed or re-nested a field and the UI rendered nothing at all — an empty model picker that
- * made the primary flow impossible, artifacts shown as "unrecognised shape", a model's whole
- * cost lens blank, and a note's claims missing. Each was invisible until someone looked at the
- * screen. Here the same schemas the client parses with fail loudly instead, naming the field.
+ * made the primary flow impossible, artifacts shown as "unrecognised shape", and a model's whole
+ * cost lens blank. Each was invisible until someone looked at the screen. Here the same schemas
+ * the client parses with fail loudly instead, naming the field.
  *
  * A failure means one of two things, and both are worth a build break: the server changed shape,
  * or a schema is wrong about what the server sends. Never "loosen the schema to make it pass" —
@@ -66,7 +66,7 @@ test('every node kind parses as ITS OWN shape, not merely as something', async (
   // Deliberately NOT S.NodeDetail as one union: each kind is asserted against the schema its pane
   // actually renders from, so a `run: null` the schema calls `.optional()` fails HERE instead of
   // matching some other member of the union.
-  const byKind = { task: S.TaskDetail, step: S.StepDetail, note: S.NoteDetail, artifact: S.ArtifactDetail, model: S.ModelDetail } as const
+  const byKind = { task: S.TaskDetail, step: S.StepDetail, artifact: S.ArtifactDetail, model: S.ModelDetail } as const
   const snapshot = S.GraphSnapshot.parse(await json(request, `/api/graph?project=${PROJECT}`))
   const seen = new Set<string>()
   for (const node of snapshot.nodes) {
@@ -76,9 +76,8 @@ test('every node kind parses as ITS OWN shape, not merely as something', async (
     seen.add(node.type)
     check(S.ViewEnvelope(byKind[node.type]), await res.json(), `the node view (${node.type})`)
   }
-  // EVERY kind, not "more than one": four wire-vs-server disagreements stayed invisible while the
-  // fixture seeded no note and no artifact, and a bar of "at least tasks and steps" is what let
-  // them. A kind the fixture stops producing fails here rather than going quietly unchecked.
+  // EVERY kind, not "more than one": a kind the fixture stops producing fails here rather than
+  // going quietly unchecked.
   expect([...seen].sort(), 'the fixture seeds one node of every kind').toEqual(Object.keys(byKind).sort())
 })
 

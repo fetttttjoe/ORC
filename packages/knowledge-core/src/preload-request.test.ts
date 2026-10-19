@@ -6,7 +6,7 @@ describe('namedPaths', () => {
     expect(namedPaths('In packages/kernel/src/execution/dbos-port.ts:203, see createDbosPort.')).toEqual(['packages/kernel/src/execution/dbos-port.ts'])
   })
   it('drops a #symbol, keeping the file', () => {
-    expect(namedPaths('plugins/memory/src/store.ts#createMemoryStore')).toEqual(['plugins/memory/src/store.ts'])
+    expect(namedPaths('plugins/memory/src/store.ts#createEventStore')).toEqual(['plugins/memory/src/store.ts'])
   })
   it('ignores a URL and a bare file name', () => {
     expect(namedPaths('https://bun.sh/docs/cli/test')).toEqual([])

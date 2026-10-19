@@ -1,7 +1,7 @@
 import { createOllama } from 'ai-sdk-ollama'
 import type { LanguageModel } from 'ai'
 import { z } from 'zod'
-import { isRecord, type EmbeddingProvider, type ModelCost, type ModelProvider, type ProviderPlugin } from '@orc/contracts'
+import type { ModelCost, ModelProvider, ProviderPlugin } from '@orc/contracts'
 
 export const providerPlugin: ProviderPlugin<LanguageModel> = {
   id: 'ollama',
@@ -18,9 +18,8 @@ const TagsResponse = z.object({
 const EMBEDDING_CAPABILITY = 'embedding'
 
 // Live model discovery from the local daemon (fetch injectable for tests). Embedding-only models
-// are dropped here, at the seam every picker and catalog event flows through: the memory
-// subsystem's encoders (nomic-embed-text, mxbai-embed-large, …) sit in the same daemon, and
-// unfiltered they were offered as task executors, which cannot work.
+// are dropped here, at the seam every picker and catalog event flows through: an encoder in the
+// same daemon (nomic-embed-text, mxbai-embed-large, …) cannot run a task.
 //
 // THROWS when the daemon cannot answer; [] means it answered and nothing usable is installed.
 // The distinction is what lets discovery's append-on-change record an EMPTIED catalog: with []
@@ -46,34 +45,5 @@ export function createOllamaProvider(
     costs: { '*': { inPerMTok: 0, outPerMTok: 0 }, ...opts.costOverrides }, // local models are free by default
     languageModel: modelId => ollama(modelId),
     listModels: () => listOllamaModels(baseUrl),
-  }
-}
-
-const isNumberArray = (v: unknown): v is number[] => Array.isArray(v) && v.every(x => typeof x === 'number')
-
-// The embedding half of the Ollama provider — a text→vector encoder over the local daemon's
-// /api/embed, behind the shared EmbeddingProvider seam. No SDK, no new dep: one fetch, parsed at
-// the boundary (isRecord/isNumberArray, never a cast).
-export function createOllamaEmbeddingProvider(
-  opts: { model: string; baseUrl?: string },
-): EmbeddingProvider {
-  const baseUrl = (opts.baseUrl ?? 'http://localhost:11434').replace(/\/$/, '')
-  return {
-    async embed(texts) {
-      if (texts.length === 0) return []
-      const res = await fetch(`${baseUrl}/api/embed`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: opts.model, input: texts }),
-      })
-      if (!res.ok) throw new Error(`ollama embed ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
-      const body: unknown = await res.json()
-      const rows: unknown = isRecord(body) ? body.embeddings : undefined
-      if (!Array.isArray(rows)) throw new Error('ollama embed: response missing embeddings array')
-      return rows.map(r => {
-        if (!isNumberArray(r)) throw new Error('ollama embed: a returned embedding is not a number array')
-        return r
-      })
-    },
   }
 }

@@ -4,7 +4,6 @@ import { issueLine } from '@orc/contracts/guards'
 import { ViewName, WIRE, type Touch } from '../wire'
 import type { ProjectSessions } from '../sessions'
 import type { ReadModel, Touchable, View, ViewParams, ViewResult } from './view'
-import { health } from './health'
 import { models } from './models'
 import { node } from './node'
 import { operatorStateView } from './operator-state'
@@ -96,13 +95,11 @@ export async function viewOf<N extends ViewName>(
   return view ? view.read(model, params) : null
 }
 
-// Everything one event can make stale: every view, plus the reads that are not views. A read
-// missing here is a pane that never refreshes, so the list is the registry itself rather than a
-// hand-kept copy of it.
-const TOUCHABLES: ReadonlyArray<Touchable> = [...Object.values(VIEWS), health]
+// A read missing here is a pane that never refreshes, so the list is the registry itself rather than a hand-kept copy of it.
+const TOUCHABLES: ReadonlyArray<Touchable> = Object.values(VIEWS)
 
 // What one appended event makes stale. A client holding these refetches exactly the queries that
 // changed, which is what lets the stream frame stay a notification instead of growing with the read
-// model. Named `name`, not `view`: `health` answers here and is no view.
+// model.
 export const touchesOf = (event: EventRecord, model: ReadModel): Touch[] =>
   TOUCHABLES.flatMap(t => t.touches(event, model).map(params => ({ name: t.name, params })))

@@ -1,6 +1,6 @@
 import { stepCountIs, streamText, type LanguageModel } from 'ai'
 import { z } from 'zod'
-import { Door, MEMORY_HEALTH, MessageRole, type MemoryHealth, NO_CHAT, type Origin, type SupervisorHealth, errorMessage, isRecord, NoteAuthoringDraft, NoteRef, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
+import { Door, KnowledgeHealthState, MessageRole, type KnowledgeHealth, NO_CHAT, type Origin, type SupervisorHealth, errorMessage, isRecord, PlanDraft, type CopilotExchangePayload, type Usage } from '@orc/contracts'
 import { VIEWS, buildCopilotTools, copilotFocus, copilotSystemPrompt, createProjectSessions, emptyPatch, touchesOf, type CopilotMode, type OrcActions, type ProjectEntry, type ProjectSessions, type ReadModel, type SessionUpdate } from '@orc/ui-core'
 import { CopilotFrameType, PROJECT_PARAM, VIEW, VIEW_ROUTE, type CopilotFrame, type OperatorState, type StreamFrame } from '@orc/ui-core/wire'
 import path from 'node:path'
@@ -85,8 +85,6 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
     z.object({ taskId: id, text: z.string().min(1), scope: z.array(id).min(1) }),
     (a, d, _p, o) => a.revise(d.taskId, d.text, d.scope, o),
   ),
-  writeNote: route(NoteAuthoringDraft, (a, d, _p, o) => a.writeNote(d, o)),
-  deleteNote: route(NoteRef, (a, d, _p, o) => a.deleteNote(d.id, d.scope, o)),
   renameProject: route(z.object({ name: z.string().min(1).max(80) }), (a, d, _p, o) => a.renameProject(d.name, o)),
   newProject: route(z.object({ dir: id, name: z.string().min(1).max(80) }), (a, d, _p, o) => a.newProject(d.dir, d.name, o)),
   purgeProject: route(z.object({}), (a, _d, _p, o) => a.purgeProject(o)),
@@ -123,18 +121,15 @@ export function startGraphUi(opts: {
   actions?: OrcActions // absent = read-only server (launched outside a project)
   copilot?: CopilotConfig
   defaultCwd?: string
-  // degraded-state probe (memory read model, projector lag, supervisor liveness) — absent =
-  // health unknown; supervisor absent = the composition has no storage to ask
-  health?: () => Promise<{ memory: MemoryHealth; supervisor?: SupervisorHealth }>
+  // absent = health unknown; supervisor absent = the composition has no storage to ask
+  health?: () => Promise<{ knowledge: KnowledgeHealth; supervisor?: SupervisorHealth }>
   // P6 interaction journaling: append one copilot_exchange event per completed exchange — the
   // conversation that caused an action is part of the record. Absent = exchanges unrecorded.
   // `opened` rides along so the chat and its first exchange land in ONE append: a chat_opened that
   // committed without its exchange would leave an empty conversation in every chats list.
   appendExchange?: (x: CopilotExchangeRecord) => Promise<void>
-  // threads config → sessions → graph heat: the same decay rate the store ranking uses
-  memoryHalfLifeDays?: number
 }): GraphUiServer {
-  const sessions = createProjectSessions({ url: opts.url, cwdProject: opts.cwdProject, halfLifeDays: opts.memoryHalfLifeDays })
+  const sessions = createProjectSessions({ url: opts.url, cwdProject: opts.cwdProject })
   // chats-list push: one sessions-level watch for the whole server, fanned out to every open
   // stream — a project born anywhere (CLI init, a bench run) reaches every sidebar live
   const projectFeeds = new Set<(ps: ProjectEntry[]) => void>()
@@ -178,8 +173,6 @@ export function startGraphUi(opts: {
       messages,
       tools: buildCopilotTools({
         sessions, actions: mode === 'act' ? opts.actions ?? null : null, projectId, origin, listModels: cfg.listModels,
-        // the same probe the footer badge polls (/api/health) — the copilot must see a
-        // rebuilding read model too, or it narrates a silent project as healthy
         ...(opts.health && { health: opts.health }),
         // HOME project only. The dep reads the kernel this server was started with, while
         // `projectId` is whichever chat the user is looking at — wiring it unconditionally would
@@ -328,8 +321,8 @@ export function startGraphUi(opts: {
       case '/api/health':
         // never throws: a probe failure IS the degraded signal, not a 500
         return Response.json(opts.health
-          ? await opts.health().catch(err => ({ memory: { state: MEMORY_HEALTH.unreachable, pending: 0, reason: errorMessage(err) } }))
-          : { memory: null })
+          ? await opts.health().catch(err => ({ knowledge: { state: KnowledgeHealthState.unavailable, reason: errorMessage(err) } }))
+          : { knowledge: null })
       case '/api/graph': {
         const s = await sessions.snapshot(project)
         return Response.json({ seq: s.seq, nodes: s.graph.nodes, links: s.graph.links })

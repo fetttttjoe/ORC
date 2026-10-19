@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DBOS } from '@dbos-inc/dbos-sdk'
 import {
-  Confidence, EVENT_KIND, FailureClass, MAX_AUTO_CONTINUATIONS, RunOutcome, SignalOutcome, STEP_ID, STEP_ROLE, TASK_STATUS, UnifiedEventType,
+  EVENT_KIND, FailureClass, MAX_AUTO_CONTINUATIONS, RunOutcome, SignalOutcome, STEP_ROLE, TASK_STATUS, UnifiedEventType,
   ChatRef, PAYLOAD_SCHEMAS,
   classifiedError, continuationTopic, errorMessage, failureClassOf, isApprovalAnswer, isTerminalError, resolveModel, costUSDFor,
   type AgentExecutor, type Checkpoint, type CommitRecordedPayload, type EventDraft, type EventRecord, type ExecutionPort, type ExecutorContext,
@@ -14,11 +14,6 @@ import { type EventLog, type Storage, type EventLogOps } from '../storage'
 import { openLiveState, type LiveState } from '../live-state'
 import { acquireRuntimeLock, type RuntimeLock } from '../storage/runtime-lock'
 import { groundedPlanOmission } from './strategies/grounded-plan'
-import { decideGroundingFreshness, type GroundingNoteRef, type GroundingSource, type GroundingVerdict } from './strategies/grounding-freshness'
-import {
-  groundingDirective, isMixed, mixedGroundingDraft, reusedCitation, scanScope,
-  type GroundingScope, type StalePathAnswer,
-} from './strategies/grounding-scope'
 import { verifyArtifacts } from './artifacts'
 import { runChatOpened, runOrigin } from './run-chat'
 import { fold, ancestorTaskIds, blockingVerdicts, canRetry, completedStepIds, nextAttempts, startedAttempts, remainingBudget, inheritedCwd, runCwd, type State } from '../projections'
@@ -61,10 +56,6 @@ export const runQueueOptions = (depth: number): { queueName?: string } =>
 // count. Cancellation responsiveness is independent of it (see the split gate).
 const GATE_POLL_SECONDS = 3_600
 
-
-// The scope of a decision that is NOT incremental (skip, full analyze, or a replayed decision):
-// nothing reused, nothing scoped. Kept explicit so the recorded checkpoint output has one shape.
-const NO_SCOPE: GroundingScope = { reused: [], rescan: [], paths: [], probed: false, perNote: [] }
 
 // origin is the RUN's, never the step workflow's: one run is one chat, and a per-step chat would
 // scatter a run's transcript across as many chats as it has steps.
@@ -182,29 +173,23 @@ export async function createDbosPort(opts: {
   // The per-step plugin surface: the tools a step's model may call, plus its knowledge when wired.
   // `step` travels whole so a binding can read title/dependsOn without the port re-deriving them.
   stepTools?: (p: {
-    // the RUN's chat, so a tool that spawns a process or writes a note names the same interaction
+    // the RUN's chat, so a tool that spawns a process or writes a claim names the same interaction
     origin: Origin
     taskId: string; stepId: string; runToken: string; role: string; executor: string; model: string
     modelRef: string; maxIterations: number; workspaceDir: string; step: PlanStep
     // The workspace the TASK belongs to, off the TaskNode this run already folds. Here rather than
     // looked up by the composition root because only the port knows which task is running: a
-    // supervisor serves every workspace at once, so deriving it from the supervisor's own cwd would
-    // stamp every worktree's knowledge as trunk knowledge. MemoryAuthor.workspaceId is captured at
-    // write time and never recoverable afterwards, so a wrong value here is permanent.
+    // supervisor serves every workspace at once, and an author's workspace is never recoverable later.
     workspaceId: string
     // nearest first (parent, …, root) — a split child's decomposition lives in its PARENT's scopes
     ancestorTaskIds: string[]
   }) => ResolvedTool[] | { tools: ResolvedTool[]; knowledge?: StepKnowledge }
-  // Read-only probe behind the grounded analyze step's freshness short-circuit. Optional: a port
-  // built without it behaves exactly as before, because the branch is guarded on its presence.
-  groundingSource?: GroundingSource
-  // The auto-heal reactor for out-of-task commits, injected because the kernel may not import
-  // plugins/memory (same seam as the commit tool's restamp callback). Optional: absent, the
-  // router leaves commit_recorded a traceability record, as before.
+  // The auto-heal reactor for out-of-task commits, injected by the composition root. Optional:
+  // absent, the router leaves commit_recorded a traceability record.
   onCommitRecorded?: (payload: CommitRecordedPayload) => Promise<void>
   executorId?: string
 }): Promise<DbosPort> {
-  const { config, providers, executors, skills, tools, stepTools, groundingSource } = opts
+  const { config, providers, executors, skills, tools, stepTools } = opts
   const { events: log, operations: journal, redact } = opts.storage
   // cancelSubtree's append half only — this port stays the DBOS half (cancelWorkflowsFor below).
   // No refValidator/analyzers/send: those are propose/split/feedback concerns, untouched here.
@@ -328,94 +313,6 @@ export async function createDbosPort(opts: {
         })),
       ])
 
-      // The grounded analyze step's freshness short-circuit. When the area notes this scout would
-      // re-derive are already current at HEAD, the deep scan is a model call that buys nothing —
-      // so the step completes from the notes instead, and the plan step still gets its grounding
-      // (see groundingSkipDrafts: the skip emits BOTH completion events).
-      //
-      // REPLAY DETERMINISM (the reason every probe call lives inside the checkpoint's fn): DBOS
-      // records this step's return value, so a resumed workflow replays the RECORDED verdict
-      // instead of re-probing git. If HEAD moved mid-run, the original verdict still stands and
-      // the step does not change its mind halfway. That only holds while head()/notes()/
-      // commitsSince() are called INSIDE fn — one of them in the workflow body around it would be
-      // a fresh git read on every replay, and the drafts would then disagree with the recorded
-      // decision. For the same reason toEvents derives the drafts purely from `v`, reading nothing
-      // else, and both drafts carry explicit stable idempotency keys so a replay re-uses the
-      // committed events rather than raising an idempotency conflict.
-      //
-      // A throw from the source is NOT a step failure: an unavailable probe is the absence of
-      // evidence, so it is caught here and becomes an ordinary not-fresh verdict — today's full
-      // analyze — rather than blocking the task.
-      //
-      // THREE outcomes, not two. `fresh` skips. `mixed` (some notes current, some stale) still runs
-      // the scout, but hands it the current notes as grounding and scopes it to the stale notes'
-      // changed paths — the scan scope is computed HERE, inside the same checkpoint, so it is part
-      // of the recorded output and a replay renders the identical directive without touching git.
-      // Everything else — no groundingSource, no notes, all stale, a probe throw, an unresolvable
-      // HEAD — falls through to today's full analyze byte for byte.
-      let grounding: { verdict: GroundingVerdict; scope: GroundingScope } | null = null
-      if (groundingSource && args.stepId === STEP_ID.analyze && init.step.role === STEP_ROLE.scout) {
-        const decision = await checkpoint('grounding', async (): Promise<{ committed: boolean; verdict: GroundingVerdict; scope: GroundingScope }> => {
-          try {
-            // The one crash window where fn() re-runs: the drafts committed, then the process died
-            // before DBOS recorded this step's output. Re-probing there could produce a DIFFERENT
-            // verdict (HEAD moved), whose drafts would collide with the committed events under the
-            // same stable keys — an idempotency_conflict that would brick the step. So mirror the
-            // 'finish' checkpoint: if a grounding decision already committed for this run token, it
-            // is durable and wins outright. Which decision it was is readable from the events:
-            //   * step_completed → the SKIP committed (both its drafts land in one transaction), so
-            //     replay the skip and complete without a model call.
-            //   * analysis_completed alone → the MIXED decision committed, but its scope lived only
-            //     in the unrecorded step output. Rather than re-probe and risk a narrower scope
-            //     than the one already published in the log, degrade to a full analyze: over-
-            //     scanning is the safe direction, and no draft is re-emitted.
-            const priorForRun = (await log.byTask(args.taskId)).filter(e => e.runToken === runToken)
-            if (priorForRun.some(e => e.kind === EVENT_KIND.step_completed)) return {
-              committed: true,
-              verdict: { fresh: true, reason: 'the grounding skip already committed for this run token — replaying the recorded decision', head: null, current: [], stale: [] },
-              scope: NO_SCOPE,
-            }
-            if (priorForRun.some(e => e.kind === EVENT_KIND.analysis_completed)) return {
-              committed: true,
-              verdict: { fresh: false, reason: 'a grounding decision already committed for this run token but its scope was not recorded — analyzing in full rather than re-deciding', head: null, current: [], stale: [] },
-              scope: NO_SCOPE,
-            }
-            // notes() is called EXACTLY once (decideGroundingFreshness owns the call); this wrapper
-            // keeps the refs it returned, because the verdict deliberately carries no declared
-            // paths and the mixed branch needs them as the probe's fallback.
-            let refs: GroundingNoteRef[] = []
-            const verdict = await decideGroundingFreshness({
-              head: () => groundingSource.head(),
-              notes: async () => { refs = await groundingSource.notes(); return refs },
-              commitsSince: (rev, paths) => groundingSource.commitsSince(rev, paths),
-            })
-            if (!isMixed(verdict)) return { committed: false, verdict, scope: NO_SCOPE }
-            // one probe per STALE note, inside fn — that is the determinism rule
-            const changed: Record<string, StalePathAnswer> = {}
-            for (const s of verdict.stale) {
-              const declared = refs.find(n => n.id === s.id)?.paths ?? []
-              const reported = s.revision !== null && declared.length > 0
-                ? (await groundingSource.changedPaths?.(s.revision, declared)) ?? null
-                : null
-              changed[s.id] = { declared, changed: reported }
-            }
-            return { committed: false, verdict, scope: scanScope(verdict, changed) }
-          } catch (err) {
-            return { committed: false, verdict: { fresh: false, reason: `grounding probe failed (${errorMessage(err)}) — analyzing`, head: null, current: [], stale: [] }, scope: NO_SCOPE }
-          }
-        }, r => {
-          if (r.committed) return []
-          if (r.verdict.fresh) return groundingSkipDrafts(r.verdict, args.stepId, runToken)
-          // the mixed decision's evidence: one fold-inert analysis_completed, superseded later by
-          // the scout's own report_coverage
-          return isMixed(r.verdict) ? [mixedGroundingDraft(r.verdict, r.scope, runToken)] : []
-        })
-        // fresh → done, zero model calls. Mixed → the scout runs, but scoped (below). Anything
-        // else → today's full analyze, byte for byte.
-        if (decision.verdict.fresh) return { stepId: args.stepId, ok: true }
-        if (isMixed(decision.verdict)) grounding = { verdict: decision.verdict, scope: decision.scope }
-      }
-
       const executor = executors.get(init.step.executorRef)
       if (!executor) return await finishFailed(checkpoint, args, runToken, `no executor '${init.step.executorRef}'`)
       const { modelId, model, provider } = resolveModel(providers, init.step.modelRef)
@@ -454,13 +351,7 @@ export async function createDbosPort(opts: {
       const ctx: ExecutorContext<unknown> = {
         step: init.step,
         taskSpec: init.taskSpec,
-        // On a mixed grounding verdict the scan-scope directive rides in as a SYNTHETIC dep output.
-        // The recorded plan is untouched (init.step stays as approved) and nothing can collide: the
-        // analyze step's dependsOn is [], so the port built depOutputs from an empty list, and
-        // loop.ts renders every depOutputs entry verbatim under '# Upstream outputs'.
-        depOutputs: grounding
-          ? { ...init.depOutputs, grounding: groundingDirective(grounding.verdict, grounding.scope) }
-          : init.depOutputs,
+        depOutputs: init.depOutputs,
         skills: init.skills,
         extraTools,
         model,
@@ -640,11 +531,7 @@ export async function createDbosPort(opts: {
           })),
           {
             kind: EVENT_KIND.step_completed,
-            // The plan step's grounding is COMPLETE BY CONSTRUCTION on a mixed run: depOutputs
-            // [analyze] is this summary, and the port appends the reused notes (ids@revisions +
-            // the compared HEAD) and the fact that only the scoped paths were re-scanned from the
-            // RECORDED verdict — whether or not the scout thought to mention them.
-            payload: { stepId: args.stepId, runToken, summary: grounding ? `${success.summary}\n\n${reusedCitation(grounding.verdict, grounding.scope)}` : success.summary },
+            payload: { stepId: args.stepId, runToken, summary: success.summary },
             // stable key: never positional — the receipt count must not shift it
             idempotencyKey: `${runToken}:finish:step_completed`,
           },
@@ -963,52 +850,6 @@ export async function createDbosPort(opts: {
   })
 
   return port
-}
-
-// The two completion events a SKIPPED analyze step owes, built purely from the recorded verdict —
-// nothing here re-reads git or the store, which is what makes the drafts replay-identical.
-//
-// EVIDENCE (why `orc log` can answer "why did it skip?" without re-running anything): every scope
-// entry names one note id, the sourceRevision it was written at, and the HEAD sha the gate compared
-// against, plus the human-readable `why`. The same ids and shas are repeated in the step_completed
-// summary, because the plan step reads ONLY that summary (depOutputs[analyze]).
-//
-// analyzed: TRUE, deliberately. analyzed+gaps are load-bearing for RG7 degradation, and the
-// question that flag has to answer downstream is "does this task have grounding?" — not "did a
-// model burn tokens this run?". A skipped-but-grounded task HAS grounding: named notes, verified
-// current at a named HEAD. Reporting analyzed:false would make it indistinguishable from a task
-// where analysis genuinely never happened, and would degrade a task that is better grounded than
-// most. What marks it as a skip instead is claimsWritten:0, the leading gaps entry, and confidence
-// 'medium' rather than 'high' — the evidence is real but indirect (git says the declared paths are
-// quiet), so it is honestly one notch below a scan performed against the tree this run.
-function groundingSkipDrafts(v: GroundingVerdict, stepId: string, runToken: string): EventDraft[] {
-  const ids = v.current.map(c => c.id)
-  const summary =
-    `Reused existing grounding — the deep codebase scan was SKIPPED because these notes are current at HEAD ${v.head}: `
-    + `${v.current.map(c => `${c.id} (written at ${c.revision}; ${c.why})`).join('; ')}. `
-    + `No new analysis was performed and no notes were written this run. `
-    + `memory_read ${ids.join(', ')} before planning — they are this step's entire output and the plan's grounding.`
-  return [
-    {
-      kind: EVENT_KIND.analysis_completed,
-      payload: {
-        analyzed: true,
-        scope: v.current.map(c => `${c.id}@${c.revision} current at HEAD ${v.head} — ${c.why}`),
-        gaps: [
-          `deep scan skipped this run: coverage is exactly what these notes already declare, verified against HEAD ${v.head} (${v.reason})`,
-          ...v.stale.map(s => `${s.id}@${s.revision ?? 'no-revision'} not relied on — ${s.why}`),
-        ],
-        confidence: Confidence.medium,
-        claimsWritten: 0,
-      },
-      idempotencyKey: `${runToken}:grounding:analysis_completed`,
-    },
-    {
-      kind: EVENT_KIND.step_completed,
-      payload: { stepId, runToken, summary },
-      idempotencyKey: `${runToken}:grounding:step_completed`,
-    },
-  ]
 }
 
 function priceDraft(d: EventDraft, provider: ModelProvider<unknown>, modelId: string): EventDraft {

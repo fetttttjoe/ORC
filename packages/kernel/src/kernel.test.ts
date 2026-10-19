@@ -2,13 +2,13 @@ import { afterAll, afterEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { planScope, PlanNoteToolName, APPROVAL_ANSWER, ApprovedBy, AUTHOR_SOURCE, ApprovalPolicy, CHECKS_STEP_ID, Confidence, Door, EVENT_KIND, FINISH_STEP_ID, GroundedApprovalDoor, NO_CHAT, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ID, STEP_ROLE, STRATEGY, TASK_STATUS, TaskStatus, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, authorSourceOf, type Analyzer, type AuthorSource, type Origin, type PlanDraft, type PlanStep, type TaskNode, type Workspace } from '@orc/contracts'
+import { PlanNoteToolName, APPROVAL_ANSWER, ApprovedBy, AUTHOR_SOURCE, ApprovalPolicy, CHECKS_STEP_ID, Confidence, Door, EVENT_KIND, FINISH_STEP_ID, GroundedApprovalDoor, NO_CHAT, PAYLOAD_SCHEMAS, RunRequestedPayload, STEP_ID, STEP_ROLE, STRATEGY, TASK_STATUS, TaskStatus, TaskType, WORKSPACE_KIND, WORKSPACE_TITLE_MAX, authorSourceOf, type Analyzer, type AuthorSource, type Origin, type PlanDraft, type PlanStep, type TaskNode, type Workspace } from '@orc/contracts'
 import { authorFixture, draftFixture, must, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage, type EventLogOps } from './storage'
 import { KERNEL_ERROR_CODE, KernelError } from './errors'
 import { Kernel, SPLIT_ORIGIN } from './kernel'
 import type { KernelMutationVerb } from './kernel-verbs'
-import { GROUNDED_TASK_TYPE, instantiateFrozenPlan, planGraphHash } from './execution/strategies/grounded-plan'
+import { instantiateFrozenPlan, planGraphHash } from './execution/strategies/grounded-plan'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID } from './test-helpers'
 
 // Every call below spells its own envelope. WEB is one chat entered through the web door; SEED is
@@ -120,7 +120,7 @@ async function verbFixtures(k: Kernel, log: TestLog, tag: string): Promise<VerbF
       return t
     },
     groundedTask: async () => {
-      const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: tag, type: GROUNDED_TASK_TYPE }, SEED)
+      const t = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: tag, type: TaskType.grounded }, SEED)
       f.mark = await len()
       return t
     },
@@ -176,6 +176,7 @@ const VERBS: Record<KernelMutationVerb, (k: Kernel, f: VerbFixtures) => Promise<
   restoreWorkspace: (k, f) => k.restoreWorkspace({ ...TEST_WORKSPACE, id: VERB_RESTORED_WS_ID, cwd: '/tmp/orc-verbs/' + f.tag }, WEB),
   retitleWorkspace: async (k, f) => k.retitleWorkspace((await f.liveWorkspace()).id, 'renamed', WEB),
   setWorkspaceArchived: async (k, f) => k.setWorkspaceArchived((await f.liveWorkspace()).id, true, WEB),
+  identifyProject: (k, f) => k.identifyProject({ name: f.tag, dir: '/tmp/orc-verbs/' + f.tag }, WEB),
   mergeWorkspace: async (k, f) => k.mergeWorkspace((await f.liveWorkspace()).id, { mergeCommit: 'abc123', trunk: 'main' }, WEB),
 }
 describe('origin on every mutation verb', () => {
@@ -797,7 +798,7 @@ describe('Kernel lifecycle', () => {
   it('replyFeedback stamps for any word in ApprovalAnswer, not just the canonical one', async () => {
     const { k, log } = await freshKernelAndLog()
     for (const text of ['agree', 'Agreed', ' LGTM ', 'yes', APPROVAL_ANSWER]) {
-      const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: text, type: 'grounded' }, WEB)
+      const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: text, type: TaskType.grounded }, WEB)
       await log.append({
         ...WEB, taskId: task.id, stepId: 'plan', runToken: `step:${task.id}:plan:a1`,
         kind: EVENT_KIND.feedback_requested, payload: { question: 'approve?', topic: 'plan-1' },
@@ -812,7 +813,7 @@ describe('Kernel lifecycle', () => {
     const { k, log } = await freshKernelAndLog()
     // 'not yet' / 'approve later' are the near-misses that matter: whole-string only, so an answer
     // that merely CONTAINS an approval word is still ordinary feedback.
-    for (const [type, text] of [['generic', 'approve'], ['grounded', 'not yet'], ['grounded', 'approve later']] as const) {
+    for (const [type, text] of [[TaskType.generic, 'approve'], [TaskType.grounded, 'not yet'], [TaskType.grounded, 'approve later']] as const) {
       const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: type, type }, WEB)
       await log.append({
         ...WEB, taskId: task.id, stepId: 'plan', runToken: `step:${task.id}:plan:a1`,
@@ -826,7 +827,7 @@ describe('Kernel lifecycle', () => {
 
   it('approvedPlanHash is scoped to the exact run attempt', async () => {
     const { k, log } = await freshKernelAndLog()
-    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' }, WEB)
+    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: TaskType.grounded }, WEB)
     const runA = `step:${task.id}:plan:a1`
     const runB = `step:${task.id}:plan:a2`
     await log.append({ ...WEB, taskId: task.id, stepId: 'plan', runToken: runA, kind: EVENT_KIND.feedback_provided, payload: { topic: 'a', text: 'approve', author: authorFixture(), planHash: 'a'.repeat(64) } })
@@ -843,7 +844,7 @@ describe('Kernel lifecycle', () => {
   // what SATISFIES the gate did not move.
   it('nonHumanPlanApproval surfaces a non-cli approve for this run, and nothing else', async () => {
     const { k, log } = await freshKernelAndLog()
-    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' }, WEB)
+    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: TaskType.grounded }, WEB)
     const runA = `step:${task.id}:plan:a1`
     const runB = `step:${task.id}:plan:a2`
     const provided = (runToken: string, topic: string, source: AuthorSource) => log.append({
@@ -872,7 +873,7 @@ describe('Kernel lifecycle', () => {
 
   it('by default only the cli door satisfies the plan gate — an mcp approve is refused and reported', async () => {
     const { k, log } = await freshKernelAndLog()
-    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' }, WEB)
+    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: TaskType.grounded }, WEB)
     const runToken = `step:${task.id}:plan:a1`
     await mcpApproval(log, task.id, runToken)
 
@@ -882,7 +883,7 @@ describe('Kernel lifecycle', () => {
 
   it('a kernel configured with the mcp door accepts that same approve, and stops calling it non-human', async () => {
     const { k, log } = await freshKernelAndLog()
-    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: 'grounded' }, WEB)
+    const task = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: TaskType.grounded }, WEB)
     const runToken = `step:${task.id}:plan:a1`
     await mcpApproval(log, task.id, runToken)
     const widened = new Kernel(log, undefined, undefined, undefined, [GroundedApprovalDoor.cli, GroundedApprovalDoor.mcp])
@@ -1099,7 +1100,7 @@ describe('Kernel lifecycle', () => {
   })
 
   describe('knowledge ownership across a split', () => {
-    const splitChild = async (k: Kernel, log: TestLog, type: string) => {
+    const splitChild = async (k: Kernel, log: TestLog, type: TaskType) => {
       const parent = await k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'P', spec: '', type }, WEB)
       await toRunning(log, parent.id, WEB)
       const child = await k.proposeSplit({
@@ -1121,14 +1122,14 @@ describe('Kernel lifecycle', () => {
 
     it('a grounded parent\'s knowledge writes belong to its split child', async () => {
       const { k, log } = await freshKernelAndLog()
-      const { parent, childId } = await splitChild(k, log, GROUNDED_TASK_TYPE)
+      const { parent, childId } = await splitChild(k, log, TaskType.grounded)
       expect((await k.listTaskKnowledgeWrites(childId)).files).toEqual(['knowledge/aaaaaaaa.md'])
       expect((await k.listTaskKnowledgeWrites(parent.id)).files).toEqual(['knowledge/aaaaaaaa.md'])
     })
 
     it('a non-grounded parent\'s knowledge writes stay with the parent', async () => {
       const { k, log } = await freshKernelAndLog()
-      const { parent, childId } = await splitChild(k, log, 'plain')
+      const { parent, childId } = await splitChild(k, log, TaskType.generic)
       expect((await k.listTaskKnowledgeWrites(childId)).files).toEqual([])
       expect((await k.listTaskKnowledgeWrites(parent.id)).files).toEqual(['knowledge/aaaaaaaa.md'])
     })
@@ -1164,7 +1165,7 @@ describe('Kernel lifecycle', () => {
 
 describe('plan notes', () => {
   const groundedTask = (k: Kernel): Promise<TaskNode> =>
-    k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: GROUNDED_TASK_TYPE }, WEB)
+    k.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: TaskType.grounded }, WEB)
   const planRun = (taskId: string, idempotencyKey: string) => ({ stepId: STEP_ID.plan, runToken: `step:${taskId}:plan:a1`, idempotencyKey })
   const writtenCount = async (log: TestLog, taskId: string): Promise<number> =>
     (await log.byTask(taskId)).filter(e => e.kind === EVENT_KIND.plan_note_written).length
@@ -1264,7 +1265,7 @@ describe('plan notes', () => {
     expect(must(steps.find(s => s.id === 'hard'), 'hard step').modelRef).toBe('anthropic/claude-opus-5')
   })
 
-  it("the grounded plan step's instructions name neither the task id nor its scope", async () => {
+  it("the grounded plan step's instructions do not name the task id", async () => {
     const { log } = await freshKernelAndLog()
     const analyzers = new Map<string, Analyzer>([['agent-analyzer', { id: 'agent-analyzer', analysisStep: () => stepFixture({ id: STEP_ID.analyze, role: STEP_ROLE.scout }) }]])
     const k = new Kernel(log, undefined, analyzers)
@@ -1273,7 +1274,6 @@ describe('plan notes', () => {
     expect(instructions).toContain(PlanNoteToolName.write)
     expect(instructions).toContain(PlanNoteToolName.finalize)
     expect(instructions).not.toContain(t.id)
-    expect(instructions).not.toContain(planScope(t.id))
   })
 })
 
@@ -1326,6 +1326,21 @@ describe('workspaces', () => {
     expect((await k.setWorkspaceArchived(w.id, true, WEB)).archivedAt).not.toBeNull()
     expect((await k.setWorkspaceArchived(w.id, false, WEB)).archivedAt).toBeNull()
     expect(await codeOf(k.retitleWorkspace('nope', 'x', WEB))).toBe(KERNEL_ERROR_CODE.workspace_not_found)
+  })
+  it('identifyProject appends one project_identified with no task, and the latest identity wins', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const mark = (await log.all()).length
+    expect(await k.identifyProject({ name: 'p', dir: '/x' }, WEB)).toEqual({ name: 'p', dir: '/x' })
+    const appended = (await log.all()).slice(mark)
+    expect(appended.map(e => [e.kind, e.taskId, e.door, e.payload])).toEqual([[EVENT_KIND.project_identified, null, WEB.door, { name: 'p', dir: '/x' }]])
+    await k.identifyProject({ name: 'q', dir: '/y' }, WEB)
+    expect((await k.state()).project).toEqual({ name: 'q', dir: '/y' })
+  })
+  it('identifyProject refuses an empty name and appends nothing', async () => {
+    const { k, log } = await freshKernelAndLog()
+    const mark = (await log.all()).length
+    await expect(k.identifyProject({ name: '', dir: '/x' }, WEB)).rejects.toThrow()
+    expect((await log.all()).length).toBe(mark)
   })
   it('createWorkspace refuses a second record at a live cwd', async () => {
     const k = await freshKernel()
@@ -1405,7 +1420,7 @@ describe('workspaces', () => {
   it('requestRun refuses an orphaned task rather than silently running it somewhere else', async () => {
     const { k, log } = await freshKernelAndLog()
     const orphan: TaskNode = {
-      id: 'orphan-1', parentId: null, workspaceId: 'workspace-the-fold-never-saw', type: 'generic',
+      id: 'orphan-1', parentId: null, workspaceId: 'workspace-the-fold-never-saw', type: TaskType.generic,
       title: 'ghost task', spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null,
       depth: 0, createdAt: '2026-09-14T00:00:00.000Z',
     }

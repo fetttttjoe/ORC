@@ -2,9 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { KnowledgeToolName, PlanDraft, PlanNoteToolName, ROLE_SKILL, STEP_ROLE, validatePlan, VERIFY_STEP_ID } from '@orc/contracts'
+import { KnowledgeToolName, PlanNoteToolName, ROLE_SKILL } from '@orc/contracts'
 import { parseSkillMd, SCOPED_CHANGES_TOOL_NAME, TASK_PLAN_TOOL_NAME } from '@orc/kernel'
-import { driftLine, REGROUND_HEAL_PLAN, REGROUND_PLAN } from './drift-line'
 import { SHIPPED_SKILLS } from './shipped-skills'
 
 // The tracked shipped-skill sources (exceptions inside gitignored vault/). The role skills carry
@@ -205,47 +204,5 @@ describe('codebase-analysis pins the knowledge-first grounding protocol', () => 
   test('never mentions the retired memory tools or the drift-advisory percentage', () => {
     expect(body).not.toContain('memory_')
     expect(body).not.toContain('34%')
-  })
-})
-
-// P5 (boundary-contracts spec): driftLine could only ever recommend the full kb-build REBUILD —
-// healing a handful of drifted notes had no targeted instrument. This is that instrument's other
-// tracked data file (docs/, not vault/skills/), so it gets the same "stays valid" home. Parses the
-// draft, validates it, and pins the ONE thing the runtime tool gate actually reads: role===auditor
-// AND id===VERIFY_STEP_ID is what earns scoped_changes registration
-// (packages/kernel/src/execution/scoped-changes-tool.ts) — a plan file that drifts off either term
-// silently loses the tool it needs to do its job.
-describe('reground-heal plan file', () => {
-  // Repo root, not docs/: REGROUND_HEAL_PLAN already carries the 'docs/' prefix (it is the same
-  // string driftLine hands the operator to paste into `orc propose --file`), so joining it under
-  // DOCS_DIR a second time would double the segment. Reading the path through the constant, not a
-  // second 'reground-heal.plan.json' literal, closes the rename direction: renaming the file in
-  // main.ts alone used to leave this test pointed at the old name until someone remembered to edit
-  // both spellings.
-  const ROOT_DIR = fileURLToPath(new URL('../../../', import.meta.url))
-
-  test('stays a valid, single-step auditor plan that earns the verify-step tools', () => {
-    const raw = JSON.parse(readFileSync(path.join(ROOT_DIR, REGROUND_HEAL_PLAN), 'utf8'))
-    const draft = PlanDraft.parse(raw)
-    const plan = { taskId: 'reground-heal-check', version: 1, ...draft }
-    expect(validatePlan(plan)).toEqual({ ok: true })
-    expect(plan.steps).toHaveLength(1)
-    expect(plan.steps[0]?.role).toBe(STEP_ROLE.auditor)
-    expect(plan.steps[0]?.id).toBe(VERIFY_STEP_ID)
-  })
-})
-
-// C.4: driftLine names the command whose plan file matches the branch it took — the ≥34%
-// (needsReground) branch recommends the full REGROUND_PLAN remap, the below-threshold branch
-// recommends the cheaper REGROUND_HEAL_PLAN instrument. Exact-substring pins on both paths, so a
-// swap between the two (recommending the wrong instrument for the wrong severity) fails the build
-// instead of shipping a human the wrong command.
-describe('driftLine', () => {
-  test('at/above the reground threshold (34%) names REGROUND_PLAN', () => {
-    expect(driftLine({ checkable: 10, drifted: 4, ratio: 0.4 })).toContain(REGROUND_PLAN)
-  })
-
-  test('below the reground threshold names REGROUND_HEAL_PLAN', () => {
-    expect(driftLine({ checkable: 10, drifted: 2, ratio: 0.2 })).toContain(REGROUND_HEAL_PLAN)
   })
 })

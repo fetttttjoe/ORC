@@ -1,4 +1,4 @@
 # packages/contracts/src/index.ts
 
 ## Facts
-- packages/contracts/src/index.ts re-exports every contracts submodule (task, plan, events, execution, memory, scope, providers, plugins, decision, analysis, knowledge, knowledge-events, claim-state, preload-line, plan-rules, approval, etc.) with export-star lines, as the package's single public entry point. {7xw8lqy7 @packages/contracts/src/index.ts #architecture-current}
+- packages/contracts/src/index.ts is the package's main entry, star-exporting the shared contracts modules; fixtures, health, feedback-key and step-ids are reached only through package.json subpath exports. {7xw8lqy7 @packages/contracts/src/index.ts #architecture-current}

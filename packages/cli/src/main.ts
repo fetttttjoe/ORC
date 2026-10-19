@@ -2,11 +2,9 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { Command, InvalidArgumentError } from 'commander'
-import { AUTHOR_SOURCE, ClaimClass, claimHistory, composeAuthor, Door, NO_CHAT, EDGE_DIRECTION, errorMessage, EVENT_KIND, EventKind, foldMemory, MEMORY_ACCESS, MemoryDeletedPayload, MemoryScope, MemoryWrittenPayload, noteKey, NoteKind, NOTE_TIER, NoteTier, parseLinkSpec, PlanDraft, RunOutcome, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, LinkKind, slugId, type Analyzer, type EventRecord, type MemoryAuthor, type MemoryLink, type NoteFields, type ExecutionPort, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate, type ClaimEvent } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, NO_CHAT, EventKind, PlanDraft, RunOutcome, STRATEGY, TASK_STATUS, type Analyzer, type EventRecord, type ExecutionPort, type Plan, type TaskNode, type WorkspaceWithHealth, formatModelRate } from '@orc/contracts'
 import { openStorage, Kernel, atomicWriteFileSync, listProjectIds, claimSlot, fold, gatedChildren, liveSupervisors, orphanTasks, staleSupervisors, grantExtensionTrust, grantMcpTrust, initializeProject, isExtensionTrusted, isMcpTrusted, loadConfig, loadTrust, migrateDatabase, requireProject, runtimeLockHeld, stepUsage, subtreeUsage, tasksByWorkspace, taskUsage, type EventLog, type OrcConfig, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
 import { createVaultProjector, parsePlanFile } from '@orc/vault-projector'
-import { archiveCandidates, checkoutDrift, frontier, needsReground, probeMemory, RECHECK_KINDS, recheckNotes, restampToHead, summarize } from '@orc/memory'
-import { withMemory } from './memory-open'
 import { DEFAULT_TEMPLATE_MODEL, singleStepDraft } from './plan-template'
 import { seedShippedSkills } from './shipped-skills'
 import { seedRegistries, buildRuntime } from './runtime'
@@ -20,9 +18,11 @@ import { parseNonNegativeInteger, parsePositiveInteger } from './int-arg'
 import { derivedPlanBlock, renderPlanHuman } from './plan-render'
 import { adrCommand } from './adr-commands'
 import { knowledgeCommand } from './knowledge-commands'
+import { KNOWLEDGE_HEALTH_TTL_MS, knowledgeHealthOf } from './knowledge-health-of'
 import { wsCommand, WS_NEEDS_PROJECT } from './ws-commands'
 import { briefCommand } from './brief-commands'
-import { driftLine } from './drift-line'
+import { knowledgeHealthLine } from './knowledge-health-line'
+import { memoizeFor } from './memoize-for'
 import { buildWorkspaceOps, requireLiveWorkspace, type WorkspaceConfig } from './workspace-ops'
 import type { WorkspaceDoor } from './door-kernel'
 import { listWorkspaceHealth } from './workspace-health'
@@ -37,7 +37,6 @@ import type { PlanSource } from '@orc/ui-core'
 // Every command in this file enters through the terminal, so every event it causes is stamped with
 // the same Origin — identity (which door), never authority: no handler below branches on it.
 const CLI_ORIGIN = NO_CHAT(Door.cli)
-
 
 function buildCopilotConfig(
   discovery: ReturnType<typeof buildModelDiscovery>,
@@ -139,13 +138,6 @@ function parsePositiveNumber(value: string): number {
   return parsed
 }
 
-const parseNoteTier = enumArg<NoteTier>('tier', Object.values(NoteTier))
-// Without this a human could not record a DECISION at any door: `memory add` had no kind flag, so
-// every note either human door produced defaulted to 'fact' and only an agent mid-step could mint
-// a decision. 'adr' is the near-miss it catches — that is a tag, never a kind.
-const parseNoteKind = enumArg<NoteKind>('kind', Object.values(NoteKind))
-const parseClaimClass = enumArg<ClaimClass>('claim class', Object.values(ClaimClass))
-
 // An AUTHORED draft — the door's parsing job. The template arm lives in OrcActions.propose, so
 // every door validates one draft the same way.
 function authoredDraft(opts: { file?: string; fromVault?: boolean }, taskId: string, config?: OrcConfig): PlanDraft {
@@ -244,12 +236,6 @@ export function buildProgram(
     : unreachable && { config: unreachable.config, logUnreachable: { reason: DATABASE_UNREACHABLE(unreachable.config.databaseUrl), error: unreachable.error } }
   program.addCommand(knowledgeCommand({ requireKernel, noProject, ...(knowledgeProject && { project: knowledgeProject }) }))
   program.addCommand(briefCommand({ noProject, ...(plugin && { project: { config: plugin.config, log: plugin.log } }) }))
-
-  // The author every `orc memory` write carries, in ONE place — a dozen handlers each spelling
-  // their own `{ source: cli, workspaceId: … }` is exactly the shape that leaves one command
-  // writing knowledge under the wrong checkout. Folded per invocation rather than captured once:
-  // `orc ws new` can mint a workspace mid-session, and a boot-time snapshot would not see it.
-  const cliAuthor = (): Promise<MemoryAuthor> => cwdAuthor(requireKernel(), plugin?.config.dir, AUTHOR_SOURCE.cli, CLI_ORIGIN)
 
   // Discovery-backed model validation rejects invented refs at creation time on every surface;
   // declared here (not at the actions site below) so the `plan` command's rate line can reach it.
@@ -417,7 +403,7 @@ export function buildProgram(
 
   program
     .command('purge <projectName>')
-    .description("cancel running work and delete the named project's events, operations, and memory read model — identity stays (clean slate for re-testing)")
+    .description("cancel running work and delete the named project's events and operations — identity and knowledge files stay (clean slate for re-testing)")
     .requiredOption('--yes', 'confirm: this irreversibly deletes the project history')
     .action(async (projectName: string) => {
       // The target comes from whatever .orc/config.json the cwd resolves to, so a script that
@@ -442,11 +428,7 @@ export function buildProgram(
       // ones accumulated 1128 events nobody could name or reach: an identity file is per-directory
       // and `orc init` overwrites it, so a re-inited directory orphans its predecessor outright.
       // The web UI listed them all along; this is the same list, from the same primitive.
-      //
-      // Names are NOT resolved here. A foreign project's name lives in a memory note inside its own
-      // read model, and reading that means opening its Surreal database — a listing must not do
-      // that for every row just to print a label. The cwd project knows its own name; the rest are
-      // exactly the ones you cannot name, which is the fact worth showing.
+      // A foreign project's name is not resolved: that would read every project's log for a label.
       const cfg = plugin?.config
       if (!cfg) throw noProject('listing projects needs a project context')
       const ids = await listProjectIds(cfg.databaseUrl)
@@ -457,9 +439,9 @@ export function buildProgram(
 
   program
     .command('delete [projectName]')
-    .description("delete a project entirely — history, knowledge and durable-execution state (purge keeps the chat; this does not)")
+    .description("delete a project entirely — history and durable-execution state (purge keeps the chat; this does not)")
     .option('--id <projectId>', 'delete a FOREIGN project by id — for one whose identity file is gone, so no name exists to confirm against (see: orc projects)')
-    .requiredOption('--yes', 'confirm: this irreversibly deletes the project and its knowledge')
+    .requiredOption('--yes', 'confirm: this irreversibly deletes the project')
     .action(async (projectName: string | undefined, opts: { id?: string }) => {
       const cfg = plugin?.config
       if (!cfg) throw noProject('deleting a project needs a project context')
@@ -576,7 +558,7 @@ export function buildProgram(
   }
 
   // How long to wait for a freshly spawned supervisor's first heartbeat. A cold one pays a DBOS
-  // launch, a plugin load and a Surreal connect before it beats, so this is generous — but bounded,
+  // launch and a plugin load before it beats, so this is generous — but bounded,
   // so a broken install reports where to look instead of hanging.
   // ponytail: fixed, not configurable — make it a setting if a real deployment ever boots slower.
   const SPAWN_WAIT_MS = 15_000
@@ -686,13 +668,10 @@ export function buildProgram(
 
   program
     .command('cancel <taskId>')
-    .description('cancel the active run (terminal in M2); sweeps knowledge notes the cancelled subtree still owns')
+    .description('cancel the active run (terminal in M2)')
     .action(async (taskId: string) => {
-      const { swept, sweepError } = await actions().cancel(taskId, CLI_ORIGIN)
+      await actions().cancel(taskId, CLI_ORIGIN)
       console.log('cancelled')
-      if (sweepError) console.warn(`sweep skipped: ${sweepError} — orphaned notes remain (content is still in the event log)`)
-      for (const n of swept) console.log(`swept ${n.scope === 'project' ? '' : `${n.scope}/`}${n.id} — ${n.title}`)
-      if (swept.length > 0) console.log(`swept ${swept.length} orphaned note(s); content preserved in the event log`)
     })
 
   program
@@ -710,11 +689,11 @@ export function buildProgram(
       }
       if (dist.rebuilt) console.log(`graph ui: web/dist was ${dist.verdict} — rebuilt automatically`)
       const cfg = plugin?.config
+      const knowledgeOf = plugin && memoizeFor(KNOWLEDGE_HEALTH_TTL_MS, () => knowledgeHealthOf(plugin, requireKernel()))
       const ui = startGraphUi({
         url: (cfg ?? loadConfig()).databaseUrl,
         port: opts.port,
         cwdProject: cfg ? { id: cfg.projectId, name: cfg.projectName, dir: cfg.dir } : undefined,
-        memoryHalfLifeDays: (cfg ?? loadConfig()).memoryHalfLifeDays,
         // mutations only when launched inside a project with a real runtime behind it
         actions: portFactory && plugin ? actions() : undefined, // the web door names Door.web per call (server.ts)
         copilot: portFactory && plugin && discovery
@@ -725,17 +704,9 @@ export function buildProgram(
           })
           : undefined,
         defaultCwd: cfg?.dir ?? process.cwd(),
-        // degraded-memory + supervisor visibility: the footer badge polls this — probe per call,
-        // no cache. Supervisor state answers "is anything driving?" (2026-08-01's recurring blind
-        // spot) from the heartbeat rows + the pid file serve writes only once its runtime is ready.
-        health: plugin ? async () => {
-          // The supervisor's pid gates the stage: probeMemory reports one only when the process
-          // that published it is the one driving now. See its comment for why pid beats an age.
+        health: plugin && knowledgeOf ? async () => {
           const supervisor = plugin.storage ? await probeSupervisor(plugin.storage, plugin.config.projectRoot, plugin.config) : undefined
-          return {
-            memory: await probeMemory(plugin.config, plugin.log, supervisor?.pid),
-            ...(supervisor && { supervisor }),
-          }
+          return { knowledge: await knowledgeOf(), ...(supervisor && { supervisor }) }
         } : undefined,
         // P6: copilot exchanges are events — the log is the record, the browser is a cache
         appendExchange: plugin ? async x => appendCopilotExchange(plugin.log, x, Door.web) : undefined,
@@ -798,17 +769,7 @@ export function buildProgram(
       // cap PER DEPTH, not per run. PHASE1_MAX_SLOTS is 1 because the zone write-fence is still an
       // in-process map (plugins/executor-api-loop/src/tools.ts).
       console.log(`  parallelism: ${config.concurrency} concurrent steps per depth (waves are awaited whole) · max depth ${config.maxDepth} · ${PHASE1_MAX_SLOTS} supervisor`)
-      // Boot is the one moment an operator is guaranteed to be reading, but only the re-ground
-      // case earns a line: a supervisor reporting a number every start teaches the reader to skip
-      // its output, and `orc status` has the number on demand.
-      try {
-        const { drift } = await probeMemory(config, storage.events)
-        if (drift && needsReground(drift)) console.log(`  ${driftLine(drift)}`)
-      } catch (err) {
-        // Never blocks boot — but say WHY it is missing, or a permanently broken probe reads as a
-        // clean graph, which is the failure this whole signal exists to prevent.
-        console.warn(`  knowledge drift not measured: ${errorMessage(err)}`)
-      }
+      console.log(`  ${knowledgeHealthLine(await knowledgeHealthOf({ config, log: storage.events }, requireKernel()))}`)
       try {
         await runSupervisor({ storage, port, idleMs: opts.idle * 60_000 })
       } finally {
@@ -856,13 +817,7 @@ export function buildProgram(
       if (!task) throw new Error(`no task '${taskId}'`)
       if (plugin) {
         console.log(`project: ${plugin.config.projectName} (${plugin.config.projectId})`)
-        const health = await probeMemory(plugin.config, plugin.log)
-        console.log(`memory: ${health.state}${health.reason ? ` (${health.reason})` : ''}`)
-        // Two different lags, reported separately on purpose: `state`/`pending` is the read model
-        // catching up with the log, which orc fixes by itself; drift is the corpus lagging the CODE,
-        // which it cannot. Always print the ratio when measurable — a graph quietly 20% behind is
-        // worth knowing before the advisory threshold makes it loud.
-        if (health.drift) console.log(driftLine(health.drift))
+        console.log(knowledgeHealthLine(await knowledgeHealthOf(plugin, requireKernel())))
       }
       console.log(`${task.id}  ${task.status}  ${task.title}`)
       const plan = state.plans.get(taskId)?.versions.at(-1)
@@ -958,7 +913,7 @@ export function buildProgram(
         // project_status names the checkout each task is worked in — a driver's first question in a
         // project with a worktree per request. Read-only, so it is wired whether or not this server
         // can mutate (actions above may be null).
-        listWorkspaces: () => listWorkspaceHealth({ config, log }),
+        listWorkspaces: () => listWorkspaceHealth({ log }),
       })
     })
   mcp
@@ -1014,407 +969,6 @@ export function buildProgram(
         throw new Error(`undeclared extension '${p}' — declare it in .orc/config.json first`)
       grantExtensionTrust(p, config.projectRoot)
       console.log(`trusted extension '${p}' (bound to its current content) — takes effect on the next orc invocation`)
-    })
-
-  const mem = program.command('memory').description('project knowledge graph (M4b)')
-  mem
-    .command('add')
-    .description('write or update a memory note')
-    .requiredOption('--id <id>', 'note id')
-    // optional, matching the TOOL boundary: the store merges the stored title forward on an
-    // update (merge-on-omit, store.ts's undefined-is-omission rule), so requiring it here made
-    // this door reject updates the same write accepts from an agent — observed live adding one
-    // supersedes link, which demanded the title be retyped verbatim to not change anything.
-    .option('--title <title>', 'note title (required for a NEW note; an update keeps the stored one)')
-    .option('--summary <s>', 'short summary')
-    .option('--body <b>', 'note body (markdown)')
-    .option('--tags <tags...>', 'tags')
-    .option('--categories <categories...>', 'categories')
-    // The human door for a DECISION. Omitted keeps the schema default ('fact') on a new note and,
-    // under merge-on-omit, the stored kind on an update — so adding a link to an existing decision
-    // does not silently demote it to a fact.
-    .option('--kind <k>', `what kind of knowledge: ${Object.values(NoteKind).join(' | ')}`, parseNoteKind)
-    // Without this the CLI could create knowledge but never wire it in, so every human-authored
-    // note landed isolated — reachable by search, invisible to traversal. Same shorthand the web
-    // note editor uses, so a note wired from either surface is the same edge.
-    .option('--links <spec>', "typed edges, comma-separated: 'refines:area-memory, other-note'", parseLinkSpec)
-    // Claims were writable only by an agent through memory_write, so correcting one stale statement
-    // by hand meant running an agent. These are the same two fields that tool takes (`addClaims` /
-    // `invalidates`) — additive by design: state what to add and what to retire, never the whole
-    // array, because supplying the array would REPLACE under the store's merge-on-omit rule.
-    .option('--claim <text...>', 'state a claim on this note (addClaims) — repeatable')
-    .option('--claim-class <c>', `what every --claim on this call states: ${Object.values(ClaimClass).join(' | ')}`, parseClaimClass, ClaimClass.fact)
-    .option('--invalidate <claimId...>', 'retire a claim by its 12-hex id (invalidates) — repeatable')
-    .action(async (o: { id: string; title?: string; summary?: string; body?: string; tags?: string[]; categories?: string[]; kind?: NoteKind; links?: MemoryLink[]; claim?: string[]; claimClass: ClaimClass; invalidate?: string[] }) => {
-      const { config, log } = needPlugin()
-      await withMemory({ log, config }, async memory => {
-        // the tool boundary's own refusal, at this door too: a NEW note without a title fails the
-        // schema anyway, but with a zod trace where the writer needs the one-line rule. Drain
-        // first so the existence check reads the log's present, not the last projection — a
-        // refusal must never hinge on a lagging read model.
-        if (o.title === undefined) {
-          await memory.projector.catchUp()
-          if (await memory.store.get(o.id) === null)
-            throw new Error('a new note needs a title (it derives the id) — pass an id instead to update an existing note')
-        }
-        await memory.store.write({
-          id: o.id, title: o.title, summary: o.summary, body: o.body,
-          tags: o.tags, categories: o.categories, links: o.links,
-          // conditional spread, not a bare `kind: o.kind`: an optional field set to undefined
-          // ERASES the stored column, so an unflagged update would wipe the note's kind
-          ...(o.kind !== undefined && { kind: o.kind }),
-          ...(o.claim !== undefined && { addClaims: o.claim.map(text => ({ text, class: o.claimClass, anchors: [] })) }),
-        }, await cliAuthor(), { ...(o.invalidate !== undefined && { invalidates: o.invalidate }) })
-        await memory.projector.catchUp() // one-shot: no live subscription in a CLI process, so project the append now
-      })
-      console.log(`wrote memory '${o.id}'`)
-    })
-  mem
-    .command('rm <id>')
-    .description('delete a memory note')
-    .option('--scope <s>', 'scope')
-    .action(async (id: string, o: { scope?: string }) => {
-      const { config, log } = needPlugin()
-      await withMemory({ log, config }, async memory => {
-        await memory.store.remove(id, o.scope, await cliAuthor())
-        await memory.projector.catchUp()
-      })
-      console.log(`deleted '${id}'`)
-    })
-  mem
-    .command('recheck')
-    .description('recompute every note\'s currency against HEAD and report what the graph could retire')
-    .option('--candidates', 'list only what is retirable, with the evidence for each')
-    .option('--apply', 'archive the retirable notes (default: report only)')
-    .action(async (o: { candidates?: boolean; apply?: boolean }) => {
-      const { config, log } = needPlugin()
-      // RECHECK_KINDS, not a hand-spelled list: a previous one omitted memory_verified, so a
-      // note an auditor had confirmed still counted as drifted here while health called it clean.
-      // The named set also carries memory_outcome — the used-but-useless rule's only input.
-      const events = await log.after(0, RECHECK_KINDS)
-      const terminalTaskIds = new Set(
-        [...(await requireKernel().state()).tasks.values()]
-          .filter(t => TERMINAL_TASK_STATUS.has(t.status))
-          .map(t => t.id),
-      )
-      const notes = await recheckNotes(events, { drift: checkoutDrift(config.dir), terminalTaskIds })
-      const s = summarize(notes)
-      // "current" means CHECKED and unmoved. A note with no stamp or no declared paths was never
-      // compared to anything, so it is reported as never-checked rather than folded into current —
-      // that conflation printed 49 of 84 notes "current" against 5 genuinely checked.
-      console.log(`${s.total} note(s): ${s.clean} current, ${s.drifted} drifted, ${s.uncheckable} never checked, ${s.unknown} unreachable`)
-
-      const goes = archiveCandidates(notes)
-      const byKey = new Map(notes.map(n => [n.key, n]))
-      if (o.candidates || goes.length > 0) {
-        for (const c of goes) {
-          const n = byKey.get(c.key)
-          // `scope/id`, never the raw composite key: noteKey joins the two with a NUL, which reads
-          // as a space in a terminal and makes the whole line BINARY to grep — a retirable list
-          // nobody can pipe into anything is a list nobody can act on in bulk.
-          console.log(`${n ? `${n.scope}/${n.id}` : c.key}\t${c.reason}\t${c.evidence}\t${n?.title ?? ''}`)
-        }
-      }
-      // No clock anywhere in this verdict: candidacy is `superseded` or `task-settled`, both facts
-      // rather than durations. A drifted note is the HEAL loop's work, not this one's, and a note
-      // whose paths have not moved is still true however old or cold — see archive.ts.
-      if (goes.length === 0) {
-        console.log('_nothing is retirable — every note is current, protected, or uncheckable_')
-        return
-      }
-      if (!o.apply) {
-        console.log(`${goes.length} note(s) are retirable on evidence (not age) — re-run with --apply to archive`)
-        return
-      }
-      // Archiving is a WRITE of the same note with archived:true, so merge-on-omit carries every
-      // other field forward untouched and the log keeps every revision — `orc memory restore <id>`
-      // brings it back. Nothing is deleted.
-      await withMemory({ log, config }, async memory => {
-        // ONE pass over the log for the whole batch: the per-note door folded the entire knowledge
-        // log each time, so archiving N notes cost N reads and N folds.
-        const retiring = goes.flatMap(c => {
-          const n = byKey.get(c.key)
-          return n ? [{ id: n.id, scope: n.scope }] : []
-        })
-        await memory.store.setArchivedAll(retiring, true, await cliAuthor())
-        await memory.projector.catchUp()
-      })
-      console.log(`archived ${goes.length} note(s) — restore any with: orc memory restore <id> --scope <scope>`)
-    })
-  mem
-    .command('archive <id>')
-    .description('retire ONE note by id — the escape hatch when evidence cannot reach it')
-    .option('--scope <scope>', 'the note\'s scope (default: project)')
-    .action(async (id: string, o: { scope?: string }) => {
-      const { config, log } = needPlugin()
-      // `recheck --apply` archives what the EVIDENCE reaches; this reaches the rest. A note whose
-      // provenance was damaged (an old archive/restore that overwrote its author before that was
-      // fixed) has no evidence left to retire it by, and without this it could never be retired.
-      await withMemory({ log, config }, async memory => {
-        await memory.store.setArchived(id, o.scope ?? 'project', true, await cliAuthor())
-        await memory.projector.catchUp()
-      })
-      console.log(`archived '${id}' — restore with: orc memory restore ${id} --scope ${o.scope ?? 'project'}`)
-    })
-  mem
-    .command('restore <id>')
-    .description('bring an archived note back into the read model')
-    .option('--scope <scope>', 'the note\'s scope (default: project)')
-    .action(async (id: string, o: { scope?: string }) => {
-      const { config, log } = needPlugin()
-      await withMemory({ log, config }, async memory => {
-        await memory.store.setArchived(id, o.scope ?? 'project', false, await cliAuthor())
-        await memory.projector.catchUp()
-      })
-      console.log(`restored '${id}'`)
-    })
-  mem
-    .command('frontier')
-    // "candidates", not "the edge": the formula (plugins/memory/src/frontier.ts) is an unvalidated
-    // [conjecture] ranking by link shape alone — the description must not assert a conclusion the
-    // read-out has not earned. See the printed qualifier below for the same honesty at the point a
-    // human actually reads it.
-    .description('notes that link out more than in, by link shape alone — unvalidated candidates, not a verdict')
-    .option('--limit <n>', 'how many to show (default 10)', parsePositiveInteger)
-    .action(async (o: { limit?: number }) => {
-      const { log } = needPlugin()
-      // pure fold, like sweep: the frontier is a property of the authored graph, so it needs the
-      // log and no read model at all — it is correct even with SurrealDB down.
-      const events = await log.after(0, [EVENT_KIND.memory_written, EVENT_KIND.memory_deleted])
-      const m = foldMemory(events)
-      // `note` here is MemoryWrittenPayload's MemoryNoteInput — it carries no updatedAt (that field
-      // exists only on the projector's stored/rendered Note). Last-write time lives on the fold's
-      // separate `writes` map, the same source sweep.ts's lastTouchedAt reads from.
-      const notes = [...m.notes.values()].map(({ note }) => ({
-        id: note.id, scope: note.scope, title: note.title, tier: note.tier,
-        links: note.links.map(l => l.id), updatedAt: m.writes.get(noteKey(note.scope, note.id)) ?? '',
-      }))
-      const hits = frontier(notes, new Date().toISOString(), { limit: o.limit ?? 10 })
-      // frontier.ts's own top comment carries the full reasoning; this is the one line of it that
-      // reaches a human looking at the terminal rather than the source. Counted live off the fold,
-      // not quoted as a number in prose, so the caveat cannot go stale the way a hardcoded count would.
-      const scored = notes.filter(n => n.tier === NOTE_TIER.semantic).length
-      console.log(`_link shape only, over ${scored} semantic note(s) — not checked against any real retrieval miss; at this size a link or two flips the order_`)
-      if (hits.length === 0) {
-        console.log('_no note points at more than points back at it — nothing is obviously under-developed_')
-        return
-      }
-      for (const h of hits)
-        console.log(`${h.scope}/${h.id}\t${h.title}\tout ${h.out}\tin ${h.in}\tscore ${h.score.toFixed(2)}`)
-    })
-  mem
-    .command('ls')
-    .description('list memory notes')
-    .option('--category <c>', 'filter by category')
-    .option('--tag <t>', 'filter by tag')
-    .option('--tier <t>', `only one memory lane: ${Object.values(NoteTier).join(' | ')}`, parseNoteTier)
-    // The inventory question `orc adr ls` cannot answer: every note under one kind, decisions
-    // included. `kind` exists only on the SEMANTIC tier, so this filter selects within that lane
-    // rather than across all three. Without it a human listing knowledge by kind had to read the
-    // whole corpus and filter by eye.
-    .option('--kind <k>', `only one note kind: ${Object.values(NoteKind).join(' | ')}`, parseNoteKind)
-    .action(async (o: { category?: string; tag?: string; tier?: NoteTier; kind?: NoteKind }) => {
-      const { config, log } = needPlugin()
-      const rows = await withMemory({ log, config }, async memory => {
-        await memory.projector.catchUp()
-        return memory.store.list({ category: o.category, tag: o.tag, tier: o.tier, kind: o.kind })
-      })
-      // the agent path already says "absence is not proof a decision doesn't exist"; printing
-      // zero bytes gives the human strictly less than the model gets, and reads as "no such note"
-      // when the honest answer is "the read model returned nothing"
-      if (rows.length === 0) console.log('_no notes_')
-      // hits is the observed hot/cold split — the only evidence for whether a decay/sweep policy
-      // would ever be tuned against data rather than guessed at.
-      for (const n of rows) console.log(`${n.id}\t${n.tier}\t${n.title}\t[${n.categories.join(',')}]\thits ${n.hits}\t${n.summary}`)
-    })
-  mem
-    .command('search <query>')
-    .description('search memory notes by meaning + keyword (hybrid; keyword-only if no embedder is configured)')
-    .action(async (query: string) => {
-      const { config, log } = needPlugin()
-      const rows = await withMemory({ log, config }, async memory => {
-        await memory.projector.catchUp()
-        return memory.store.search(query)
-      })
-      if (rows.length === 0) console.log('_no notes_')
-      for (const n of rows) console.log(`${n.id}\t${n.title}\t${n.summary}`)
-    })
-  mem
-    .command('cat <id>')
-    .description('print a memory note as JSON')
-    .option('--scope <s>', 'scope')
-    .action(async (id: string, o: { scope?: string }) => {
-      const { config, log } = needPlugin()
-      const n = await withMemory({ log, config }, async memory => {
-        await memory.projector.catchUp()
-        const note = await memory.store.get(id, o.scope)
-        // a human read counts the same as an agent read — but only on a hit, and only after the
-        // note was actually produced (same rule the memory_read tool follows). No catchUp: the
-        // append is durable, and every read path already drains before it reads.
-        if (note) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.read, await cliAuthor())
-        return note
-      })
-      if (!n) throw new Error(`no note '${id}'`)
-      console.log(JSON.stringify(n, null, 2))
-    })
-  mem
-    .command('claims <id>')
-    .description("list a note's live claims, or --history to include ones it has retired")
-    .option('--scope <s>', 'scope')
-    .option('--history', 'fold the log for retired claims and the write that retired each')
-    .option('--json', 'raw live claims (scripts), or the raw folded history when --history is given')
-    .action(async (id: string, o: { scope?: string; history?: boolean; json?: boolean }) => {
-      const { config, log } = needPlugin()
-      const scope = o.scope ?? MemoryScope.project
-      await withMemory({ log, config }, async memory => {
-        if (!o.history) {
-          // claims live in the derived read model, so drain first — same rule every other read
-          // command follows. Without it a claim written moments ago reads back as "no claims",
-          // which this branch reports as an ERROR rather than as staleness.
-          await memory.projector.catchUp()
-          const live = await memory.store.claimsFor(id, scope)
-          // --json is for scripts: emit the raw Claim[] and stop. An empty result is [] and exit 0
-          // here, the rule `topics --json` already settled — a script wants absence as DATA, not a
-          // thrown diagnostic it has to parse. Deliberately ahead of the human throw below, which
-          // stays exactly as it was because it names a note a person can go and read.
-          if (o.json) { console.log(JSON.stringify(live, null, 2)); return }
-          if (live.length === 0) throw new Error(`no claims on '${id}' (scope ${scope}) — 'orc memory cat ${id}' to see the note`)
-          for (const c of live) console.log(`${c.id}  ${c.validFrom}  ${c.text}`)
-          return
-        }
-        // History comes from the LOG, not the read model: the note payload carries live claims only,
-        // so a retired claim exists nowhere else. Ordered by seq, which claimHistory requires.
-        // memory_deleted travels with memory_written because deleting a note ends its claims'
-        // stretches too — the projector drops their rows, so a fold that saw only writes would
-        // report a deleted note's claims as live forever.
-        const events = (await log.all()).filter(e => e.kind === EVENT_KIND.memory_written || e.kind === EVENT_KIND.memory_deleted)
-        const folded = claimHistory(events.flatMap((e): ClaimEvent[] => {
-          if (e.kind === EVENT_KIND.memory_deleted) {
-            const d = MemoryDeletedPayload.safeParse(e.payload)
-            if (!d.success || d.data.id !== id || d.data.scope !== scope) return []
-            return [{ seq: e.seq, ts: e.ts, author: d.data.author, sourceRevision: null, why: null, decision: null, claims: [], invalidates: [], deleted: true }]
-          }
-          const p = MemoryWrittenPayload.safeParse(e.payload)
-          if (!p.success || p.data.note.id !== id || p.data.note.scope !== scope) return []
-          const n: NoteFields = p.data.note
-          return [{
-            seq: e.seq, ts: e.ts, author: p.data.author, sourceRevision: n.sourceRevision ?? null,
-            why: p.data.why, decision: p.data.decision,
-            claims: n.claims ?? [], invalidates: p.data.invalidates, deleted: false,
-          }]
-        }))
-        // same rule on the history form: one parseable JSON value (the folded claims, tombstones
-        // and all), never JSON followed by human rows
-        if (o.json) { console.log(JSON.stringify(folded, null, 2)); return }
-        if (folded.length === 0) throw new Error(`no claims in the log for '${id}' (scope ${scope})`)
-        for (const c of folded) {
-          console.log(`${c.id}  ${c.validFrom}  ${c.invalidatedAt ? `RETIRED ${c.invalidatedAt}` : 'live'}  ${c.text}`)
-          console.log(`    added by ${composeAuthor(c.addedBy.author)}${c.addedBy.why ? `: ${c.addedBy.why}` : ''}${c.addedBy.decision ? ` [${c.addedBy.decision}]` : ''}`)
-          if (c.retiredBy)
-            console.log(`    retired by ${composeAuthor(c.retiredBy.author)}${c.retiredBy.why ? `: ${c.retiredBy.why}` : ''}${c.retiredBy.decision ? ` [${c.retiredBy.decision}]` : ''}`)
-        }
-      })
-    })
-  mem
-    .command('topics [topicKey]')
-    .description("derived topics over project claims (statements grouped by meaning); pass a key to list that topic's claims")
-    .option('--json', 'raw topic inventory (scripts), or the raw claims of one topic when a key is given')
-    .action(async (topicKey: string | undefined, o: { json?: boolean }) => {
-      const { config, log } = needPlugin()
-      await withMemory({ log, config }, async memory => {
-        // topics are refreshed by the projector's drain — read after catching up, or the listing
-        // (and the keys it hands out) can reflect a stale partition.
-        await memory.projector.catchUp()
-        if (topicKey === undefined) {
-          const topics = await memory.store.topics()
-          // --json is for scripts: emit the raw Topic[] and stop. An empty inventory is [] and
-          // exit 0 here (a script wants absence as data, not a thrown diagnostic) — deliberately
-          // NOT the human throw below, which names the causes a person can act on.
-          if (o.json) { console.log(JSON.stringify(topics, null, 2)); return }
-          // an empty listing is silence an operator can't act on; name every cause — topics are
-          // derived from claim embeddings, so no claims or no embedder both land here, and a
-          // pre-claims corpus has no claim rows at all until something writes some (the legacy
-          // rules[] decoder that used to synthesise them is gone, so a rebuild will not conjure
-          // them either — this is the cause an operator upgrading onto claims actually hits).
-          if (topics.length === 0) throw new Error('no topics — write some claims, or check an embedder is configured; a corpus written before claims existed has none until an agent states some via memory_write addClaims (the legacy rules[] decoder that used to synthesise them is gone, so `orc memory rebuild` will not produce them either)')
-          for (const t of topics) console.log(`${t.topicKey}  ${String(t.size).padStart(3)}  ${t.label}`)
-          return
-        }
-        // topicClaims throws on an unknown key with a 'list topics again' message — surfaced as-is
-        // by the CLI's error path, not caught here. It also appends memory_topic_accessed exactly
-        // once, so the --json branch reads THROUGH it rather than around it: the access event is
-        // recorded whether the caller wants JSON or human rows.
-        const claims = await memory.store.topicClaims(topicKey, await cliAuthor())
-        // --json: raw Claim[] and stop, no human rows (stdout stays one parseable JSON value).
-        if (o.json) { console.log(JSON.stringify(claims, null, 2)); return }
-        for (const c of claims)
-          console.log(`${c.id}  ${c.validFrom}  ${c.text}`)
-      })
-    })
-  mem
-    .command('neighbors <id>')
-    .description('traverse typed links from a seed note (ranked blast radius)')
-    .option('--kinds <k...>', 'only follow these link kinds')
-    .option('--depth <n>', 'max hops (default 2)', parsePositiveInteger)
-    .option('--scope <s>', 'scope')
-    .action(async (id: string, o: { kinds?: string[]; depth?: number; scope?: string }) => {
-      // One pass through the shared enumArg: validates AND narrows, where this used to check in a
-      // loop and then re-parse through zod to get the type without a cast. A friendly error beats
-      // the store silently ignoring an unknown kind, which reads as "no neighbors".
-      const kinds = o.kinds?.map(k => enumArg<LinkKind>('--kinds', Object.values(LinkKind))(k))
-      const { config, log } = needPlugin()
-      await withMemory({ log, config }, async memory => {
-        await memory.projector.catchUp()
-        const ranked = await memory.store.neighbors(id, { kinds, depth: o.depth, scope: o.scope })
-        // mirror the memory_neighbors MCP tool: one access against the SEED, only on a hit —
-        // the neighbours are summaries the caller may never read.
-        if (ranked.length > 0) await memory.store.recordAccess(id, o.scope, MEMORY_ACCESS.neighbors, await cliAuthor())
-        // empty prints a sentinel (like ls/search's `_no notes_`) so a human isn't shown zero bytes.
-        if (ranked.length === 0) { console.log('_no neighbors_'); return }
-        // direction disambiguates asymmetric kinds: '→ supersedes' = seed supersedes n; '← supersedes' = n supersedes seed
-        for (const n of ranked) console.log(`${n.id}\t${n.direction === EDGE_DIRECTION.out ? '→' : '←'} ${n.via}\t${n.depth}\t${n.score.toFixed(2)}\tact ${n.activation.toFixed(2)}\t${n.title}`)
-      })
-    })
-  mem
-    .command('rebuild')
-    .description('rebuild the memory read model from the event log')
-    .action(async () => {
-      const { config, log } = needPlugin()
-      const { degraded } = await withMemory({ log, config }, memory => memory.projector.rebuild())
-      if (degraded) {
-        console.warn('memory read model rebuilt from the log but is degraded — some notes did not reproject')
-      } else {
-        console.log('memory read model rebuilt from the log')
-      }
-    })
-  mem
-    .command('restamp')
-    .description('after MANUALLY committing a healed change, catch notes whose paths are now fully committed up to HEAD so the freshness gate stops reading them drifted (heal → commit → restamp; autoCommit runs do this themselves, scoped to the notes they wrote)')
-    .action(async () => {
-      const { config, log } = needPlugin()
-      await withMemory({ log, config }, async memory => {
-        // one spelling with the auto-heal reactor — restampToHead is the whole pass
-        const targets = await restampToHead(memory.store, config.dir, await cliAuthor())
-        console.log(targets.length === 0
-          ? 'nothing to restamp — no note has fully-committed drift to catch up'
-          : `restamped ${targets.length} note(s) to HEAD: ${targets.map(t => t.id).join(', ')}`)
-      })
-    })
-
-  program
-    .command('note <title>')
-    .description("quick capture: write a project knowledge note with NO task/plan/approve ceremony (id = slugged title; noting the same title again updates that note)")
-    .option('--summary <text>', 'one-line summary')
-    .option('--body <text>', 'note body (markdown)')
-    .option('--tags <tags...>', 'tags')
-    .action(async (title: string, o: { summary?: string; body?: string; tags?: string[] }) => {
-      const { config, log } = needPlugin()
-      await withMemory({ log, config }, async memory => {
-        const id = slugId(title)
-        await memory.store.write({ id, title, summary: o.summary, body: o.body, tags: o.tags }, await cliAuthor())
-        await memory.projector.catchUp() // one-shot CLI process: project the append now
-        console.log(`noted '${id}' — read it back: orc memory cat ${id}`)
-      })
     })
 
   return program

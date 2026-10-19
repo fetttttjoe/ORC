@@ -1,6 +1,6 @@
 import { generateText, type JSONValue, type LanguageModel, type ModelMessage, type ToolSet } from 'ai'
 import {
-  CLAIM_STATES_BY_TRUST, ClaimState, EVENT_KIND, FailureClass, FS_WRITE_TOOL_NAMES, RATE_LIMIT_MESSAGE_CHARS, isRecord, KnowledgeToolName, MEMORY_TOOL_NAME, MemoryWriteResult,
+  CLAIM_STATES_BY_TRUST, ClaimState, EVENT_KIND, FailureClass, FS_WRITE_TOOL_NAMES, RATE_LIMIT_MESSAGE_CHARS, isRecord, KnowledgeToolName,
   OperationKind, PreloadArm, preloadLine, SignalOutcome, UnifiedEventType, errorMessage, terminalError, validateOutputPaths,
   type AgentExecutor, type Checkpoint, type EventDraft, type ExecutorContext, type KnowledgeClaim, type PreloadedClaim, type Signal,
   type SplitResult, type UnifiedEvent, type Usage,
@@ -351,10 +351,6 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
         const signalTool = tools[TOOL_NAME.signal]
         const base = { stepId: ctx.step.id, runToken: ctx.runToken }
         let persistedThrough = 0 // messages[0..persistedThrough) are already in an agent_call event
-        // set right after a memory_write result lints with a warning; nudged into the very next
-        // iteration's prompt then cleared — fires once per warning, at any point in the budget
-        // (unlike budgetNote, this is NOT gated to the endgame window).
-        let pendingLintNudge: { id: string; warning: string } | null = null
         // Paths this step has WRITTEN, and the ones already put to the model as at-risk. A path is
         // surfaced once: re-listing the same claims every turn after every edit is noise the model
         // learns to skip, and the obligation only needs stating once per file.
@@ -364,13 +360,6 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
         for (let iteration = 1; iteration <= ctx.step.maxIterations; iteration++) {
           const note = budgetNote(iteration, ctx.step.maxIterations)
           if (note) messages.push({ role: 'user', content: note })
-          if (pendingLintNudge) {
-            messages.push({
-              role: 'user',
-              content: `memory lint on '${pendingLintNudge.id}': ${pendingLintNudge.warning}. Restructure that note before you signal — the warning is not optional.`,
-            })
-            pendingLintNudge = null
-          }
           // Knowledge-protocol rule 4's mechanical half: keyed by iteration so a crash-recovery replay reuses the list.
           const fresh = [...editedPaths].filter(p => !riskChecked.has(p))
           if (fresh.length > 0 && ctx.knowledge) {
@@ -492,13 +481,6 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
             for (const { call, result } of executed) {
               yield { type: UnifiedEventType.tool_call, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }
               yield { type: UnifiedEventType.tool_result, toolCallId: call.toolCallId, toolName: call.toolName, output: result.output, isError: result.isError }
-              // noteLint warnings (plugins/memory) are advisory and observed live to be ignored —
-              // carry the first one into the next iteration's prompt instead of leaving it inert.
-              if (call.toolName === MEMORY_TOOL_NAME.write && !result.isError) {
-                const parsed = MemoryWriteResult.safeParse(result.output)
-                const [warning] = parsed.success ? parsed.data.warnings ?? [] : []
-                if (parsed.success && warning) pendingLintNudge = { id: parsed.data.id, warning }
-              }
               // A SUCCESSFUL write is what puts a claim at risk — a rejected edit changed nothing,
               // and prompting about it would train the model to ignore the block.
               if (WRITING_FILE_TOOLS.has(call.toolName) && !result.isError) {

@@ -5,8 +5,8 @@
  * Nodes reachable from `root` following link DIRECTION (source → target) only.
  *
  * Direction is what keeps focus meaningful. Every edge the projection draws points outward from
- * the work: task → step (plan), task → child task, step/task → artifact, task → model (uses),
- * task → note (wrote), note → cited note. An undirected walk — the previous implementation —
+ * the work: task → step (plan), task → child task, step/task → artifact, task → model (uses).
+ * An undirected walk — the previous implementation —
  * flowed BACKWARD through shared hubs: any other task using the same model was two hops away,
  * so the "focus" set was the entire connected component and focusing visibly dimmed nothing.
  */

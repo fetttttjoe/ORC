@@ -1,5 +1,5 @@
 import type { z } from 'zod'
-import type { EventRecord, MemoryFold } from '@orc/contracts'
+import type { EventRecord } from '@orc/contracts'
 import type { State } from '@orc/kernel'
 import type { Graph } from '../graph'
 import type { TouchableName, ViewName, WIRE } from '../wire'
@@ -11,7 +11,6 @@ export interface ReadModel {
   readonly seq: number
   readonly events: ReadonlyArray<EventRecord>
   readonly state: State
-  readonly memory: MemoryFold
   readonly graph: Graph
 }
 
@@ -20,15 +19,7 @@ export interface ReadModel {
 export type ViewParams<N extends ViewName> = z.infer<(typeof WIRE)[N]['params']>
 export type ViewResult<N extends ViewName> = z.infer<(typeof WIRE)[N]['result']>
 
-/**
- * A named thing one event can make stale. Narrower than a view on purpose: corpus health is
- * touchable and is not a view — it probes SurrealDB and git, where a view is a pure fold of the log
- * — so the staleness rule and the read are separate obligations, and `touchesOf` runs over this.
- *
- * The rule lives beside whatever owns the thing, never in a table of its own: the event-kind→query
- * map used to live in the browser, and a disagreement with the server showed up only as data that
- * never refreshed.
- */
+/** A named thing one event can make stale; the rule lives beside whatever owns the thing. */
 export interface Touchable<P = Record<string, unknown>> {
   name: TouchableName
   /** the param PATTERNS this event makes stale; `[{}]` means "every query of mine" */

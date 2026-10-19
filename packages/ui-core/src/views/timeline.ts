@@ -11,7 +11,7 @@ export const timeline = defineView({
 
   // Every narrowing input — scope, seq bounds, kinds — reads off the EventRecord, so all of it runs
   // in one pass over the events and summarizeEvent sees at most `limit` of them, never the whole log.
-  // inScope is the one membership rule: a project-scoped memory row belongs to the task its author
+  // inScope is the one membership rule: a project-scoped row belongs to the task its author
   // names, never to every task filter.
   // Narrowing must precede the slice, so a poller asking for "everything after seq N" gets the newest
   // MATCHING rows rather than the newest `limit` events of which none are new.

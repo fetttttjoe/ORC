@@ -164,12 +164,7 @@ export async function executeTool(
     // guessed at, and both are cheap for the model to fix by widening the context it names.
     const occurrences = current.split(oldString).length - 1
     if (occurrences === 0) {
-      // The tool argument is ALREADY JSON, so a model that escapes its newlines again sends
-      // `\\n` — two characters, backslash and n — and the match can never succeed. noteLint
-      // warns about the same double-encoding on a memory write; here it is fatal, and "copy the
-      // exact text" sends the model back to re-read a file it copied correctly. Name what it
-      // actually did instead. Diagnosed, never auto-repaired: a writer mis-encoding its
-      // arguments is mis-encoding the file contents too, and silently fixing one hides that.
+      // A model that re-escapes its newlines sends `\\n`, which can never match; name that instead of repairing it.
       const unescaped = unescapeSequences(oldString)
       if (unescaped !== oldString && current.includes(unescaped))
         return { output: { error: `old_string not found in '${p}' because ${DOUBLE_ENCODED_HINT}` }, isError: true }

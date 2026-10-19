@@ -44,6 +44,7 @@ const DOOR_WITHHOLDS: { [V in KernelMutationVerb]: WithheldFromDoor<V> } = {
   retitleWorkspace: true,
   setWorkspaceArchived: true,
   mergeWorkspace: true,
+  identifyProject: true,
 }
 
 test('every kernel mutation verb is withheld from a door', () => {

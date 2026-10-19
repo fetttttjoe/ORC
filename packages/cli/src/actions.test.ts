@@ -1,12 +1,10 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { AUTHOR_SOURCE, DecisionStatus, Door, EVENT_KIND, KNOWLEDGE_REFUSAL, KnowledgeWrittenPayload, MemoryWrittenPayload, PlanDraft, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type Origin } from '@orc/contracts'
-import { authorFixture } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, DecisionStatus, Door, EVENT_KIND, KNOWLEDGE_REFUSAL, KnowledgeWrittenPayload, PlanDraft, TASK_STATUS, WORKSPACE_KIND, type Origin } from '@orc/contracts'
 import { KERNEL_ERROR_CODE, Kernel, KernelError, currentBranch, initializeProject, loadConfig, openStorage, requireProject, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID, testConfig, tmpGitRepo, type TestDb } from '@orc/kernel/test-helpers'
-import { PROJECT_DIR_NOTE_ID } from '@orc/ui-core'
 import { buildModelDiscovery, buildOrcActions, catalogAppends, modelUniverse } from './actions'
 import { archivedRefusal } from './workspace-ops'
 
@@ -15,9 +13,6 @@ afterAll(async () => {
   await Promise.all(dbs.map(d => d.drop()))
 }, 30_000)
 
-// memory_written payload parsed through its owning schema at the read boundary — never a cast
-const writtenNote = (payload: unknown): { id: string; title: string } => MemoryWrittenPayload.parse(payload).note
-
 // The actions layer holds no execution port: it records asks and a supervisor executes them, so
 // what a test injects is the promise that one exists — counted, to prove every write path asks.
 function stubRuntime() {
@@ -25,9 +20,8 @@ function stubRuntime() {
   return { ensured, ensureRuntime: async () => { ensured.count++ } }
 }
 
-// The wiring both setups share — a per-test Postgres log, one seeded workspace, and the actions
-// layer over them. ONE spelling, because the two differ in exactly one thing (whether a real memory
-// read model is behind them) and a second copy of this block would drift on the rest.
+// The wiring every case shares — a per-test Postgres log, one seeded workspace, and the actions
+// layer over them.
 // The two doors this file drives, spelled once each. Not a default: every call below names the one
 // it is exercising, and the assertions read the chatId and door back off the log.
 const WEB: Origin = { chatId: 'chat-1', door: Door.web }
@@ -47,10 +41,9 @@ async function openActions(opts: { listModels?: () => Promise<string[]>; config?
   const { ensured, ensureRuntime } = stubRuntime()
   const config = testConfig(db.url, {
     vaultDir: mkdtempSync(path.join(tmpdir(), 'orc-vault-')),
-    // the project dir IS the seeded workspace's checkout: every memory write from this layer
-    // names the workspace of the directory it runs in, so a dir no workspace claims would make
-    // writeNote/deleteNote/recordDecision/cancel-sweep/purge refuse rather than exercise their
-    // real paths
+    // the project dir IS the seeded workspace's checkout: every write from this layer names the
+    // workspace of the directory it runs in, so a dir no workspace claims would make
+    // recordDecision/purge refuse rather than exercise their real paths
     projectName: 'purge-me', dir: TEST_WORKSPACE.cwd,
     ...opts.config,
   })
@@ -61,18 +54,8 @@ async function openActions(opts: { listModels?: () => Promise<string[]>; config?
   return { kernel, actions, ensured, url: db.url, db, storage, config }
 }
 
-// newProject/renameProject/purge need only urls + storage from the plugin context; the bogus
-// surreal url makes purge's memory rebuild report instead of hang, and the derived system-db url
-// points at a never-created database (the common pre-first-run state)
-const setup = (listModels?: () => Promise<string[]>) => openActions({
-  ...(listModels && { listModels }),
-  config: {
-    projectDbUrl: 'ws://127.0.0.1:1/rpc',
-    // the driver pends on unreachable endpoints, so the connect guard IS the failure path —
-    // at its 5000ms production default the designed failure cannot fit a 5s test budget
-    projectDbConnectTimeoutMs: 300,
-  },
-})
+// the derived system-db url points at a never-created database (the common pre-first-run state)
+const setup = (listModels?: () => Promise<string[]>) => openActions({ ...(listModels && { listModels }) })
 
 // Test 1 of the origin work: identity travels with the CALL, so every event a mutation appends
 // carries the chat and the door it came in by. Asserted on the LOG, never a spy — a spy would only
@@ -129,13 +112,12 @@ describe('model validation at the action boundary', () => {
   })
 })
 
-describe('writeNote/deleteNote guards', () => {
-  it('refuse without a project context and refuse reserved ui-metadata ids', async () => {
-    const { kernel, actions } = await setup() // setup() wires a real plugin behind actions
-    await expect(actions.writeNote({ id: 'ui-project-name', title: 'x' }, WEB)).rejects.toThrow(/reserved/)
-    await expect(actions.deleteNote('ui-project-dir', undefined, WEB)).rejects.toThrow(/reserved/)
-    const bare = buildOrcActions({ kernel, ensureRuntime: stubRuntime().ensureRuntime }) // no plugin
-    await expect(bare.writeNote({ id: 'x', title: 'x' }, WEB)).rejects.toThrow(/project context/)
+describe('cancel', () => {
+  it('answers the task ids it stamped, and none for a task already terminal', async () => {
+    const { kernel, actions } = await setup()
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'cancel me', spec: '' }, MCP)
+    expect(await actions.cancel(t.id, WEB)).toEqual({ cancelled: [t.id] })
+    expect(await actions.cancel(t.id, WEB)).toEqual({ cancelled: [] })
   })
 })
 
@@ -245,6 +227,15 @@ describe('catalogAppends', () => {
   })
 })
 
+describe('renameProject', () => {
+  it('appends the new name with this project\'s directory', async () => {
+    const { actions, storage } = await setup()
+    await actions.renameProject('renamed', WEB)
+    const identified = (await storage.events.all()).filter(e => e.kind === EVENT_KIND.project_identified)
+    expect(identified.map(e => e.payload)).toEqual([{ name: 'renamed', dir: TEST_WORKSPACE.cwd }])
+  })
+})
+
 describe('purgeProject', () => {
   it('wipes events + operations — stuck-running tasks included — and leaves the project usable', async () => {
     const { kernel, actions, url, db } = await setup()
@@ -260,27 +251,38 @@ describe('purgeProject', () => {
 
     const r = await actions.purgeProject(WEB)
     expect(r.events).toBeGreaterThan(0)
-    // surreal is unreachable in this setup — reported as a warning, not thrown; the absent
-    // dbos system db (never launched) produces NO warning
-    expect(r.warnings).toHaveLength(1)
-    expect(r.warnings[0]).toContain('memory read model')
+    // the absent dbos system db (never launched) produces NO warning
+    expect(r.warnings).toEqual([])
     expect(await kernel.listTasks()).toEqual([])
 
-    // identity survives the wipe: name + dir notes are re-seeded, so the chat stays listed
+    // identity survives the wipe: the identity event is re-seeded, so the chat stays listed
     const identity = await openStorage(url, { projectId: TEST_PROJECT_ID })
     db.onClose(() => identity.close())
-    const notes = (await identity.events.all()).filter(e => e.kind === EVENT_KIND.memory_written)
-      .map(e => writtenNote(e.payload))
-    expect(notes.map(n => [n.id, n.title])).toEqual([['ui-project-name', 'purge-me'], ['ui-project-dir', TEST_WORKSPACE.cwd]])
+    const identified = (await identity.events.all()).filter(e => e.kind === EVENT_KIND.project_identified)
+    expect(identified.map(e => e.payload)).toEqual([{ name: 'purge-me', dir: TEST_WORKSPACE.cwd }])
 
-    // The project's own checkout SURVIVES the wipe, keeping its id. It is an event like any other
-    // and the purge does delete it, but it is re-appended with the identity notes — because those
-    // notes' author names it, and because a re-adopted checkout would come back under a NEW uuid,
-    // silently orphaning every note written in the same breath.
+    // the project's own checkout survives the wipe with its id; a re-adopted one would get a new uuid
     expect(await kernel.listWorkspaces()).toEqual([TEST_WORKSPACE])
     // so the empty project is immediately usable again — the re-test loop, with no re-seeding
     const again = await actions.newTask({ workspaceId: TEST_WORKSPACE_ID, title: 'fresh start', budgetUSD: null }, WEB)
     expect((await kernel.getTask(again.taskId))?.title).toBe('fresh start')
+  })
+
+  it('leaves the knowledge files in the checkout byte-identical, and warns about no memory', async () => {
+    const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'orc-purge-knowledge-')))
+    try {
+      const bucket = path.join(dir, 'packages', 'x', 'knowledge', 'README.md')
+      const text = '# packages/x\n\n## Facts\n- The x package is a purge fixture. {pxfix234 @packages/x}\n'
+      mkdirSync(path.dirname(bucket), { recursive: true })
+      writeFileSync(bucket, text)
+      const { actions } = await openActions({ config: { dir } })
+
+      const r = await actions.purgeProject(WEB)
+      expect(existsSync(bucket) ? readFileSync(bucket, 'utf8') : 'the bucket is gone').toBe(text)
+      expect(r.warnings.filter(w => w.toLowerCase().includes('memory'))).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   // The race purgeProject's own WHY names: a boot adoption lands in the window between the wipe and
@@ -305,13 +307,12 @@ describe('purgeProject', () => {
     }
 
     const r = await actions.purgeProject(WEB) // must resolve: the history is already gone
-    expect(r.warnings.some(w => w.includes('identity not re-seeded') && w.includes('already exists at'))).toBe(true)
+    expect(r.warnings.some(w => w.includes('workspace not restored') && w.includes('already exists at'))).toBe(true)
 
     // the intruder stands alone — no second live record was forced in beside it
     expect((await kernel.listWorkspaces()).map(w => w.id)).toEqual([intruderId])
-    // and no identity note was written, because there was no workspace this process could name as
-    // its author — a note stamped with the intruder's id would be a guess
-    expect((await storage.events.all()).filter(e => e.kind === EVENT_KIND.memory_written)).toEqual([])
+    expect((await storage.events.all()).filter(e => e.kind === EVENT_KIND.project_identified).map(e => e.payload))
+      .toEqual([{ name: 'purge-me', dir: TEST_WORKSPACE.cwd }])
   })
 })
 
@@ -474,21 +475,6 @@ describe('the workspace door', () => {
     expect((await actions.listWorkspaces()).map(r => r.workspace.id)).toEqual([TEST_WORKSPACE_ID])
   })
 
-  // The door hands back the RECORD AND THE VERDICT, from the same derivation `orc ws ls` prints:
-  // a driver asking "which checkout" and an operator reading the terminal must not be given two
-  // different readings of one workspace.
-  it('listWorkspaces carries each record\'s health, and reports an uncountable note corpus as unknown rather than zero', async () => {
-    const { actions } = await setup()
-    const [row] = await actions.listWorkspaces()
-    // this fixture's workspace names /test/workspace, which is not on disk — unmerged with no
-    // checkout behind it is exactly what `dangling` is for
-    expect(row?.health).toMatchObject({ state: WORKSPACE_STATE.dangling, dirExists: false, taskCount: 0 })
-    // …and its project db url points at nothing, so the count comes back UNKNOWN. Never 0: a
-    // zero here is a measured "nothing pending", which is what decides `dangling` vs `idle`.
-    expect(row?.health.provisionalNotes).toBeNull()
-    expect(row?.health.lastActivityAt).not.toBeNull() // the workspace_created event dates it
-  })
-
   it('newWorkspace refuses without a project context — there is no checkout to hang a worktree off', async () => {
     const { kernel } = await setup()
     const bare = buildOrcActions({ kernel, ensureRuntime: stubRuntime().ensureRuntime }) // no plugin
@@ -562,8 +548,8 @@ describe('deleteProject', () => {
     const foreign = await openStorage(url, { projectId: 'doomed-project' })
     db.onClose(() => foreign.close())
     await foreign.events.append({
-      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { id: 'n1', title: 'n1' }, author: authorFixture({ origin: WEB }) }, ...WEB,
+      taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.project_identified,
+      payload: { name: 'doomed', dir: '/doomed' }, ...WEB,
     })
 
     const r = await actions.deleteProject('doomed-project', WEB)
@@ -571,17 +557,6 @@ describe('deleteProject', () => {
     const check = await openStorage(url, { projectId: 'doomed-project' })
     db.onClose(() => check.close())
     expect(await check.events.all()).toEqual([])
-  })
-
-  // Deleting a chat must delete its knowledge — the read model lives in a project-derived SurrealDB
-  // database that the home project's memory instance cannot reach (orphaned notes stay live until
-  // a rebuild drops them). When the wipe fails, the caller is told.
-  it('reports when the deleted chat\'s knowledge could not be wiped', async () => {
-    const { kernel, actions } = await setup()
-    await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'home task', spec: '' }, WEB)
-    const r = await actions.deleteProject(TEST_PROJECT_ID, WEB)
-    expect(r.warnings.some(w => w.includes('memory read model not cleared'))).toBe(true)
-    expect(r.warnings.some(w => w.includes('vanish on the next rebuild'))).toBe(true)
   })
 })
 
@@ -595,12 +570,10 @@ describe('newProject', () => {
     const reopened = await actions.newProject(dir, 'renamed chat', WEB)
     expect(reopened).toEqual({ projectId: original, reused: true })
 
-    // the dir note is appended so the chat is locatable (autocomplete, guidance)
     const target = await openStorage(url, { projectId: original })
     db.onClose(() => target.close())
-    const notes = (await target.events.after(0, [EVENT_KIND.memory_written]))
-      .map(e => writtenNote(e.payload))
-    expect(notes.find(n => n.id === PROJECT_DIR_NOTE_ID)?.title).toBe(dir)
+    const identified = (await target.events.after(0, [EVENT_KIND.project_identified])).map(e => e.payload)
+    expect(identified).toEqual([{ name: 'renamed chat', dir }])
 
     // an untouched directory mints a fresh identity
     const fresh = await actions.newProject(mkdtempSync(path.join(tmpdir(), 'orc-chat-')), 'fresh', WEB)

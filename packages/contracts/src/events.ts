@@ -4,13 +4,12 @@ import { Plan } from './plan'
 import { FailureClass, Signal, SplitResult, Usage } from './execution'
 import { EventKind } from './event-kinds'
 import { OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload } from './operations'
-import { MemoryAccessedPayload, MemoryDeletedPayload, MemoryOutcomePayload, MemoryVerifiedPayload, MemoryWrittenPayload } from './memory'
-import { MemoryTopicAccessedPayload } from './cluster'
 import { SHA256_HEX_RE } from './ids'
 import { Origin } from './origin'
 import { AnalysisCompletedPayload, FeedbackProvidedPayload, FeedbackRequestedPayload, PlanAnnotatedPayload } from './analysis'
 import { WorkspaceArchivedPayload, WorkspaceCreatedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload } from './workspace-entity'
 import { ChatOpenedPayload } from './chat'
+import { ProjectIdentity } from './project-identity'
 import { PlanNoteWrittenPayload } from './plan-note'
 import { KnowledgeCheckedPayload, KnowledgeDeliveredPayload, KnowledgeWrittenPayload } from './knowledge-events'
 
@@ -210,12 +209,6 @@ export const PAYLOAD_SCHEMAS = {
   operation_completed: OperationCompletedPayload,
   operation_failed: OperationFailedPayload,
   artifact_produced: ArtifactProducedPayload,
-  memory_written: MemoryWrittenPayload,
-  memory_deleted: MemoryDeletedPayload,
-  memory_accessed: MemoryAccessedPayload,
-  memory_topic_accessed: MemoryTopicAccessedPayload,
-  memory_verified: MemoryVerifiedPayload,
-  memory_outcome: MemoryOutcomePayload,
   knowledge_delivered: KnowledgeDeliveredPayload,
   knowledge_written: KnowledgeWrittenPayload,
   knowledge_checked: KnowledgeCheckedPayload,
@@ -233,6 +226,7 @@ export const PAYLOAD_SCHEMAS = {
   workspace_archived: WorkspaceArchivedPayload,
   workspace_merged: WorkspaceMergedPayload,
   chat_opened: ChatOpenedPayload,
+  project_identified: ProjectIdentity,
 } satisfies Record<EventKind, z.ZodType>
 
 export type EventPayload<K extends EventKind> = z.input<(typeof PAYLOAD_SCHEMAS)[K]>

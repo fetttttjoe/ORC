@@ -2,7 +2,7 @@
 // see packages/cli/src/actions.ts). Adapters (web server, future TUI) receive this interface;
 // ui-core itself never constructs one. Implementations return data and never print: each
 // adapter renders results its own way (CLI lines, web toasts).
-import type { ApprovedBy, Decision, DecisionFilter, DecisionInput, DecisionStatus, DecisionSummary, NoteAuthoringDraft, Origin, PlanDraft, Workspace, WorkspaceWithHealth } from '@orc/contracts'
+import type { ApprovedBy, Decision, DecisionFilter, DecisionInput, DecisionStatus, DecisionSummary, Origin, PlanDraft, Workspace, WorkspaceWithHealth } from '@orc/contracts'
 
 // The two ways a plan is stamped, named rather than merged into one bag of optionals: a template
 // the action builds, or a draft the door parsed (--file, --from-vault, an authored request body).
@@ -84,27 +84,18 @@ export interface OrcActions {
   // may be empty — an omitted list and an empty one always meant the same thing.
   annotate(taskId: string, noteId: string, text: string, refs: string[], origin: Origin): Promise<{ noteId: string }>
   revise(taskId: string, text: string, scope: string[], origin: Origin): Promise<{ topic: string | null }>
-  // knowledge authoring — the neural interface's write path. NoteAuthoringDraft is the named
-  // contract: the web route validates with the SAME schema this consumes (PlanDraft precedent,
-  // no duplicate shape anywhere). Omitted fields merge-on-omit at the store gateway. Always
-  // writes the durable 'project' scope — plan scopes are agent-owned transients.
-  writeNote(note: NoteAuthoringDraft, origin: Origin): Promise<{ id: string; scope: string }>
-  // positional like MemoryStore.remove, which this fronts; undefined scope = project scope
-  deleteNote(id: string, scope: string | undefined, origin: Origin): Promise<{ id: string }>
-  // project chat management: the display name is a memory note; a new project mints identity
-  // in the directory AND writes its name note as the first event, making it listable at once.
-  // A directory that already holds an orc project is REUSED (reused: true), never re-minted.
+  // project chat management: the display name is a project_identified event; a new project mints
+  // identity in the directory AND appends that event, making it listable at once. A directory that
+  // already holds an orc project is REUSED (reused: true), never re-minted.
   renameProject(name: string, origin: Origin): Promise<{ name: string }>
   newProject(dir: string, name: string, origin: Origin): Promise<{ projectId: string; reused: boolean }>
-  cancel(taskId: string, origin: Origin): Promise<{
-    swept: Array<{ id: string; scope: string; title: string }>
-    sweepError: string | null // sweep is best-effort over a committed cancel — failures report, never throw
-  }>
+  // the subtree's task ids the cancel stamped; one already terminal is not among them
+  cancel(taskId: string, origin: Origin): Promise<{ cancelled: string[] }>
   // destructive test-reset of the CURRENT project: erases pending durable-execution state
   // (crashed runs included — nothing gets recovered into the fresh log), deletes its events +
-  // operation journal, and clears the memory read model; identity stays, so the chat survives
-  // empty. warnings report best-effort cleanup steps that failed — the log purge itself is
-  // committed once this resolves.
+  // operation journal; identity and the knowledge files stay, so the chat survives empty.
+  // warnings report best-effort cleanup steps that failed — the log purge itself is committed
+  // once this resolves.
   purgeProject(origin: Origin): Promise<{ events: number; operations: number; warnings: string[] }>
   // remove a FOREIGN project outright: events + journal + durable-execution state, no identity
   // re-seed — it disappears from the chats list. The home project refuses (purge is its reset).

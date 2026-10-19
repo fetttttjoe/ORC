@@ -29,17 +29,14 @@ export function resolveTrunk(config: Pick<OrcConfig, 'trunkBranch'>, dir: string
 // on the exact string and a symlinked path would mint a duplicate on every alias.
 //
 // `onTrunk` is captured HERE, at adoption, rather than derived later: it is a fact about the
-// checkout at that moment, and notes written on trunk are final by construction while everywhere
-// else they stay provisional until the workspace merges. Deriving it at read time would re-answer
-// the question against a branch that has since moved. Which branch counts as trunk is resolveTrunk's
-// question, asked here about the checkout this command is standing in.
+// checkout at that moment, and deriving it at read time would re-answer the question against a
+// branch that has since moved. Which branch counts as trunk is resolveTrunk's question, asked here
+// about the checkout this command is standing in.
 //
 // "No branch" splits into two OPPOSITE answers, which is why gitDirs is probed rather than reading
 // `branch === null` alone. Outside git there are no branches at all, so there is nothing this
-// directory could be behind and no merge that could ever arrive: read as off-trunk, a non-git
-// project's knowledge would stay provisional forever, with no reachable event that could finalise
-// it. A detached HEAD is the other case — the repository HAS a trunk, this checkout is simply not
-// on it, and a merge is exactly what would settle that — so it stays off-trunk.
+// directory could be behind: it reads as trunk. A detached HEAD is the other case — the repository
+// HAS a trunk and this checkout is simply not on it — so it stays off-trunk.
 export async function adoptCwd(
   kernel: Pick<Kernel, 'ensureWorkspace' | 'setWorkspaceArchived'>,
   config: WorkspaceConfig,
@@ -63,12 +60,10 @@ export async function adoptCwd(
   // the record it finds, branch and onTrunk included — correctly, since it cannot know whether a
   // difference means "re-adopt" or "an adoption racing a branch switch". The caller decides, and
   // here the decision is forced: a main checkout switched to a feature branch would otherwise keep
-  // `onTrunk: true`, so every note written from it would read as settled trunk knowledge while
-  // sitting on an unmerged branch — and no merge could ever clear it, because the workspace those
-  // notes name is the trunk record itself.
+  // `onTrunk: true` while sitting on an unmerged branch.
   //
-  // Archive-then-mint, not mutate: the old record is what the tasks and notes written before the
-  // switch belong to, and rewriting its branch would retroactively relabel their standing.
+  // Archive-then-mint, not mutate: the old record is what the tasks written before the switch
+  // belong to, and rewriting its branch would retroactively relabel them.
   //
   // Three fields are CARRIED OVER, because a mint can only derive what the directory shows and these
   // are not on the directory. `managed` is the licence to `git worktree remove` — dropped, a worktree

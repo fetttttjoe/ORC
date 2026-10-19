@@ -8,39 +8,35 @@ import { must } from '@orc/contracts/fixtures'
 
 // this file drives the CLI door; every append it arranges entered the same way
 const CLI = NO_CHAT(Door.cli)
-import { loadConfig, requireProject, type ProjectConfig } from '@orc/kernel'
+import { loadConfig, requireProject } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { ADR_SUBCOMMAND } from './adr-commands'
 import { BRIEF_COMMAND } from './brief-commands'
 import { gatherBrief } from './brief-gather'
 import { openKernel } from './main'
 import { buildPlugins } from './runtime'
-import { cli, dropSurrealDb, testSurrealDbName } from './test-helpers'
+import { cli } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-const surrealConfigs: ProjectConfig[] = []
 // Unconditional teardown: a real plugin host and an MCP hub are process-scoped, and a bare
 // shutdown after the assertions is SKIPPED when one throws — which leaks the host into every later
 // test file in the process. Registered at creation, drained LIFO, before the databases go away.
 const cleanup: Array<() => Promise<void> | void> = []
 afterAll(async () => {
   for (const c of cleanup.reverse()) await c()
-  await Promise.all([...dbs.map(d => d.drop()), ...surrealConfigs.map(c => dropSurrealDb(c))])
+  await Promise.all(dbs.map(d => d.drop()))
 }, 30_000)
 afterEach(() => mock.restore())
 
-// A per-test Postgres log, a throwaway Surreal database, a git checkout, the real plugin wiring,
-// and a workspace seeded AT this config's directory — the brief
-// names "this checkout" by matching the directory it runs in.
+// A per-test Postgres log, a git checkout, the real plugin wiring, and a workspace seeded AT this
+// config's directory — the brief names "this checkout" by matching the directory it runs in.
 async function makeBriefCli() {
   const db = await createTestDb()
   dbs.push(db)
   const dir = mkdtempSync(path.join(tmpdir(), 'orc-brief-cli-'))
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
   execFileSync('git', ['init', '-q', dir])
-  const projectDbName = testSurrealDbName()
-  const config = requireProject({ ...loadConfig(dir), projectDbName, projectId: TEST_PROJECT_ID, projectName: 'brief-test' })
-  surrealConfigs.push(config)
+  const config = requireProject({ ...loadConfig(dir), projectId: TEST_PROJECT_ID, projectName: 'brief-test' })
   const { kernel, log } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config })
   await seedTestWorkspace(log, CLI, realpathSync(config.dir))
   const { host, hub } = await buildPlugins(config)
@@ -55,9 +51,6 @@ describe('orc brief', () => {
     const out = await run(BRIEF_COMMAND)
     expect(out[0]).toBe('# orc — brief-test')
     expect(must(out.find(l => l.startsWith('workspace: ')), 'workspace line')).toStartWith(`workspace: ${TEST_WORKSPACE.title} (${TEST_WORKSPACE.kind}, ${TEST_WORKSPACE.branch}) — `)
-    // A COUNT, not the word "unknown": the brief degrades softly when the read model cannot be
-    // asked, so a defect in its own reads reads as an outage unless the healthy path is pinned.
-    expect(out.find(l => l.startsWith('workspace: '))).toContain('0 provisional notes')
     expect(out.some(l => l.startsWith('tasks: none'))).toBe(true)
     expect(out.join('\n')).not.toContain('decisions')
   }, 30_000)
@@ -98,15 +91,6 @@ describe('orc brief', () => {
     await run('propose', taskId)
     await kernel.setWorkspaceArchived(old.id, true, CLI)
     expect(await run(BRIEF_COMMAND)).toContain(`  ${taskId}  Import CSV  [Old import]`)
-  }, 30_000)
-
-  it('an unreachable read model costs the note count, not the decisions or the brief', async () => {
-    const { run, log, config } = await makeBriefCli()
-    await run('adr', ADR_SUBCOMMAND.new, 'Event log is truth', '--context', 'c', '--decision', 'the log is the only writer of facts', '--consequences', 'q')
-    const brief = await gatherBrief({ log, config: { ...config, projectDbUrl: 'ws://127.0.0.1:59998/rpc' } })
-    expect(brief.decisions).toEqual({ shown: [{ id: 'event-log-is-truth', title: 'Event log is truth', summary: 'the log is the only writer of facts' }], total: 1 })
-    expect(brief.workspace?.health.provisionalNotes).toBeNull()
-    expect(brief.project).toBe('brief-test')
   }, 30_000)
 
   it('decisions that cannot be read cost the decisions only, and stderr says why', async () => {

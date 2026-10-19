@@ -86,7 +86,7 @@ describe('adoptCwd', () => {
     const { main, worktree } = tmpGitRepo()
     initializeProject(main, 'p')
     // git says the trunk is `feature`; the operator says it is `main`. The operator decides, so the
-    // worktree sitting on `feature` is NOT trunk and its notes stay provisional until it merges.
+    // worktree sitting on `feature` is NOT trunk.
     setOriginHead(main, 'feature')
     const wtWs = await adoptCwd(kernel, { ...requireProject(loadConfig(worktree)), trunkBranch: 'main' }, CLI)
     expect(wtWs).toMatchObject({ branch: 'feature', onTrunk: false })

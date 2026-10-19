@@ -1,7 +1,6 @@
 import { Command } from 'commander'
 import { Door, NO_CHAT, type WorkspaceWithHealth } from '@orc/contracts'
 import type { WorkspaceDoor } from './door-kernel'
-import { PROVISIONAL_UNKNOWN } from './workspace-health'
 import { HEAD_REF, type WorkspaceConfig } from './workspace-ops'
 import { findCwdWorkspace } from './cwd-workspace'
 import { AGE_UNKNOWN, relativeAge } from './relative-age'
@@ -19,16 +18,15 @@ export const WS_SUBCOMMAND = { new: 'new', ls: 'ls', current: 'current', retitle
 
 /**
  * The `ws ls` table, as lines — pure, so the rendering is testable against health values that no
- * checkout on this machine could produce (an unreachable note read model, above all).
+ * checkout on this machine could produce.
  *
  * `now` is a PARAMETER for the reason relativeAge takes one: one clock for the whole listing, so two
  * rows read a tick apart cannot disagree about "today".
  */
 export function renderWorkspaceList(rows: readonly WorkspaceWithHealth[], now: Date): string[] {
   if (rows.length === 0) return ['_no workspaces_']
-  const lines = rows.map(({ workspace: w, health: h }) => {
+  return rows.map(({ workspace: w, health: h }) => {
     const age = h.lastActivityAt === null ? AGE_UNKNOWN : relativeAge(h.lastActivityAt, now)
-    const prov = h.provisionalNotes === null ? PROVISIONAL_UNKNOWN : String(h.provisionalNotes)
     // `[dirty]` is uncommitted work — what a merge of this workspace would NOT carry. Shown
     // beside the state rather than folded into it: it is the operator's own work, not a verdict.
     //
@@ -36,13 +34,8 @@ export function renderWorkspaceList(rows: readonly WorkspaceWithHealth[], now: D
     // rung above `merged` shadows that state, so a landed workspace that is running again prints
     // `active` and the terminal would say nothing at all about whether the work reached trunk.
     const flags = `${w.archivedAt ? '[archived] ' : ''}${h.merged ? '[merged] ' : ''}${h.clean === false ? '[dirty] ' : ''}`
-    return `${w.id}  ${h.state.padEnd(9)} ${age.padStart(7)}  ${w.kind.padEnd(8)} ${(w.branch ?? '-').padEnd(28)} ${String(h.taskCount).padStart(3)} tasks  ${prov.padStart(3)} prov  ${flags}${w.title}  ${w.cwd}`
+    return `${w.id}  ${h.state.padEnd(9)} ${age.padStart(7)}  ${w.kind.padEnd(8)} ${(w.branch ?? '-').padEnd(28)} ${String(h.taskCount).padStart(3)} tasks  ${flags}${w.title}  ${w.cwd}`
   })
-  // '?' is not zero, and the difference decides whether a workspace is dangling. Say so rather
-  // than letting a reader take the column at face value.
-  if (rows.some(r => r.health.provisionalNotes === null))
-    lines.push(`prov '${PROVISIONAL_UNKNOWN}': the memory read model could not be reached, so pending knowledge could not be counted — this is not a count of none`)
-  return lines
 }
 
 export function wsCommand(deps: {

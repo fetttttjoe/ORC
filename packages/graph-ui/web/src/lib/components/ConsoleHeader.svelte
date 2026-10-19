@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createQuery } from '@tanstack/svelte-query'
-  import { MEMORY_HEALTH, SUPERVISOR_HEALTH } from '@orc/contracts/health'
+  import { KnowledgeHealthState, SUPERVISOR_HEALTH } from '@orc/contracts/health'
   import { Separator } from '$lib/components/ui/separator'
   import Chip from '$lib/components/Chip.svelte'
   import { api } from '$lib/api/client'
@@ -14,16 +14,12 @@
   // The operator's standing questions, answered without scrolling: is anything driving, is the
   // graph current, how far is the log, and does anything want me.
   const HEALTH_POLL_MS = 15_000
-  // the read model is often a little behind mid-write; only a real backlog is worth saying
-  const CATCHUP_FLOOR = 50
+  const SUSPECT_HINT = 'claims whose code changed since they were written — the heal sweep after the next commit checks them'
 
-  // keyed through view-client's OWN builder (not a second `['health']` spelling) so a `health`
-  // touch on the stream invalidates the SAME cache entry SystemBanner's faster poll also reads —
-  // one shared entry, two poll cadences.
   const health = createQuery(() => ({ queryKey: healthKey(session.sel.project), queryFn: api.health, refetchInterval: HEALTH_POLL_MS }))
 
   const sup = $derived(health.data?.supervisor)
-  const mem = $derived(health.data?.memory)
+  const knowledge = $derived(health.data?.knowledge)
   const gates = $derived(operator.state.openQuestions.length)
 
   const SUPERVISOR: Record<string, { text: string; temp: Temperature; hint: string }> = {
@@ -35,15 +31,12 @@
   }
   const supervisor = $derived(sup ? (SUPERVISOR[sup.state] ?? SUPERVISOR[SUPERVISOR_HEALTH.none]) : null)
 
-  const memoryNote = $derived.by(() => {
-    if (!mem) return null
-    if (mem.state === MEMORY_HEALTH.unreachable) return { text: 'memory unreachable', temp: 'rust' as Temperature, hint: mem.reason ?? '' }
-    if (mem.state === MEMORY_HEALTH.catchingUp && mem.pending >= CATCHUP_FLOOR)
-      return { text: `rebuilding · ${mem.pending} behind`, temp: 'human' as Temperature, hint: 'the read model is replaying the log — runs still execute' }
+  const knowledgeNote = $derived.by(() => {
+    if (!knowledge) return null
+    if (knowledge.state === KnowledgeHealthState.unavailable) return { text: 'knowledge unavailable', temp: 'rust' as Temperature, hint: knowledge.reason }
+    if (knowledge.suspect > 0) return { text: `suspect ${knowledge.suspect}/${knowledge.claims}`, temp: 'neutral' as Temperature, hint: SUSPECT_HINT }
     return null
   })
-
-  const drift = $derived(mem?.drift && mem.drift.drifted > 0 ? mem.drift : null)
   const bootedAt = $derived(session.info.bootedAt ? new Date(session.info.bootedAt).toLocaleTimeString() : null)
 </script>
 
@@ -65,15 +58,9 @@
     {#if supervisor}
       <Chip temp={supervisor.temp} title={supervisor.hint}>{supervisor.text}</Chip>
     {/if}
-    {#if memoryNote}
+    {#if knowledgeNote}
       <Separator orientation="vertical" class="h-3.5" />
-      <Chip temp={memoryNote.temp} title={memoryNote.hint}>{memoryNote.text}</Chip>
-    {/if}
-    {#if drift}
-      <Separator orientation="vertical" class="h-3.5" />
-      <Chip temp="neutral" title="notes describing code that changed since they were written — a reground-heal task refreshes them">
-        drift {drift.drifted}/{drift.checkable}
-      </Chip>
+      <Chip temp={knowledgeNote.temp} title={knowledgeNote.hint}>{knowledgeNote.text}</Chip>
     {/if}
     <Separator orientation="vertical" class="h-3.5" />
     {#if bootedAt}

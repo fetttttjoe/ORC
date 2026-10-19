@@ -32,7 +32,7 @@ const ExecInput = z.object({ command: z.string().min(1) })
 const LOG_DIR = path.join('.orc', 'exec')
 // How long a recorded result may stand in for a re-run of the identical command on an identical
 // tree. Bounded because the fingerprint covers the TREE and nothing else: a suite also depends on
-// Postgres/Surreal/network, and those can move without any file changing.
+// Postgres/network, and those can move without any file changing.
 const REUSE_TTL_MS = 15 * 60_000
 
 export const EXEC_TOOL_NAME = 'exec'
@@ -41,7 +41,7 @@ interface Recorded { exitCode: number; stdout: string; stderr: string; logPath: 
 // Per (workspace, command, tree) — module-level so sibling steps in one wave share it.
 const recorded = new Map<string, Recorded>()
 
-// tree identity, shared with the memory health probe's drift cache — see tree-fingerprint.ts
+// tree identity — see tree-fingerprint.ts
 const gitFingerprint = (dir: string) => (): Promise<string | null> => treeFingerprint(dir)
 
 export function execTool(opts: {

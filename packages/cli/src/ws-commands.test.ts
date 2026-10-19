@@ -11,7 +11,6 @@ import { adoptCwd } from './workspace-adopt'
 
 // every `orc ws` command and the boot adoption behind it entered through this door
 const CLI = NO_CHAT(Door.cli)
-import { listWorkspaceHealth, PROVISIONAL_UNKNOWN } from './workspace-health'
 import { renderWorkspaceList, WS_NEEDS_PROJECT } from './ws-commands'
 import { ARCHIVE_WITHOUT_REMOVE, WORKSPACE_BRANCH_PREFIX, WORKTREES_DIR } from './workspace-ops'
 
@@ -283,29 +282,6 @@ describe('orc ws', () => {
     expect(existsSync(worktree)).toBe(true)
   }, 30_000)
 
-  // The injection seam, at the door `ws ls` uses. The blanket catch below it is the reason it
-  // exists: with the Surreal read hard-wired, "the read model is down" and "the count function threw
-  // on a bug of ours" were the same untestable null, and no test could produce either one without a
-  // live outage.
-  it('ls honours an injected count function — null renders \'?\', a map renders the numbers', async () => {
-    const { run, kernel, log, config } = await makeWsCli()
-    await run('ws', 'new', 'Counted', '--no-task')
-    const counted = (await kernel.listWorkspaces()).find(w => w.managed)
-    if (!counted) throw new Error('no workspace')
-
-    const down = await listWorkspaceHealth({ log, config, counts: () => Promise.resolve(null) })
-    expect(down.length).toBeGreaterThan(0)
-    expect(down.map(r => r.health.provisionalNotes)).toEqual(down.map(() => null))
-    // …and the same listing with a real answer: 7 is not a count this project's empty corpus could
-    // produce, so a lister that ignored the injection and asked Surreal would not match it
-    const up = await listWorkspaceHealth({ log, config, counts: () => Promise.resolve(new Map([[counted.id, 7]])) })
-    expect(up.find(r => r.workspace.id === counted.id)?.health.provisionalNotes).toBe(7)
-    // absent from the map is a MEASURED zero, never the unknown — the whole point of the split
-    const others = up.filter(r => r.workspace.id !== counted.id)
-    expect(others.length).toBeGreaterThan(0)
-    expect(others.map(r => r.health.provisionalNotes)).toEqual(others.map(() => 0))
-  }, 30_000)
-
   it('retitle and restore append their event stamped with the terminal door and no chat', async () => {
     const { run, kernel, log, main } = await makeWsCli()
     const { workspace } = await kernel.ensureWorkspace({ cwd: realpathSync(main), branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true }, CLI)
@@ -393,9 +369,8 @@ describe('orc ws', () => {
   }, 30_000)
 })
 
-// The rendering on its own, against health values no checkout on this machine could produce: an
-// unreachable note read model, and a merge whose state column says something else. Pure, so it needs
-// none of the harness above.
+// The rendering on its own, against health values no checkout on this machine could produce: a merge
+// whose state column says something else. Pure, so it needs none of the harness above.
 describe('renderWorkspaceList', () => {
   const NOW = new Date('2026-09-14T12:00:00.000Z')
   const w = (extra: Partial<Workspace> = {}): Workspace => ({
@@ -405,7 +380,7 @@ describe('renderWorkspaceList', () => {
   })
   const h = (extra: Partial<WorkspaceHealth> = {}): WorkspaceHealth => ({
     state: WORKSPACE_STATE.idle, lastActivityAt: '2026-09-14T11:00:00.000Z',
-    taskCount: 1, openTaskCount: 0, merged: false, provisionalNotes: 0, dirExists: true, clean: true, ...extra,
+    taskCount: 1, openTaskCount: 0, merged: false, dirExists: true, clean: true, ...extra,
   })
   const render = (rows: WorkspaceWithHealth[]): string => renderWorkspaceList(rows, NOW).join('\n')
 
@@ -419,16 +394,5 @@ describe('renderWorkspaceList', () => {
     // and an unmerged workspace carries no flag at all — otherwise the assertion above would pass
     // for a renderer that printed it unconditionally
     expect(render([{ workspace: w(), health: h() }])).not.toContain('[merged]')
-  })
-
-  it('renders an uncountable note corpus as the unknown marker and says it is not a zero', () => {
-    const unknown = render([{ workspace: w(), health: h({ provisionalNotes: null }) }])
-    expect(unknown).toContain(`${PROVISIONAL_UNKNOWN} prov`)
-    expect(unknown).toContain('this is not a count of none')
-    // a counted listing prints the number and drops the footnote — the sentence explains a marker
-    // that is not on the page otherwise
-    const counted = render([{ workspace: w(), health: h({ provisionalNotes: 4 }) }])
-    expect(counted).toContain('4 prov')
-    expect(counted).not.toContain('this is not a count of none')
   })
 })

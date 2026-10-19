@@ -88,9 +88,6 @@ export enum GroundedApprovalDoor {
   mcp = 'mcp',
 }
 
-// A task's memory lane scope, sanitized because a split child's id carries dots and mixed case.
-export const planScope = (taskId: string): string => `plan-${taskId.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
-
 export const Plan = z.object({
   taskId: z.string().min(1),
   version: z.number().int().positive(),

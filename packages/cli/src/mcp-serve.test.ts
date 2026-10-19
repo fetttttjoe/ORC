@@ -3,14 +3,14 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { ApprovedBy, Door, EVENT_KIND, ModelsDiscoveredPayload, NO_CHAT, isRecord } from '@orc/contracts'
+import { ApprovedBy, Door, EVENT_KIND, KnowledgeHealthState, ModelsDiscoveredPayload, NO_CHAT, isRecord } from '@orc/contracts'
 import { authorFixture, must } from '@orc/contracts/fixtures'
-import { KNOWLEDGE_READ_TOOLS, knowledgeTools } from '@orc/knowledge-core'
+import { createKnowledgePort, createMemoryBackend, KNOWLEDGE_READ_TOOLS, knowledgeHealth, knowledgeTools, NO_STRUCTURE } from '@orc/knowledge-core'
 import { buildCopilotTools } from '@orc/ui-core'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, testConfig, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { buildModelDiscovery } from './actions'
-import { buildServeTools, mcpApproveTool } from './mcp-serve'
+import { buildServeTools, mcpApproveTool, serveHealth } from './mcp-serve'
 import { actionsStub, sessionsStub } from './test-helpers'
 
 // every tool this door serves names the MCP door; the tests assert that literal, never a default
@@ -177,6 +177,38 @@ describe('orc mcp serve (stdio, read slice)', () => {
     // surface against a set the door never builds.
     const copilot = Object.keys(buildCopilotTools({ sessions, actions, projectId: 'p1', origin: MCP, listModels: async () => [] }))
     expect(new Set(served)).toEqual(new Set([...copilot, ...KNOWLEDGE_READ_TOOLS, 'approve']))
+  })
+
+  it('project_status reports knowledge unavailable with the reason when the knowledge backend cannot answer', async () => {
+    const unavailable = { unavailable: 'no checkout' }
+    const served = buildServeTools({
+      sessions: sessionsStub({ snapshot: async () => ({ seq: 1, graph: { nodes: [], links: [] } }) }), projectId: 'p1', actions: null, autonomy: 'gated',
+      knowledgeTools: [],
+      health: async () => ({ knowledge: await knowledgeHealth(unavailable, authorFixture()) }),
+    })
+    const status = must(served.find(t => t.name === 'project_status'), 'project_status')
+    expect((await status.execute({}, undefined)).output).toHaveProperty('knowledge', { state: KnowledgeHealthState.unavailable, reason: 'no checkout' })
+  })
+
+  it('project_status computes knowledge health once within the TTL', async () => {
+    let probes = 0
+    const port = createKnowledgePort({
+      backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }),
+      checkoutOf: async () => { probes += 1; return '/checkout' },
+      append: async () => {},
+      warn: () => {},
+    })
+    const served = buildServeTools({
+      sessions: sessionsStub({ snapshot: async () => ({ seq: 1, graph: { nodes: [], links: [] } }) }), projectId: 'p1', actions: null, autonomy: 'gated',
+      knowledgeTools: [],
+      health: serveHealth({ port }, authorFixture()),
+    })
+    const status = must(served.find(t => t.name === 'project_status'), 'project_status')
+    await status.execute({}, undefined)
+    const afterFirst = probes
+    await status.execute({}, undefined)
+    expect(afterFirst).toBeGreaterThan(0)
+    expect(probes).toBe(afterFirst)
   })
 
   // The serve door drives agents over MCP that must never invent a model ref (the copilot system

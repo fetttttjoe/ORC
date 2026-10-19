@@ -1,7 +1,6 @@
 import { z } from 'zod'
 
-// The browser reads Scope: a runtime edge to ./events would pull ./memory -> ./claim -> node:crypto
-// into its bundle. The scope union, discriminant and membership index therefore stay in this leaf.
+// A leaf the browser reads: a runtime edge to ./events would pull node:crypto in through ./knowledge.
 
 // Ordered widest to narrowest.
 export enum ScopeType {

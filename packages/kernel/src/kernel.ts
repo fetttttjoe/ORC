@@ -2,12 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import path from 'node:path'
 import { MASTERPLAN_NOTE_ID,
-  AnalysisCompletedPayload, ApprovedBy, CHECKS_STEP_ID, ChildPlanDraft, EVENT_KIND, FINISH_STEP_ID, FeedbackProvidedPayload, GroundedApprovalDoor, IsolationTier, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, PlanNoteToolName, PlanNoteWrittenPayload, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, feedbackKey, formatModelOption, isApprovalAnswer, openFeedbackTopics, validatePlan, type ChildPlanDraftInput, type ModelOption,
+  AnalysisCompletedPayload, ApprovedBy, CHECKS_STEP_ID, ChildPlanDraft, EVENT_KIND, FINISH_STEP_ID, FeedbackProvidedPayload, GroundedApprovalDoor, IsolationTier, PAYLOAD_SCHEMAS, PlanAnnotatedPayload, PlanDraft, PlanNoteToolName, PlanNoteWrittenPayload, ProjectIdentity, RunRequestedPayload, STEP_ROLE, STRATEGY, TASK_STATUS, TERMINAL_TASK_STATUS, WORKSPACE_TITLE_MAX, Workspace, WorkspaceArchivedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload, evaluateApproval, feedbackKey, formatModelOption, isApprovalAnswer, openFeedbackTopics, validatePlan, type ChildPlanDraftInput, type ModelOption,
   type Analyzer, type ApprovalPolicy, type EventDraft, type EventKind, type EventRecord, type KnowledgeWrites,
   type PlanNote, type PlanNoteWrite, type Plan, type PlanStep, type TaskNode, type TaskStatus,
+  TaskType,
   type WorkspaceKind, authorSourceOf, directoryZoneEntries, type Origin,
 } from '@orc/contracts'
-import { GROUNDED_TASK_TYPE, planApprovalStamp, planGraphHash, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
+import { planApprovalStamp, planGraphHash, PLAN_STEP_ID, PLAN_STEP_ROLE } from './execution/strategies/grounded-plan'
 import { PlanNoteRefusal, mergePlanNote, planNotesOf, planNotesWrittenAfter } from './plan-notes'
 import { kernelStepExecutorRef, reconcileFinishStep } from './finish-step'
 import { DEFAULT_MAX_ITERATIONS } from './config'
@@ -106,7 +107,7 @@ export class Kernel {
     if (!analyzer)
       throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `unknown analyzer '${input.analyzerRef}' — register it or pass a valid analyzerRef`)
     return this.log.transaction(async tx => {
-      const task = await this.createTaskIn(tx, { title: input.title, spec, type: GROUNDED_TASK_TYPE, parentId: input.parentId, budgetUSD: input.budgetUSD, workspaceId: input.workspaceId }, origin)
+      const task = await this.createTaskIn(tx, { title: input.title, spec, type: TaskType.grounded, parentId: input.parentId, budgetUSD: input.budgetUSD, workspaceId: input.workspaceId }, origin)
       const maxIterations = input.maxIterations ?? DEFAULT_MAX_ITERATIONS
       const analyzeStep: PlanStep = { ...analyzer.analysisStep({ modelRef: input.modelRef, taskSpec: spec }), maxIterations, readOnlySource: true }
       const planStep: PlanStep = {
@@ -137,7 +138,7 @@ export class Kernel {
 
   // `workspaceId` is required in practice and optional in the type only so a child can inherit its
   // parent's (createTaskIn). Omitting it without a parentId is a KernelError, not a default.
-  async createTask(input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null; workspaceId?: string }, origin: Origin): Promise<TaskNode> {
+  async createTask(input: { title: string; spec?: string; type?: TaskType; parentId?: string; budgetUSD?: number | null; workspaceId?: string }, origin: Origin): Promise<TaskNode> {
     return this.log.transaction(tx => this.createTaskIn(tx, input, origin))
   }
 
@@ -250,7 +251,7 @@ export class Kernel {
       const child: TaskNode = {
         // a split runs in the same checkout its parent step is running in — inherited, never
         // re-derived, so a subtree can never straddle two working directories
-        id: childTaskId, parentId: parent.id, workspaceId: parent.workspaceId, type: 'split', title: input.title, spec: input.spec,
+        id: childTaskId, parentId: parent.id, workspaceId: parent.workspaceId, type: TaskType.split, title: input.title, spec: input.spec,
         status: TASK_STATUS.draft, zone: [], budgetUSD, depth: parent.depth + 1,
         createdAt: new Date().toISOString(),
       }
@@ -356,7 +357,7 @@ export class Kernel {
   async writePlanNote(taskId: string, write: PlanNoteWrite, origin: Origin, run?: { stepId: string; runToken: string; idempotencyKey: string }): Promise<PlanNote> {
     return this.log.transaction(async tx => {
       const task = await this.requireTask(tx, taskId)
-      if (task.type !== GROUNDED_TASK_TYPE)
+      if (task.type !== TaskType.grounded)
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `only a grounded task has plan notes, and this task is '${task.type}'`)
       if (TERMINAL_TASK_STATUS.has(task.status))
         throw new KernelError(KERNEL_ERROR_CODE.invalid_transition, `cannot write a plan note while task is '${task.status}'`)
@@ -685,10 +686,15 @@ export class Kernel {
     })
   }
 
-  // `archived` is a PARAMETER, not two methods — the same rule `orc memory archive/restore` follows,
-  // so restore cannot drift from archive. A SETTER, not a transition: re-archiving re-stamps
-  // archivedAt and restoring a live record appends a no-op, both deliberately allowed — an operator
-  // correcting a record must not have to know its current state, and the fold is idempotent either way.
+  async identifyProject(identity: ProjectIdentity, origin: Origin): Promise<ProjectIdentity> {
+    return this.log.transaction(async tx => {
+      await this.appendProjectEvent(tx, { kind: EVENT_KIND.project_identified, payload: identity }, origin)
+      return identity
+    })
+  }
+
+  // A SETTER, not a transition: re-archiving re-stamps archivedAt and restoring a live record appends a no-op,
+  // both deliberately allowed — an operator correcting a record must not have to know its current state.
   async setWorkspaceArchived(id: string, archived: boolean, origin: Origin): Promise<Workspace> {
     return this.log.transaction(async tx => {
       const w = this.requireWorkspace(await this.stateOf(tx), id)
@@ -760,7 +766,7 @@ export class Kernel {
     // `workspaceId` is optional in the TYPE for exactly one reason: a child may omit it and inherit
     // its parent's. TaskNode.workspaceId is required, and a root task that names none is refused
     // below — a default here would silently bind work to a workspace nobody chose.
-    input: { title: string; spec?: string; type?: string; parentId?: string; budgetUSD?: number | null; workspaceId?: string },
+    input: { title: string; spec?: string; type?: TaskType; parentId?: string; budgetUSD?: number | null; workspaceId?: string },
     origin: Origin,
   ): Promise<TaskNode> {
     // ONE fold for both facts this needs — the parent (inheritance) and the workspace record.
@@ -774,7 +780,7 @@ export class Kernel {
         'a task needs a workspace — pass workspaceId (a child inherits its parent\'s)')
     this.requireWorkspace(state, workspaceId)
     const task: TaskNode = {
-      id: randomUUID(), parentId: parent?.id ?? null, workspaceId, type: input.type ?? 'generic',
+      id: randomUUID(), parentId: parent?.id ?? null, workspaceId, type: input.type ?? TaskType.generic,
       title: input.title, spec: input.spec ?? '', status: TASK_STATUS.draft, zone: [],
       budgetUSD: input.budgetUSD ?? parent?.budgetUSD ?? null,
       depth: parent ? parent.depth + 1 : 0, createdAt: new Date().toISOString(),

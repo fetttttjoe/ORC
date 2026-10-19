@@ -4,9 +4,7 @@ import { Usage } from './execution'
 import { Door } from './origin'
 import { TaskStatus } from './task'
 
-// The SHAPE of one interaction's summary — what a digest is, not how it is folded. A LEAF, because
-// the browser's wire holds `ChatDigest`: reaching ./events from here drags ./memory -> ./claim ->
-// node:crypto in, and a browser build cannot resolve that.
+// One interaction's summary, a leaf the browser's wire holds: ./events would pull node:crypto in through ./knowledge.
 
 export const ChatDigest = z.object({
   chatId: z.string().min(1),
@@ -31,10 +29,10 @@ export const ChatDigest = z.object({
     plans: z.array(z.string().min(1)),
     runs: z.array(z.string().min(1)),
   }),
-  notes: z.object({
+  claims: z.object({
     written: z.array(z.string().min(1)),
-    verified: z.array(z.string().min(1)),
-    deleted: z.array(z.string().min(1)),
+    checked: z.array(z.string().min(1)),
+    retired: z.array(z.string().min(1)),
   }),
   commits: z.array(z.string().min(1)),
   artifacts: z.array(z.string().min(1)),

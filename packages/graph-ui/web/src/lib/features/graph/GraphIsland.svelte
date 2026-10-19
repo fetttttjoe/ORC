@@ -21,10 +21,8 @@
   const DIM = 0.22 // opacity applied to everything outside the focus set
   const FLASH_MS = 2_400 // how long a node touched by the newest event stays lit
   const BASE_SIZE = 4
-  const HEAT_SIZE_SCALE = 4 // a maximally-hot node renders 2x a cold one
   const RUNNING_BUMP = 2 // running reads bigger, not animated — size, no pulse loop
-  const EDGE_BASE_SIZE = 1
-  const EDGE_HEAT_SIZE_SCALE = 2 // a maximally-hot edge renders 3x a cold one
+  const EDGE_SIZE = 1
   const SETTLE_MS = 3_000 // TOTAL layout run per burst of changes — see runLayout
   const FALLBACK_ITERATIONS = 100 // no-Worker environments get one synchronous FA2 pass
 
@@ -44,8 +42,8 @@
   $effect(() => {
     const row = ledger.rows.at(-1) ?? ledger.working
     if (!row) return
-    const touched = [row.noteRef, row.taskId, row.taskId && row.stepId ? stepNodeId(row.taskId, row.stepId) : null].filter(
-      (id): id is string => id !== null && id !== undefined,
+    const touched = [row.taskId, row.taskId && row.stepId ? stepNodeId(row.taskId, row.stepId) : null].filter(
+      (id): id is string => id !== null,
     )
     if (touched.length === 0) return
     untrack(() => {
@@ -71,14 +69,11 @@
     color: string
     size: number
   }
-  const nodeAttrs = (n: GraphNode): NodeAttrs => {
-    const base = BASE_SIZE + (n.heat ?? 0) * HEAT_SIZE_SCALE
-    return {
-      label: n.label,
-      color: colorFor(n.type, n.detail),
-      size: isActive(n.type, n.detail) ? base + RUNNING_BUMP : base,
-    }
-  }
+  const nodeAttrs = (n: GraphNode): NodeAttrs => ({
+    label: n.label,
+    color: colorFor(n.type, n.detail),
+    size: isActive(n.type, n.detail) ? BASE_SIZE + RUNNING_BUMP : BASE_SIZE,
+  })
 
   const mount: Attachment<HTMLDivElement> = (container) => {
     const g = new MultiGraph()
@@ -108,8 +103,7 @@
       const selected = id === session.sel.node
       const dimmed = focusSet !== null && !focusSet.has(id)
       const lit = flashing.has(id)
-      // a note's title is long and there are hundreds of them: labelling every one turned the
-      // canvas into overlapping text. Tasks are what an operator steers by, so they keep theirs.
+      // tasks are what an operator steers by; every other node labels on hover or selection
       const landmark = graph.nodes.get(id)?.type === 'task' || selected || id === hovered
       return {
         ...data,
@@ -247,20 +241,10 @@
 
       // links
       for (const [key, l] of graph.links) {
-        const heat = l.heat ?? 0
-        if (knownLinks.has(key)) {
-          // heat-only update: in-place merge, NOT drop+re-add — dropping resets live edge state
-          const color = edgeColorFor(heat, l.type)
-          if (g.getEdgeAttribute(key, 'color') !== color)
-            g.mergeEdgeAttributes(key, { color, size: EDGE_BASE_SIZE + heat * EDGE_HEAT_SIZE_SCALE })
-        } else if (g.hasNode(l.source) && g.hasNode(l.target)) {
-          g.addEdgeWithKey(key, l.source, l.target, {
-            color: edgeColorFor(heat, l.type),
-            size: EDGE_BASE_SIZE + heat * EDGE_HEAT_SIZE_SCALE,
-          })
-          knownLinks.add(key)
-          changed = true
-        }
+        if (knownLinks.has(key) || !g.hasNode(l.source) || !g.hasNode(l.target)) continue
+        g.addEdgeWithKey(key, l.source, l.target, { color: edgeColorFor(l.type), size: EDGE_SIZE })
+        knownLinks.add(key)
+        changed = true
       }
       for (const key of knownLinks)
         if (!graph.links.has(key)) {
@@ -301,7 +285,7 @@
     >
       <ScanIcon class="size-3.5" />
     </button>
-    <!-- the colour vocabulary, spelled from the same table the renderer paints with — five dots
+    <!-- the colour vocabulary, spelled from the same table the renderer paints with — a dot per kind
          beat a hunt through colors.ts, and an unlabeled purple cloud reads as decoration -->
     <dl class="pointer-events-none absolute bottom-2 left-2 z-10 flex flex-wrap items-center gap-x-2.5 gap-y-1 font-mono text-label text-fog select-none">
       {#each Object.entries(TYPE_COLORS) as [type, color] (type)}

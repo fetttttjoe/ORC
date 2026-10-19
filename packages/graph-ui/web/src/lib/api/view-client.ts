@@ -12,7 +12,7 @@
 // need the session store and `useQueryClient()` lives in view-query.ts, its neighbour.
 import { z } from 'zod'
 import {
-  TOUCHABLE, ViewEnvelope, ViewName, VIEW, viewPath, WIRE, type Touch, type TouchableName,
+  ViewEnvelope, ViewName, VIEW, viewPath, WIRE, type Touch, type TouchableName,
 } from '@orc/ui-core/wire'
 import type { QueryClient } from '@tanstack/svelte-query'
 import { ApiError, reportApiError } from './client'
@@ -59,11 +59,10 @@ const RESULT_SCHEMAS: ResultSchemas<ViewName> = {
 const VIEW_KEY_ROOT = 'view' as const
 
 /**
- * A held query's key: `['view', name, project, params]`. `name` is widened to `TouchableName`
- * (not just `ViewName`) so `health` — a Touchable, never a view — keys through the SAME builder a
- * `touched` entry names it by; see `healthKey` below.
+ * A held query's key: `['view', name, project, params]`. `name` is widened to include
+ * `HEALTH_KEY_NAME` so the health poll keys through the SAME builder; see `healthKey` below.
  */
-export function viewKey<N extends TouchableName>(project: string, name: N, params: Record<string, unknown>): readonly [typeof VIEW_KEY_ROOT, N, string, Record<string, unknown>] {
+export function viewKey<N extends TouchableName | typeof HEALTH_KEY_NAME>(project: string, name: N, params: Record<string, unknown>): readonly [typeof VIEW_KEY_ROOT, N, string, Record<string, unknown>] {
   return [VIEW_KEY_ROOT, name, project, params] as const
 }
 
@@ -77,13 +76,10 @@ export function viewKey<N extends TouchableName>(project: string, name: N, param
  */
 export const allViewsKey = (): readonly [typeof VIEW_KEY_ROOT] => [VIEW_KEY_ROOT] as const
 
-// The shared cache identity for the plain `/api/health` route. `project` here names the STREAMED
-// connection the `health` touch arrives on (server.ts emits it per-connection), not necessarily
-// what the answer is about: `opts.health()` probes this server's own memory/supervisor state,
-// unscoped by project (server.ts's `/api/health` handler sends no `project` param). Keying by
-// project is what makes the touch match, so every project switch pays one refetch of an otherwise
-// byte-identical answer — a defensible trade, not a bug, and not free.
-export const healthKey = (project: string): ReturnType<typeof viewKey<typeof TOUCHABLE.health>> => viewKey(project, TOUCHABLE.health, {})
+const HEALTH_KEY_NAME = 'health' as const
+
+// The shared cache identity of the `/api/health` poll, which the header and the banner read at their own cadences.
+export const healthKey = (project: string): ReturnType<typeof viewKey<typeof HEALTH_KEY_NAME>> => viewKey(project, HEALTH_KEY_NAME, {})
 
 /**
  * The key a `touched` entry invalidates by. `t.params` is a PATTERN, not necessarily a whole param
@@ -97,7 +93,7 @@ export function touchKey(project: string, t: Touch): readonly ['view', Touchable
   return viewKey(project, t.name, t.params)
 }
 
-// a missing subject is a state the pane renders, not an error: no plan yet, a deleted note
+// a missing subject is a state the pane renders, not an error: no plan yet, a removed node
 const NULL_ON_404: ReadonlySet<ViewName> = new Set([VIEW.plans, VIEW.node])
 
 /**

@@ -384,9 +384,7 @@ describe('fs_delete', () => {
 })
 
 describe('scout role', () => {
-  // Observed live: an analyze-step scout edited tracked source files before any plan existed,
-  // bypassing the plan gate. Scouts ground plans — they read, run gates, and write memory notes;
-  // the file-writing tools are not offered to them at all (registration gate, not runtime error).
+  // Scouts ground plans before any plan exists: the file-writing tools are not offered to them at all.
   it('a scout toolSet has no file-writing tools; reads stay', () => {
     const set = toolSet([], { role: STEP_ROLE.scout })
     expect(Object.keys(set)).not.toContain(TOOL_NAME.fs_write)
@@ -400,9 +398,7 @@ describe('scout role', () => {
     expect(Object.keys(set)).toContain(TOOL_NAME.fs_edit)
   })
   it('a readOnlySource step (the plan step) has no file-writing tools regardless of role', () => {
-    // the grounded plan step is role=auditor — same role as child verify steps, which legitimately
-    // write+delete scratch — so it is fenced by the explicit flag, not the role. It authors memory
-    // notes and reads code; editing source during PLANNING would bypass the approval gate.
+    // the plan step is role=auditor, like child verify steps that write scratch, so the flag fences it, not the role
     const set = toolSet([], { role: STEP_ROLE.auditor, readOnlySource: true })
     expect(Object.keys(set)).not.toContain(TOOL_NAME.fs_write)
     expect(Object.keys(set)).not.toContain(TOOL_NAME.fs_edit)

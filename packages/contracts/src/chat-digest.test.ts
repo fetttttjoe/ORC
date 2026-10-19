@@ -10,7 +10,7 @@ const digest: Record<string, unknown> = {
   door: Door.web, parent: null, externalRef: null, openedSeq: 1, lastSeq: 1, endedSeq: null,
   outcome: null, asked: null,
   caused: { tasks: [], plans: [], runs: [] },
-  notes: { written: [], verified: [], deleted: [] },
+  claims: { written: [], checked: [], retired: [] },
   commits: [], artifacts: [], questions: { asked: 0, open: 0 }, usage: ZERO_USAGE, summary: null,
 }
 

@@ -4,17 +4,16 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
-  ApprovalPolicy, ApprovedBy, AUTHOR_SOURCE, Door, taskLaneScopes, EVENT_KIND, FINISH_STEP_ID, NO_CHAT, PAYLOAD_SCHEMAS, RunOutcome, SignalOutcome, TASK_STATUS,
+  ApprovalPolicy, ApprovedBy, ClaimClass, Door, EVENT_KIND, FINISH_STEP_ID, KnowledgeRef, KnowledgeToolName, NO_CHAT, PAYLOAD_SCHEMAS, RunOutcome, SignalOutcome, TASK_STATUS,
   type AgentExecutor, type EventDraft, type ExecutorContext, type Origin, type ResolvedTool,
   type SplitResult, type UnifiedEvent,
 } from '@orc/contracts'
-import { authorFixture, draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
-import { createMemory, memoryTools } from '@orc/memory'
-import { createTestSurreal } from '@orc/memory/test-helpers'
+import { draftFixture, must, stepFixture } from '@orc/contracts/fixtures'
 import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
+import { memoryKnowledge } from './knowledge-fixture'
 import { splitTool } from './split-tool'
 
 // task_split's tool output (contract-`unknown`): the child's address and whether it gated.
@@ -23,7 +22,10 @@ const SplitOutput = z.object({ splitId: z.string(), childTaskId: z.string(), gat
 // The 1-step child plan the parent proposes via task_split (dependsOn/skillRefs are required
 // on ChildPlanStep — no zod default — so they are spelled out here).
 const CHILD_PLAN = { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [] }] }
-const CHILD_NOTE = { id: 'child-finding', title: 'CF', body: 'from the child' }
+const CHILD_CLAIM_TEXT = 'The child recorded this finding'
+const CHILD_WRITE = { add: [{ text: CHILD_CLAIM_TEXT, class: ClaimClass.fact, anchors: [{ path: 'src/child.ts' }] }], why: 'the child found it' }
+
+const WriteOutput = z.object({ added: z.array(KnowledgeRef) })
 
 const CLI: Origin = NO_CHAT(Door.cli)
 
@@ -32,7 +34,7 @@ const CLI: Origin = NO_CHAT(Door.cli)
 // branching on ctx.step.id — the child inherits executorRef='split-fake' at expansion.
 // cfg.expectGated is what the parent asserts task_split returned; cfg.child selects the
 // child's behavior. Assertions are encoded into the parent's success/failure signal
-// (mirrors memory-reuse.test.ts: 'done' at the run level PROVES the encoded checks held).
+// ('done' at the run level PROVES the encoded checks held).
 // cfg.beforeGate is a mutable box the test fills AFTER bringUp (the log does not exist when the
 // executor is constructed). It lets the parent block until the child's split is genuinely
 // resolved, which is the only way to reproduce a child outrunning its parent's join.
@@ -77,15 +79,15 @@ function splitFake(cfg: {
           return
         }
         if (cfg.child === 'write') {
-          const write = tool('memory_write')
-          const r = await ctx.checkpoint('tools:write', () => write.execute(CHILD_NOTE), (r): EventDraft[] => [
-            { kind: EVENT_KIND.tool_call, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: 'memory_write', input: CHILD_NOTE } },
-            { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: 'memory_write', output: r.output, isError: r.isError } },
+          const write = tool(KnowledgeToolName.write)
+          const r = await ctx.checkpoint('tools:write', () => write.execute(CHILD_WRITE, 'c1'), (r): EventDraft[] => [
+            { kind: EVENT_KIND.tool_call, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: KnowledgeToolName.write, input: CHILD_WRITE } },
+            { kind: EVENT_KIND.tool_result, payload: { ...base, iteration: 1, toolCallId: 'c1', toolName: KnowledgeToolName.write, output: r.output, isError: r.isError } },
           ])
           const signal = {
             ...base,
             outcome: r.isError || !workspaceOk ? SignalOutcome.failure : SignalOutcome.success,
-            summary: r.isError ? 'write failed' : (!workspaceOk ? `wrong workspace: ${ctx.workspaceDir}` : 'wrote child-finding'),
+            summary: r.isError ? 'write failed' : (!workspaceOk ? `wrong workspace: ${ctx.workspaceDir}` : 'wrote the child claim'),
           }
           await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
             { kind: EVENT_KIND.signal_received, payload: { ...base, signal } },
@@ -127,8 +129,6 @@ function splitFake(cfg: {
       const results = yield { type: 'gate', splitIds, toolCallId: 'g1' }
       const r0 = results?.[0]
 
-      // The split join's own claim refs (r0.claims) name knowledge claims, not this fixture's
-      // memory note — CHILD_NOTE goes through memory_write, so there is nothing to read back here.
       const good = gatedOk && !!r0 && r0.outcome === RunOutcome.done
       const signal = { ...base, outcome: good ? SignalOutcome.success : SignalOutcome.failure, summary: good ? 'joined child' : 'join/gate mismatch' }
       await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
@@ -142,40 +142,25 @@ function splitFake(cfg: {
 
 async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknown>, over: { concurrency?: number } = {}) {
   const pg = await createTestDb()
-  const ts = await createTestSurreal()
-  const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-split-e2e-'))
   const storage = await openStorage(pg.url, { projectId: TEST_PROJECT_ID })
   const log = storage.events
   const kernel = new Kernel(log)
   // a task must name a workspace the fold has seen — one seeded record, then tasks as before
   await seedTestWorkspace(log, CLI)
   const config = testConfig(pg.url, {
-    vaultDir,
-    projectDbUrl: ts.url, projectDbNamespace: ts.ns, projectDbName: ts.db,
-    projectDbUser: ts.username, projectDbPassword: ts.password,
     approvalPolicy: ApprovalPolicy.parse({ default: policy }), maxDepth: 3, concurrency: over.concurrency ?? 3,
   })
-  const memory = await createMemory({ log, config })
-  await memory.projector.start()
+  const knowledge = memoryKnowledge(log, kernel)
   const port = await createDbosPort({
     storage, config, skills: fakeSkills,
     providers: new Map([['fake', fakeProvider]]),
     executors: new Map([['split-fake', executor]]),
-    stepTools: p => {
-      const memoryStepTools = memoryTools({ store: memory.store, author: authorFixture({ source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }), catchUp: memory.projector.catchUp, searchScope: taskLaneScopes(p.taskId, p.ancestorTaskIds) })
-      return { tools: [
-        ...memoryStepTools,
-        ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
-      ] }
-    },
+    stepTools: p => knowledge.stepTools(p, splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p })),
   })
   await port.launch()
   const cleanup = async (): Promise<void> => {
-    await memory.close()
     await port.shutdown()
     await log.close()
-    rmSync(vaultDir, { recursive: true, force: true })
-    await ts.drop()
     await pg.drop()
   }
   return { kernel, log, port, cleanup }
@@ -202,9 +187,12 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       expect(events.some(e => e.kind === EVENT_KIND.split_proposed)).toBe(true)
       const resolved = events.find(e => e.kind === EVENT_KIND.split_resolved)
       expect(resolved).toBeDefined()
-      // this fixture's child writes a memory note (memory_write), not a knowledge claim — the
-      // split join's own claims list is empty, and that emptiness is the assertion.
-      expect(must(resolved, 'split resolved event').payload).toMatchObject({ outcome: RunOutcome.done, claims: [] })
+      const joined = PAYLOAD_SCHEMAS.split_resolved.parse(must(resolved, 'split resolved event').payload)
+      expect(joined.outcome).toBe(RunOutcome.done)
+      const wrote = must(events.find(e => e.kind === EVENT_KIND.tool_result && e.taskId === childId), 'the child write result')
+      const { added } = WriteOutput.parse(PAYLOAD_SCHEMAS.tool_result.parse(wrote.payload).output)
+      expect(added).toHaveLength(1)
+      expect(joined.claims).toEqual(added)
 
       expect((await kernel.getTask(childId))?.status).toBe(TASK_STATUS.done)
       expect((await kernel.state()).runs.get(childId)?.at(-1)?.cwd).toBe(sharedWorkspace)

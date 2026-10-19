@@ -25,8 +25,7 @@ export const Workspace = z.object({
   baseBranch: z.string().min(1).nullable(),
   kind: z.enum(WorkspaceKind),
   managed: z.boolean(),
-  // Captured at creation/adoption: branch === the project's trunk. Notes written on trunk are final
-  // by construction; everywhere else they are provisional until workspace_merged.
+  // Captured at creation/adoption: branch === the project's trunk.
   onTrunk: z.boolean(),
   createdAt: z.string(),
   archivedAt: z.string().nullable(), // required key: nothing about a workspace record defaults silently
@@ -54,8 +53,8 @@ export enum WorkspaceState {
 export const WORKSPACE_STATE = WorkspaceState
 
 // ONE verdict per workspace, derived from the fold plus what only a caller can probe (the
-// filesystem, the note read model). The DERIVATION stays in the kernel; this is the shape it
-// produces and the schema every other surface reads it back with.
+// filesystem). The DERIVATION stays in the kernel; this is the shape it produces and the schema
+// every other surface reads it back with.
 export const WorkspaceHealth = z.object({
   state: z.enum(WorkspaceState),
   // The newest stamp this workspace has, over its tasks' events AND its own record's events. NO
@@ -70,9 +69,6 @@ export const WorkspaceHealth = z.object({
   // reader cannot tell that case from one that never landed, and "has this work landed?" is the
   // question the whole workspace transaction exists to answer.
   merged: z.boolean(),
-  // null = the note read model could not be asked (Surreal down), rendered '?'. Distinct from 0,
-  // which is a measured "nothing pending" — the same absent/zero discipline measureDrift keeps.
-  provisionalNotes: z.number().int().nullable(),
   dirExists: z.boolean(),
   // three-valued for the reason isClean is: null means git declined to answer (the directory is not
   // a checkout, or is gone), which is a different fact from "has uncommitted work".
@@ -87,27 +83,14 @@ export const WorkspaceWithHealth = z.object({ workspace: Workspace, health: Work
 export type WorkspaceWithHealth = z.infer<typeof WorkspaceWithHealth>
 
 // The "commit" of the workspace transaction. Appended by `orc ws merge`, `orc ws finalize`, or the
-// commit reactor once it can see the branch tip is an ancestor of trunk. Nothing else changes a
-// note's finality — it is derived from this event's absence or presence.
+// commit reactor once it can see the branch tip is an ancestor of trunk.
 export const WorkspaceMergedPayload = z.object({ workspaceId: z.string().min(1), mergeCommit: z.string().min(1), trunk: z.string().min(1), at: z.string() })
 export type WorkspaceMergedPayload = z.infer<typeof WorkspaceMergedPayload>
-
-// The zod twin of what plugins/memory's import-free `provisionalOf` returns — carried, ABSENT when
-// final, on every row the memory read surfaces hand out. It names the workspace so a reader can act
-// on the flag (go and merge that checkout) rather than only distrust the note; `title` is what a
-// human recognises the checkout by, where the id alone is a uuid.
-//
-// Lives here, on the workspace entity, because that is what the flag is ABOUT and because both
-// claim.ts and memory.ts carry it — claim.ts cannot import memory.ts (memory.ts imports it), so a
-// shape owned by either would be unreachable from the other.
-export const ProvisionalFlag = z.object({ workspaceId: z.string().min(1), title: z.string() })
-export type ProvisionalFlag = z.infer<typeof ProvisionalFlag>
 
 export const WorkspaceCreatedPayload = z.object({ workspace: Workspace })
 export type WorkspaceCreatedPayload = z.infer<typeof WorkspaceCreatedPayload>
 export const WorkspaceRetitledPayload = z.object({ workspaceId: z.string().min(1), title: z.string().min(1).max(WORKSPACE_TITLE_MAX) })
 export type WorkspaceRetitledPayload = z.infer<typeof WorkspaceRetitledPayload>
-// `archived` is a parameter, not two event kinds — the same rule `orc memory archive/restore`
-// follows (one store call with a flag), so restore cannot drift from archive.
+// `archived` is a parameter, not two event kinds, so restore cannot drift from archive.
 export const WorkspaceArchivedPayload = z.object({ workspaceId: z.string().min(1), archived: z.boolean(), at: z.string() })
 export type WorkspaceArchivedPayload = z.infer<typeof WorkspaceArchivedPayload>

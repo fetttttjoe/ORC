@@ -2,8 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import type { MemoryAuthor } from './author'
 import type { AnchorReading, ClaimState } from './claim-state'
-import { ClaimClass, EntityPath } from './claim'
-import { ROOT_ENTITY } from './entity-of'
+import { normalizeEntity, pathSegments, ROOT_ENTITY } from './entity-of'
 import type { Decision, DecisionDraft, DecisionFilter, DecisionInputRaw, DecisionWriteResult } from './decision'
 import type { StructureProvider } from './structure'
 import { DecisionSlug, KNOWLEDGE_ID_LENGTH, KNOWLEDGE_ID_RE, KNOWLEDGE_TAG_LIMITS, KnowledgeId, KnowledgeRef, KnowledgeTag } from './knowledge-ref'
@@ -12,6 +11,18 @@ export {
   DECISION_SLUG_CHARS, DECISION_SLUG_RE, DecisionSlug, KNOWLEDGE_ID_LENGTH, KNOWLEDGE_ID_RE, KNOWLEDGE_TAG_LIMITS, KNOWLEDGE_TAG_RE,
   KnowledgeId, KnowledgeRef, KnowledgeTag, featureTag,
 } from './knowledge-ref'
+
+export enum ClaimClass {
+  fact = 'fact',
+  why = 'why',
+}
+
+export const EntityPath = z.string().min(1)
+  .refine(path => !path.includes('\0'), 'a path cannot contain NUL')
+  .refine(path => !/^(?:[/\\]|[A-Za-z]:)/.test(path), 'a path must be relative')
+  .refine(path => !pathSegments(path).includes('..'), 'a path cannot contain ..')
+  .transform(normalizeEntity)
+export type EntityPath = z.infer<typeof EntityPath>
 
 const GRAMMAR_BREAKERS = /[\s#@{}]/
 const ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'

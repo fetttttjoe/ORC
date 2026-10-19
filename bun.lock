@@ -29,7 +29,6 @@
         "@orc/knowledge-core": "workspace:*",
         "@orc/knowledge-git": "workspace:*",
         "@orc/mcp-client": "workspace:*",
-        "@orc/memory": "workspace:*",
         "@orc/provider-anthropic": "workspace:*",
         "@orc/provider-ollama": "workspace:*",
         "@orc/provider-openai": "workspace:*",
@@ -39,9 +38,6 @@
         "ai": "^7.0.30",
         "commander": "^12.1.0",
         "zod": "^4.4.3",
-      },
-      "devDependencies": {
-        "surrealdb": "2.0.4",
       },
     },
     "packages/contracts": {
@@ -112,8 +108,8 @@
       },
       "devDependencies": {
         "@orc/executor-api-loop": "workspace:*",
+        "@orc/knowledge-core": "workspace:*",
         "@orc/mcp-client": "workspace:*",
-        "@orc/memory": "workspace:*",
         "@orc/vault-projector": "workspace:*",
         "@types/pg": "^8.20.0",
       },
@@ -189,18 +185,6 @@
         "zod": "^4.4.3",
       },
     },
-    "plugins/memory": {
-      "name": "@orc/memory",
-      "version": "0.0.0",
-      "dependencies": {
-        "@orc/contracts": "workspace:*",
-        "@orc/kernel": "workspace:*",
-        "@orc/vault-projector": "workspace:*",
-        "surqlize": "0.1.0",
-        "surrealdb": "2.0.4",
-        "zod": "^4.4.3",
-      },
-    },
     "plugins/provider-anthropic": {
       "name": "@orc/provider-anthropic",
       "version": "0.0.0",
@@ -239,9 +223,6 @@
         "web-tree-sitter": "^0.27.0",
       },
     },
-  },
-  "patchedDependencies": {
-    "surqlize@0.1.0": "patches/surqlize@0.1.0.patch",
   },
   "overrides": {
     "@hono/node-server": "^2.0.11",
@@ -364,8 +345,6 @@
 
     "@orc/mcp-client": ["@orc/mcp-client@workspace:plugins/mcp-client"],
 
-    "@orc/memory": ["@orc/memory@workspace:plugins/memory"],
-
     "@orc/provider-anthropic": ["@orc/provider-anthropic@workspace:plugins/provider-anthropic"],
 
     "@orc/provider-ollama": ["@orc/provider-ollama@workspace:plugins/provider-ollama"],
@@ -431,10 +410,6 @@
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.62.4", "", { "os": "win32", "cpu": "x64" }, "sha512-zD6NdeWEByGE9QF9vCrlJ5YQB4oq9q91kPZS37Jwj5hOkvR1lTBSpsKhKDw4IJtbQ35LsTS1HD9DZYGKIshU1Q=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
-
-    "@surrealdb/cbor": ["@surrealdb/cbor@2.0.0-alpha.4", "", {}, "sha512-l/hNZ3ZCOJq8rzwx1y5ZV/8b2bYCWdhGqRVY33Pu50NAHyAW5qLsMn3ZBkZow77mAKwNCsbDsRGnyYEuU95mjw=="],
-
-    "@surrealdb/sqon": ["@surrealdb/sqon@0.1.0", "", { "dependencies": { "@surrealdb/cbor": "2.0.0-alpha.4", "uuidv7": "^1.0.1" }, "peerDependencies": { "tslib": "^2.6.3", "typescript": "^5.0.0" } }, "sha512-pooKLZ0W6mN8XHzJQavGOdfZOZksycmIjhwFwvG0kdCAt4I5U6KKPHcXQwFkTDNKFKFKdufczLRnzHapPIslQw=="],
 
     "@svelte-put/shortcut": ["@svelte-put/shortcut@4.2.0", "", { "peerDependencies": { "svelte": "^5.1.0" } }, "sha512-hqNLo4yEc++SLgAkZUvuwMxIAsii9qjQtTuzfcYVf3xRxa+0HFcfaWFK7LdU3l+15s9SYVNbPB0qQj9CHFqSuw=="],
 
@@ -900,10 +875,6 @@
 
     "superjson": ["superjson@1.13.3", "", { "dependencies": { "copy-anything": "^3.0.2" } }, "sha512-mJiVjfd2vokfDxsQPOwJ/PtanO87LhpYY88ubI5dUB1Ab58Txbyje3+jpm+/83R/fevaq/107NNhtYBLuoTrFg=="],
 
-    "surqlize": ["surqlize@0.1.0", "", { "peerDependencies": { "surrealdb": "^2.0.0-alpha.18", "typescript": "^5.0.0" } }, "sha512-Pq8dvfLPwZZC3zaNaxQvefjt6K9CkpDQxlQ4n6m7XoZumFRAAbEG4nTi21d0s+sjY/xnunG8eLzFfxoKtk/smQ=="],
-
-    "surrealdb": ["surrealdb@2.0.4", "", { "dependencies": { "@surrealdb/sqon": "0.1.0" }, "peerDependencies": { "tslib": "^2.6.3", "typescript": "^5.0.0 || ^6.0.0" } }, "sha512-tCmMzcsLB/CVDZtxsj/xOWY6NWy9MrX2abMuwnVpAI5xj7kvnq9noRtc1nhjuDihei/Njfkxe/NYMxy7ZLLl4g=="],
-
     "svelte": ["svelte@5.56.8", "", { "dependencies": { "@jridgewell/remapping": "^2.3.4", "@jridgewell/sourcemap-codec": "^1.5.0", "@sveltejs/acorn-typescript": "^1.0.10", "@types/estree": "^1.0.5", "@types/trusted-types": "^2.0.7", "acorn": "^8.12.1", "aria-query": "5.3.1", "axobject-query": "^4.1.0", "clsx": "^2.1.1", "devalue": "^5.8.1", "esm-env": "^1.2.1", "esrap": "^2.2.12", "is-reference": "^3.0.3", "locate-character": "^3.0.0", "magic-string": "^0.30.11", "zimmerframe": "^1.1.2" } }, "sha512-PY8LOw7xP6c8IOiVqdo0sbbZVYhXRSfklOQLAUyGBKqjTX0wx/z4l/9J+PmBpmlLnxzEb1NqltxQ5/wZme/Cmg=="],
 
     "svelte-check": ["svelte-check@4.7.4", "", { "dependencies": { "@jridgewell/trace-mapping": "^0.3.25", "@sveltejs/load-config": "^0.2.1", "chokidar": "^4.0.1", "fdir": "^6.2.0", "picocolors": "^1.0.0", "sade": "^1.7.4" }, "peerDependencies": { "svelte": "^4.0.0 || ^5.0.0-next.0", "typescript": "^5.0.0 || ^6.0.0" }, "bin": { "svelte-check": "bin/svelte-check" } }, "sha512-IW9ot9YqAoyv8FvyN+eb4ZTe8zgcKZrJLNYU6dzSKkGwEBsSPc4K7lmQ8bKn8W2YMXM6WDfZSSVOaGtekyUfOQ=="],
@@ -941,8 +912,6 @@
     "undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
 
     "unpipe": ["unpipe@1.0.0", "", {}, "sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ=="],
-
-    "uuidv7": ["uuidv7@1.2.1", "", { "bin": { "uuidv7": "cli.js" } }, "sha512-4kPkK3/XTQW9Hbm4CaqfICn+kY9LJtDVEOfgsRRra/+n2Ofg4NqzRFceAkxvQ/Ud/6BpHOPzj8cirqM7TzTN5Q=="],
 
     "vary": ["vary@1.1.2", "", {}, "sha512-BNGbWLfd0eUPabhkXUVm0j8uuvREyTh5ovRa/dyow/BqAbZJyC+5fU+IzQOzmAKzYqYRAISoRhdQr3eIZ/PXqg=="],
 

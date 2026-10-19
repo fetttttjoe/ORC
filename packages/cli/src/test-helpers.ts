@@ -1,35 +1,18 @@
-// Shared CLI-test scaffolding: a throwaway-SurrealDB dropper, a `Command`-per-call CLI runner, and
-// the throwing stubs the served-tool surface is built from. One spelling of each, so the CLI test
-// files that need them cannot drift against each other.
+// Shared CLI-test scaffolding: a `Command`-per-call CLI runner and the throwing stubs the
+// served-tool surface is built from. One spelling of each, so the CLI test files that need them
+// cannot drift against each other.
 import { spyOn } from 'bun:test'
 import type { Command } from 'commander'
-import { Surreal } from 'surrealdb'
 import type { EventRecord, ExecutionPort } from '@orc/contracts'
-import { projectDatabaseName, type EventLog, type Kernel, type PluginHost, type ProjectConfig, type Storage } from '@orc/kernel'
+import type { EventLog, Kernel, PluginHost, ProjectConfig, Storage } from '@orc/kernel'
 import type { McpHub } from '@orc/mcp-client'
 import type { OrcActions, ProjectSessions } from '@orc/ui-core'
 import { modelOf } from '@orc/ui-core/test-helpers'
 import { buildProgram } from './main'
 
-export { testSurrealDbName } from '@orc/memory/test-helpers'
-
-// `use()` selects only the namespace, and the (internally-generated, `t_[a-z0-9]+`) db name is
-// inlined directly, since `REMOVE DATABASE IF EXISTS type::database($db)` is not a valid function
-// path in SurrealDB v3.2.0. Connection details come from the injected config — no literals.
-export async function dropSurrealDb(config: ProjectConfig): Promise<void> {
-  const s = new Surreal()
-  await s.connect(config.projectDbUrl)
-  await s.signin({ username: config.projectDbUser, password: config.projectDbPassword })
-  await s.use({ namespace: config.projectDbNamespace })
-  // createMemory opens the project-derived name; drop base and derived alike
-  for (const name of [config.projectDbName, projectDatabaseName(config.projectDbName, config.projectId)])
-    await s.query(`REMOVE DATABASE IF EXISTS \`${name}\`;`).catch(() => {})
-  await s.close()
-}
-
 type PluginContext = { host: PluginHost; hub: McpHub; config: ProjectConfig; log: EventLog; storage?: Storage }
 
-// exitOverride must reach NESTED subcommands too (e.g. `memory neighbors`): commander only copies
+// exitOverride must reach NESTED subcommands too (e.g. `ws ls`): commander only copies
 // the setting to children created AFTER the call, and buildProgram builds every subcommand up
 // front — so an option error on one would call process.exit(1) and kill the whole test process
 // mid-suite instead of rejecting.
@@ -79,7 +62,6 @@ export const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   newTask: unsupported('newTask'), propose: unsupported('propose'), edit: unsupported('edit'),
   approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
   retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
-  writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
   recordDecision: unsupported('recordDecision'), listDecisions: unsupported('listDecisions'), readDecision: unsupported('readDecision'),
   renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
   listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),

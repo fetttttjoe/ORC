@@ -14,25 +14,5 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
-  surrealdb:
-    image: surrealdb/surrealdb:v3.2.0
-    # file-backed, NOT `memory`: the read model is disposable by design, but a rebuild re-embeds
-    # every memory_written event through the local CPU embedder — measured 2026-08-01: 376 events
-    # ≈ an hour of ollama time, during which `orc serve` blocks pre-banner and looks hung. A
-    # restart must resume from the projector cursor, not re-buy the corpus.
-    command: start --user root --pass orc --bind 0.0.0.0:8000 rocksdb:/data/orc.db
-    # the image's default user cannot write a fresh named volume (measured: PermissionDenied on
-    # /data); root is fine for a localhost-bound dev database
-    user: "0:0"
-    ports:
-      - "127.0.0.1:8000:8000"
-    volumes:
-      - orc-surrealdata:/data
-    healthcheck:
-      test: ["CMD", "/surreal", "isready", "--endpoint", "http://localhost:8000"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
 volumes:
   orc-pgdata:
-  orc-surrealdata:

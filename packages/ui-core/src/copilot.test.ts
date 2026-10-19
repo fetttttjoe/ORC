@@ -3,7 +3,7 @@ import { generateText, stepCountIs } from 'ai'
 import { MockLanguageModelV4 } from 'ai/test'
 import type { ToolSet } from 'ai'
 import { eventFixture, listOf, must, planFixture, planNoteFixture, recordOf, taskFixture } from '@orc/contracts/fixtures'
-import { DecisionStatus, Door, EVENT_KIND, KnowledgeToolName, ScopeType, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type Origin, type PlanNote, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
+import { DecisionStatus, Door, EVENT_KIND, KnowledgeHealthState, KnowledgeToolName, ScopeType, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type Origin, type PlanNote, type Workspace, type WorkspaceHealth, type WorkspaceWithHealth } from '@orc/contracts'
 import type { OrcActions } from './actions'
 import type { ProjectSessions } from './sessions'
 import { modelOf } from './test-helpers'
@@ -30,7 +30,6 @@ const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   newTask: unsupported('newTask'), propose: unsupported('propose'), edit: unsupported('edit'),
   approve: unsupported('approve'), run: unsupported('run'), reply: unsupported('reply'),
   retry: unsupported('retry'), annotate: unsupported('annotate'), revise: unsupported('revise'),
-  writeNote: unsupported('writeNote'), deleteNote: unsupported('deleteNote'),
   recordDecision: unsupported('recordDecision'), listDecisions: unsupported('listDecisions'), readDecision: unsupported('readDecision'),
   renameProject: unsupported('renameProject'), newProject: unsupported('newProject'),
   listWorkspaces: unsupported('listWorkspaces'), newWorkspace: unsupported('newWorkspace'),
@@ -49,7 +48,7 @@ const wsFixture: Workspace = {
 // through untouched, so a partial here would let them ship a partial.
 const healthFixture: WorkspaceHealth = {
   state: WORKSPACE_STATE.waiting, lastActivityAt: '2026-01-02T00:00:00.000Z',
-  taskCount: 1, openTaskCount: 1, merged: false, provisionalNotes: 3, dirExists: true, clean: false,
+  taskCount: 1, openTaskCount: 1, merged: false, dirExists: true, clean: false,
 }
 const wsRow: WorkspaceWithHealth = { workspace: wsFixture, health: healthFixture }
 
@@ -119,26 +118,27 @@ describe('copilot tools', () => {
     expect(r.output).toHaveProperty('tasks')
   })
 
-  it('project_status carries memory health when the probe is wired — a rebuilding read model must be visible at the door, not only in the DB', async () => {
-    const health = async () => ({ memory: { state: 'catching_up' as const, pending: 372, reason: '372 event(s) not yet projected' } })
+  it('project_status carries knowledge health when the probe is wired, and is silent without one', async () => {
+    const health = async () => ({ knowledge: { state: KnowledgeHealthState.ok as const, claims: 122, suspect: 3 } })
     const tools = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN, health }))
     const r = await must(tools.find(t => t.name === 'project_status'), 'tools.find(t => t.name === \'project_status\')').execute({}, undefined)
     expect(r.isError).toBe(false)
-    expect(r.output).toHaveProperty('memory', { state: 'catching_up', pending: 372, reason: '372 event(s) not yet projected' })
+    expect(r.output).toHaveProperty('knowledge', { state: 'ok', claims: 122, suspect: 3 })
+    expect(r.output).not.toHaveProperty('memory')
 
-    // probe absent → field omitted, never a fabricated "ok"
     const bare = asResolvedTools(buildCopilotTools({ sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN }))
     const r2 = await must(bare.find(t => t.name === 'project_status'), 'bare.find(t => t.name === \'project_status\')').execute({}, undefined)
-    expect(r2.output).not.toHaveProperty('memory')
+    expect(r2.output).not.toHaveProperty('knowledge')
+  })
 
-    // probe failure → unreachable with the reason, mirroring graph-ui's /api/health posture
+  it('project_status reports unavailable with the reason when the probe throws', async () => {
     const failing = asResolvedTools(buildCopilotTools({
       sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN,
-      health: async () => { throw new Error('surreal is down') },
+      health: async () => { throw new Error('no checkout') },
     }))
-    const r3 = await must(failing.find(t => t.name === 'project_status'), 'failing.find(t => t.name === \'project_status\')').execute({}, undefined)
-    expect(r3.isError).toBe(false)
-    expect(r3.output).toHaveProperty('memory', { state: 'unreachable', pending: 0, reason: 'surreal is down' })
+    const r = await must(failing.find(t => t.name === 'project_status'), 'failing.find(t => t.name === \'project_status\')').execute({}, undefined)
+    expect(r.isError).toBe(false)
+    expect(r.output).toHaveProperty('knowledge', { state: 'unavailable', reason: 'no checkout' })
   })
 
   // `visual` is an ALLOWLIST, not a spread: the plans view serves a BROWSER as well, and a field

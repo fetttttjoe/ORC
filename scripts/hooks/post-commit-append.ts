@@ -9,8 +9,7 @@
 // hand-made commit that could not be recorded is still a commit; this is a courtesy to the log,
 // never a gate.
 //
-// Relative imports, not `@orc/kernel`/`@orc/contracts`: scripts/ is not a workspace package (see
-// scripts/graph-audit.ts, which does the same), so the bare specifiers do not resolve here.
+// Relative imports: scripts/ is not a workspace package, so `@orc/*` specifiers do not resolve here.
 import { z } from 'zod'
 import { Kernel, loadConfig, openStorage, requireProject } from '../../packages/kernel/src/index'
 import type { EventLog } from '../../packages/kernel/src/index'

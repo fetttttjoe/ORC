@@ -1,11 +1,10 @@
 import { Command } from 'commander'
 import { AdrSection, AUTHOR_SOURCE, decisionSummaryOf, DecisionStatus, Door, NO_CHAT, type Decision, type DecisionInputRaw, type KnowledgePort } from '@orc/contracts'
 import type { EventLog, Kernel, ProjectConfig } from '@orc/kernel'
-import { cwdAuthor } from './cwd-workspace'
+import { cwdAuthor, knowledgeAuthor } from './cwd-workspace'
 import { enumArg } from './enum-arg'
 import { NO_PROJECT_ERROR } from './exit'
 import { knowledgeAccess, openKnowledge, type KnowledgeOpening } from './knowledge-open'
-import { knowledgeAuthor } from './knowledge-commands'
 
 export const ADR_SUBCOMMAND = { new: 'new', ls: 'ls', show: 'show', supersede: 'supersede' } as const
 const RECORDABLE_STATUSES = Object.values(DecisionStatus).filter(s => s !== DecisionStatus.superseded)

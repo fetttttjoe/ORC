@@ -12,8 +12,8 @@ import type { ProjectSessions } from './sessions'
 import { snip } from './summarize'
 import { viewOf } from './views/registry'
 import { VIEW, WIRE } from './wire'
-import type { MemoryHealth, ResolvedTool, SupervisorHealth, WorkspaceWithHealth } from '@orc/contracts'
-import { DecisionFilter, DecisionInput, errorMessage, EventKind, groupByWorkspace, KnowledgeToolName, MEMORY_HEALTH, toolError, type Origin } from '@orc/contracts'
+import type { KnowledgeHealth, ResolvedTool, SupervisorHealth, WorkspaceWithHealth } from '@orc/contracts'
+import { DecisionFilter, DecisionInput, errorMessage, EventKind, groupByWorkspace, KnowledgeHealthState, KnowledgeToolName, toolError, type Origin } from '@orc/contracts'
 
 // Why a session can't act: 'read-only' = server started outside a project; 'foreign-project'
 // = the user is viewing a chat other than the one this server runs in.
@@ -101,12 +101,8 @@ export function buildCopilotTools(deps: {
   // an empty list would read as "this project has no workspaces" — which is never true, since every
   // task belongs to one. Absent means the field is OMITTED.
   listWorkspaces?: () => Promise<readonly WorkspaceWithHealth[]>
-  // Read-model health for project_status (same probe graph-ui's /api/health serves). Optional
-  // because not every composition has a memory plugin; absent means the field is OMITTED — a
-  // fabricated "ok" would tell a driver the graph is current while it is mid-rebuild, which is
-  // how a rebuilding read model stayed invisible at this door on 2026-08-01 (operators had to
-  // read SurrealDB/Postgres directly to learn why nothing was running).
-  health?: () => Promise<{ memory: MemoryHealth; supervisor?: SupervisorHealth }>
+  // Absent means project_status omits the field: a fabricated "ok" would read as healthy knowledge.
+  health?: () => Promise<{ knowledge: KnowledgeHealth; supervisor?: SupervisorHealth }>
 }): ToolSet {
   const { sessions, actions, projectId, origin, listModels, listWorkspaces, health } = deps
   const taskId = z.string().min(1)
@@ -120,7 +116,7 @@ export function buildCopilotTools(deps: {
       }),
     } : {}),
     project_status: tool({
-      description: 'List every request (task) in this project with its status, the workspaces (checkouts) they are worked in, plus graph counts and memory (read model) health. Start here.',
+      description: 'List every request (task) in this project with its status, the workspaces (checkouts) they are worked in, plus graph counts and knowledge health (claims, suspect claims). Start here.',
       inputSchema: z.object({}),
       execute: async () => {
         const { graph } = await sessions.snapshot(projectId)
@@ -133,17 +129,15 @@ export function buildCopilotTools(deps: {
         // of the node vocabulary, and a kind added to the wire counted as undefined here. Still
         // written out — Record<NodeType, number> makes a MISSING key a compile error, which is the
         // guarantee wanted, and building it from the tuple would need a cast on the seed object.
-        const counts: Record<NodeType, number> = { task: 0, step: 0, artifact: 0, note: 0, model: 0 }
+        const counts: Record<NodeType, number> = { task: 0, step: 0, artifact: 0, model: 0 }
         for (const n of graph.nodes) counts[n.type]++
-        // a failed probe reports unreachable-with-reason (graph-ui's /api/health posture) —
-        // health must never take project_status down with it, and never read as silently ok
         const h = health
           ? await health()
-            .catch((err: unknown) => ({ memory: { state: MEMORY_HEALTH.unreachable, pending: 0, reason: errorMessage(err) } }))
+            .catch((err: unknown) => ({ knowledge: { state: KnowledgeHealthState.unavailable, reason: errorMessage(err) } }))
           : undefined
         const tasks = graph.nodes.filter(n => n.type === 'task')
         // groupByWorkspace requires a required workspaceId; GraphNode's stays `| undefined` because
-        // the field is wire-shared across all five node kinds, so the predicate narrows here rather
+        // the field is wire-shared across every node kind, so the predicate narrows here rather
         // than asserting one. Computed once, outside the return, so every workspace entry below
         // reads its slice off ONE grouping pass instead of re-filtering `tasks` per workspace.
         const byWorkspace = workspaces && new Map(
@@ -171,7 +165,7 @@ export function buildCopilotTools(deps: {
               health,
             })),
           }),
-          ...(h && { memory: h.memory }),
+          ...(h && { knowledge: h.knowledge }),
           // "is anything driving?" — a driver seeing every task idle needs this before anything else
           ...(h && 'supervisor' in h && h.supervisor && { supervisor: h.supervisor }),
         }
@@ -263,7 +257,7 @@ export function buildCopilotTools(deps: {
       execute: async input => actions.newTask({ ...input, budgetUSD: null }, origin),
     }),
     workspace_list: tool({
-      description: 'Workspaces of this project: a checkout, or an orc worktree created for one request, each with its health — state (dangling/waiting/active/idle/merged), when it last saw activity, its task counts and how many notes it holds that are still pending a merge. Ordered attention-first. Read-only — project_status lists each workspace\'s tasks.',
+      description: 'Workspaces of this project: a checkout, or an orc worktree created for one request, each with its health — state (dangling/waiting/active/idle/merged), when it last saw activity and its task counts. Ordered attention-first. Read-only — project_status lists each workspace\'s tasks.',
       inputSchema: z.object({}),
       execute: async () => actions.listWorkspaces(),
     }),
@@ -316,7 +310,7 @@ export function buildCopilotTools(deps: {
       execute: async ({ taskId: id }) => actions.retry(id, null, origin),
     }),
     cancel: tool({
-      description: 'Cancel a running/blocked task (terminal; sweeps its orphaned notes). Ask the user first.',
+      description: 'Cancel a running/blocked task (terminal). Ask the user first.',
       inputSchema: z.object({ taskId }),
       execute: async ({ taskId: id }) => actions.cancel(id, origin),
     }),

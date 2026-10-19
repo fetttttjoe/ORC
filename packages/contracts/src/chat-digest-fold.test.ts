@@ -3,6 +3,7 @@ import { ChatKind } from './chat'
 import { chatDigests } from './chat-digest-fold'
 import { EVENT_KIND, type EventRecord } from './event-kinds'
 import { authorFixture, eventFixture, must, planFixture, taskFixture, TEST_WORKSPACE_ID } from './fixtures'
+import { CheckVerdict } from './knowledge'
 import { Door } from './origin'
 import { TASK_STATUS } from './task'
 
@@ -162,26 +163,27 @@ describe('chatDigests — a run chat whose split children stamp under it', () =>
   })
 })
 
-const note = (seq: number, kind: 'memory_written' | 'memory_verified' | 'memory_deleted', id: string): EventRecord => {
-  const author = authorFixture({ taskId: 't1' })
-  if (kind === 'memory_written') {
-    return eventFixture({ seq, chatId: 'c1', taskId: null, kind: EVENT_KIND.memory_written,
-      payload: { note: { tier: 'semantic', id, title: id.toUpperCase() }, author, invalidates: [] } })
-  }
-  if (kind === 'memory_verified') {
-    return eventFixture({ seq, chatId: 'c1', taskId: null, kind: EVENT_KIND.memory_verified,
-      payload: { id, scope: 'project', stamp: { revision: 'abc', at: '2026-07-18T00:00:00.000Z', by: 'cli' }, author } })
-  }
-  return eventFixture({ seq, chatId: 'c1', taskId: null, kind: EVENT_KIND.memory_deleted,
-    payload: { id, scope: 'project', author } })
-}
+const author = authorFixture({ taskId: 't1' })
+const ref = (id: string) => ({ id, location: `knowledge/src/${id}.md` })
+const claimsWritten = (seq: number, chatId: string, added: string[], changed: string[], retired: string[]): EventRecord =>
+  eventFixture({ seq, chatId, taskId: null, kind: EVENT_KIND.knowledge_written, payload: {
+    added: added.map(ref), changed: changed.map(ref), retired: retired.map(ref), files: [], why: null, decision: null,
+    decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author,
+  } })
+const claimChecked = (seq: number, chatId: string, id: string): EventRecord =>
+  eventFixture({ seq, chatId, taskId: null, kind: EVENT_KIND.knowledge_checked,
+    payload: { id, verdict: CheckVerdict.holds, text: 'the claim', anchors: [], why: 'read the code', author } })
 
 describe('chatDigests — what a chat produced', () => {
-  it('counts a note rewritten twice ONCE', () => {
-    const events = [open(1, 'c1', ChatKind.copilot), note(2, 'memory_written', 'n1'), note(3, 'memory_written', 'n1'),
-      note(4, 'memory_written', 'n2'), note(5, 'memory_verified', 'n1'), note(6, 'memory_deleted', 'n2')]
-    const d = byId('c1', events)
-    expect(d.notes).toEqual({ written: ['n1', 'n2'], verified: ['n1'], deleted: ['n2'] })
+  it('names the claims it wrote, checked and retired', () => {
+    const events = [open(1, 'c1', ChatKind.copilot),
+      claimsWritten(2, 'c1', ['aaaaaaaa'], ['bbbbbbbb'], ['cccccccc']), claimChecked(3, 'c1', 'dddddddd')]
+    expect(byId('c1', events).claims).toEqual({ written: ['aaaaaaaa', 'bbbbbbbb'], checked: ['dddddddd'], retired: ['cccccccc'] })
+  })
+
+  it('ignores a knowledge write outside the chat', () => {
+    const events = [open(1, 'c1', ChatKind.copilot), claimsWritten(2, 'c2', ['aaaaaaaa'], [], [])]
+    expect(byId('c1', events).claims).toEqual({ written: [], checked: [], retired: [] })
   })
 
   it('collects commits, artifacts, created tasks and proposed plans', () => {

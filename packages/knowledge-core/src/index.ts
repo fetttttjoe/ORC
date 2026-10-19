@@ -19,3 +19,5 @@ export {
 } from './evidence'
 export { ALL_EVIDENCE_KINDS, BASIS_EVIDENCE_KINDS, evidenceEventsOf, type EvidenceRecord } from './evidence-events'
 export { createEvidenceReader, type EvidenceReader, type EvidenceSource } from './evidence-reader'
+export { driftCounts } from './drift-counts'
+export { knowledgeHealth } from './knowledge-health'

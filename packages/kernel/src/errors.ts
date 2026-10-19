@@ -3,8 +3,7 @@ export const KERNEL_ERROR_CODE = {
   invalid_transition: 'invalid_transition',
   version_conflict: 'version_conflict',
   plan_validation_failed: 'plan_validation_failed',
-  // a keyed append conflicted with a stored event of DIFFERENT data — a typed identity so
-  // consumers (the memory gateway's benign-replay tolerance) match a code, not a prose message
+  // a keyed append conflicted with a stored event of DIFFERENT data
   idempotency_conflict: 'idempotency_conflict',
   workspace_not_found: 'workspace_not_found',
 } as const

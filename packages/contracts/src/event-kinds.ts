@@ -1,12 +1,7 @@
 import type { Usage } from './execution'
 import type { Door } from './origin'
 
-// The event vocabulary and the stored envelope, in a LEAF module (zod + type-only imports, which
-// erase at build time and so cannot put this module in an import cycle).
-// `events` holds the PAYLOAD schemas, several of which live in modules that in turn need the
-// event kinds — `memory` folds by kind, `analysis` is read back by kind. Keeping the vocabulary
-// here means those modules never have to import `events` itself, so there is no cycle to reason
-// about: a payload schema and the kind that names it can be defined in either order.
+// The event vocabulary and the stored envelope, in a leaf module: type-only imports cannot form a cycle.
 export enum EventKind {
   task_created = 'task_created',
   plan_proposed = 'plan_proposed',
@@ -30,12 +25,6 @@ export enum EventKind {
   operation_completed = 'operation_completed',
   operation_failed = 'operation_failed',
   artifact_produced = 'artifact_produced',
-  memory_written = 'memory_written',
-  memory_deleted = 'memory_deleted',
-  memory_accessed = 'memory_accessed',
-  memory_topic_accessed = 'memory_topic_accessed',
-  memory_verified = 'memory_verified',
-  memory_outcome = 'memory_outcome',
   knowledge_delivered = 'knowledge_delivered',
   knowledge_written = 'knowledge_written',
   knowledge_checked = 'knowledge_checked',
@@ -53,6 +42,7 @@ export enum EventKind {
   workspace_archived = 'workspace_archived',
   workspace_merged = 'workspace_merged',
   chat_opened = 'chat_opened',
+  project_identified = 'project_identified',
 }
 
 // every caller already matches on this accessor, never a raw literal — kept as a plain alias

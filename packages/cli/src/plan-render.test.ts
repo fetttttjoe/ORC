@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
-import { CHECKS_EXECUTOR_REF, CHECKS_STEP_ID, Door, FINISH_STEP_ID, NO_CHAT } from '@orc/contracts'
-import { GROUNDED_TASK_TYPE, Kernel, openStorage } from '@orc/kernel'
+import { CHECKS_EXECUTOR_REF, CHECKS_STEP_ID, Door, FINISH_STEP_ID, NO_CHAT, TaskType } from '@orc/contracts'
+import { Kernel, openStorage } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { derivedPlanBlock, renderDerivedPlan, renderPlanHuman } from './plan-render'
 import { singleStepDraft } from './plan-template'
@@ -70,7 +70,7 @@ describe('derivedPlanBlock (the gate shows what the kernel-held notes freeze to)
     cleanup.push(() => db.drop(), () => storage.close())
     await seedTestWorkspace(storage.events, CLI)
     const kernel = new Kernel(storage.events)
-    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: GROUNDED_TASK_TYPE }, CLI)
+    const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'grounded', type: TaskType.grounded }, CLI)
     return { kernel, taskId: t.id }
   }
 

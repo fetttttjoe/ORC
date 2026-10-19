@@ -36,7 +36,7 @@ describe('createVaultProjector.renderAll', () => {
     await log.close()
   })
 
-  it('ignores project-scoped memory events (null taskId) — byTask is never called for the null taskId', async () => {
+  it('ignores project-scoped knowledge events (null taskId) — byTask is never called for the null taskId', async () => {
     const db = await createTestDb(); dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
@@ -46,9 +46,9 @@ describe('createVaultProjector.renderAll', () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' }, CLI)
     await log.append({
       ...CLI, taskId: null, stepId: null, runToken: null,
-      kind: EVENT_KIND.memory_written,
+      kind: EVENT_KIND.knowledge_written,
       payload: {
-        note: { id: 'note-x', title: 'X', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
+        added: [], changed: [], retired: [], files: [], why: null, decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [],
         author: authorFixture(),
       },
     })
@@ -58,7 +58,7 @@ describe('createVaultProjector.renderAll', () => {
     await expect(projector.renderAll()).resolves.toBeUndefined()
 
     // load-bearing: the `.filter(e => e.taskId)` guard in renderAll means byTask is called
-    // exactly once — for the real task — and never for the memory event's null taskId.
+    // exactly once — for the real task — and never for the knowledge event's null taskId.
     // Without the guard, byTask(null) would also be called and these would fail.
     expect(byTaskSpy).toHaveBeenCalledTimes(1)
     expect(byTaskSpy).toHaveBeenCalledWith(t.id)
@@ -87,7 +87,7 @@ describe('createVaultProjector.renderAll', () => {
     await log.close()
   })
 
-  it('start() subscribes and skips memory events (null taskId) while still rendering real task updates', async () => {
+  it('start() subscribes and skips knowledge events (null taskId) while still rendering real task updates', async () => {
     const db = await createTestDb(); dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-vp-')); dirs.push(vaultDir)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
@@ -102,9 +102,9 @@ describe('createVaultProjector.renderAll', () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'demo', spec: 'do it' }, CLI)
     await log.append({
       ...CLI, taskId: null, stepId: null, runToken: null,
-      kind: EVENT_KIND.memory_written,
+      kind: EVENT_KIND.knowledge_written,
       payload: {
-        note: { id: 'note-y', title: 'Y', scope: 'project', categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
+        added: [], changed: [], retired: [], files: [], why: null, decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [],
         author: authorFixture(),
       },
     })
@@ -112,7 +112,7 @@ describe('createVaultProjector.renderAll', () => {
     await Bun.sleep(120) // flush the 50ms debounce for both appended events
 
     // load-bearing: the `if (!e.taskId) return` guard in the subscribe handler means
-    // byTask is never called for the memory event's null taskId. Without the guard,
+    // byTask is never called for the knowledge event's null taskId. Without the guard,
     // the debounced render for the null "task" would call byTask(null) and this would fail.
     for (const call of byTaskSpy.mock.calls) expect(call[0]).not.toBeNull()
     expect(byTaskSpy).toHaveBeenCalledWith(t.id)

@@ -11,8 +11,6 @@ import type { Scope, ScopeIndex } from './scope'
 
 // Authored events name their task, if any, and always their workspace.
 const AuthoredPayload = z.union([
-  PAYLOAD_SCHEMAS.memory_written, PAYLOAD_SCHEMAS.memory_deleted, PAYLOAD_SCHEMAS.memory_accessed,
-  PAYLOAD_SCHEMAS.memory_verified, PAYLOAD_SCHEMAS.memory_outcome, PAYLOAD_SCHEMAS.memory_topic_accessed,
   PAYLOAD_SCHEMAS.knowledge_written, PAYLOAD_SCHEMAS.knowledge_delivered, PAYLOAD_SCHEMAS.knowledge_checked,
 ])
 

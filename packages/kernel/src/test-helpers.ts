@@ -52,7 +52,7 @@ export const TEST_WORKSPACE: Workspace = {
 // it. Those doors answer "which workspace am I writing from?" by matching their config.dir against
 // this cwd EXACTLY (cwd-workspace.ts realpaths first), and a MemoryAuthor that cannot name a
 // workspace is refused rather than defaulted — so a harness whose config.dir is a throwaway tmp
-// directory gets "no workspace for this directory" from every memory write until it seeds here.
+// directory gets "no workspace for this directory" from every knowledge write until it seeds here.
 // CALLERS MUST PASS A REALPATH: a tmp dir is commonly a symlink, the doors resolve theirs before
 // asking, and the fold matches the resolved string exactly — an unresolved spelling seeds a
 // workspace nothing will ever find.

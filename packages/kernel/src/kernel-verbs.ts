@@ -23,6 +23,7 @@ export type KernelMutationVerb =
   | 'retitleWorkspace'
   | 'setWorkspaceArchived'
   | 'mergeWorkspace'
+  | 'identifyProject'
 
 // Every method that only DERIVES from the log. A read takes no origin: it records nothing.
 export type KernelReads = Pick<Kernel,

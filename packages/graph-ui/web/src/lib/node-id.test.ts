@@ -9,7 +9,6 @@ describe('nodeKind', () => {
   test('reads the prefix', () => {
     expect(nodeKind('step:t1:s1')).toBe('step')
     expect(nodeKind('artifact:t1:src/x.ts')).toBe('artifact')
-    expect(nodeKind('note:plan/t1\u0000n1')).toBe('note')
     expect(nodeKind('model:anthropic:claude-fable-5')).toBe('model')
   })
 })
@@ -25,8 +24,7 @@ describe('taskIdOf', () => {
   test('artifact paths containing ":" do not shift the task segment', () => {
     expect(taskIdOf('artifact:t1:src/a:b.ts')).toBe('t1')
   })
-  test('note and model nodes have no owning task', () => {
-    expect(taskIdOf('note:plan/t1\u0000n1')).toBeNull()
+  test('a model node has no owning task', () => {
     expect(taskIdOf('model:anthropic:claude-fable-5')).toBeNull()
   })
   test('a prefixed id missing its task segment yields null', () => {

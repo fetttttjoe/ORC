@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { Brief, BRIEF_LIMITS, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type WorkspaceHealth, type WorkspaceState, type WorkspaceWithHealth } from '@orc/contracts'
+import { Brief, BRIEF_LIMITS, KnowledgeHealthState, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type WorkspaceHealth, type WorkspaceState, type WorkspaceWithHealth } from '@orc/contracts'
 import { must, taskFixture } from '@orc/contracts/fixtures'
 import { buildBrief, renderBrief, type BriefInput, type RenderBriefOptions } from './brief'
 
@@ -14,19 +14,18 @@ const row = (id: string, title: string, state: WorkspaceState, over: Partial<Wor
   },
   health: {
     state, lastActivityAt: '2026-09-17T09:00:00.000Z', taskCount: 0, openTaskCount: 0, merged: false,
-    provisionalNotes: 0, dirExists: true, clean: true, ...over,
+    dirExists: true, clean: true, ...over,
   },
 })
 
 const input = (over: Partial<BriefInput> = {}): BriefInput => ({
   project: 'recipes', cwdWorkspaceId: HERE,
   workspaces: [row(HERE, 'search', WORKSPACE_STATE.idle), row(OTHER, 'import', WORKSPACE_STATE.idle)],
-  tasks: [], decisions: [], drift: null, ...over,
+  tasks: [], decisions: [], knowledge: { state: KnowledgeHealthState.ok, claims: 5, suspect: 1 }, ...over,
 })
 
 const opts: RenderBriefOptions = {
   now: NOW,
-  driftText: d => `DRIFT ${d.drifted}/${d.checkable}`,
   oneLine: (text, max) => (text.length <= max ? text : `${text.slice(0, max - 1)}…`),
   hints: { workspaces: 'orc ws ls', decisions: 'orc adr ls' },
 }
@@ -106,20 +105,14 @@ describe('buildBrief', () => {
 
 describe('renderBrief', () => {
   it('names the project and describes this checkout in one line', () => {
-    const out = text({ workspaces: [row(HERE, 'search', WORKSPACE_STATE.idle, { provisionalNotes: 3, clean: false, merged: true })] })
+    const out = text({ workspaces: [row(HERE, 'search', WORKSPACE_STATE.idle, { clean: false, merged: true })] })
     expect(out).toContain('# orc — recipes')
-    expect(out).toContain('workspace: search (worktree, orc/search) — idle, last activity 3h ago, 3 provisional notes, uncommitted changes, merged')
+    expect(out.split('\n')).toContain('workspace: search (worktree, orc/search) — idle, last activity 3h ago, uncommitted changes, merged')
   })
 
   it('a workspace the log shows nothing for has an unknown age, in words', () => {
     const out = text({ workspaces: [row(HERE, 'search', WORKSPACE_STATE.idle, { lastActivityAt: null })] })
-    expect(out).toContain('— idle, last activity unknown, 0 provisional notes')
-  })
-
-  it('an uncounted provisional total is said in words, never printed as zero', () => {
-    const out = text({ workspaces: [row(HERE, 'search', WORKSPACE_STATE.idle, { provisionalNotes: null })] })
-    expect(out).toContain('provisional notes unknown')
-    expect(out).not.toContain('0 provisional')
+    expect(out.split('\n')).toContain('workspace: search (worktree, orc/search) — idle, last activity unknown')
   })
 
   it('says so when this directory is no recorded workspace', () => {
@@ -175,9 +168,9 @@ describe('renderBrief', () => {
     expect(out.split('\n')).toContain('  No summary')
   })
 
-  it('the drift advisory is the last line, in the caller\'s words', () => {
-    const lines = text({ drift: { checkable: 10, drifted: 4, ratio: 0.4 } }).split('\n')
-    expect(lines.at(-1)).toBe('DRIFT 4/10')
-    expect(text()).not.toContain('DRIFT')
+  it('the knowledge line is the last line, in both shapes', () => {
+    expect(text().split('\n').at(-1)).toBe('knowledge: 5 claims · 1 suspect')
+    const unavailable = text({ knowledge: { state: KnowledgeHealthState.unavailable, reason: 'no checkout' } }).split('\n')
+    expect(unavailable.at(-1)).toBe('knowledge unavailable: no checkout')
   })
 })

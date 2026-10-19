@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { ChatKind, ChatOpenedPayload, ChatRef, Door, EVENT_KIND, TASK_STATUS, chatOpenedKey, type TaskNode } from '@orc/contracts'
+import { ChatKind, ChatOpenedPayload, ChatRef, Door, EVENT_KIND, TASK_STATUS, TaskType, chatOpenedKey, type TaskNode } from '@orc/contracts'
 import { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { runChatOpened, runOrigin } from './run-chat'
 
 const task: TaskNode = {
-  id: 'task-1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic',
+  id: 'task-1', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: TaskType.generic,
   title: 'ship it', spec: '', status: TASK_STATUS.approved, zone: [], budgetUSD: null, depth: 0,
   createdAt: '2026-01-01T00:00:00.000Z',
 }

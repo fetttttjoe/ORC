@@ -1,8 +1,8 @@
 // E2E fixture server (run by playwright's webServer): real Postgres test db, seeded state,
 // scripted copilot, kernel-backed newTask — everything else read-only-stubbed.
 import { MockLanguageModelV4 } from 'ai/test'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, FailureClass, NO_CHAT, STEP_ID, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
-import { TEST_WORKSPACE_ID, claimFixture, semanticNoteFixture, stepFixture } from '@orc/contracts/fixtures'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, FailureClass, KnowledgeHealthState, NO_CHAT, STEP_ID, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
+import { TEST_WORKSPACE_ID, stepFixture } from '@orc/contracts/fixtures'
 import { draftFixture } from '@orc/contracts/fixtures'
 
 /** the one step draftFixture ships with — the monitor keys its ceiling off this id */
@@ -174,24 +174,14 @@ await storage.events.append({
   payload: { taskId: rejected.id, from: TASK_STATUS.approved, to: TASK_STATUS.blocked },
 })
 
-// A NOTE and an ARTIFACT, so the contract test can assert their detail shapes against a real
-// server. Four wire-vs-server disagreements stayed invisible because the fixture had neither: the
-// artifact record arrives bare and was read as if wrapped, and a note's claims, sources and
-// nullable sourceRevision each cost the whole note when the schema was wrong about them.
+// the artifact pins its detail shape; the identity and knowledge events draw no node
+await storage.events.append({ ...SEED, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.project_identified, payload: { name: 'e2e-project', dir: '/e2e' } })
 await storage.events.append({
-  ...SEED, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
+  ...SEED, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.knowledge_written,
   payload: {
-    note: semanticNoteFixture({
-      id: 'e2e-note', title: 'a fixture note',
-      summary: 'what the console renders in the inspector',
-      // the three fields whose absence hid a schema bug: a citation (not a bare string), a claim
-      // carrying the revision it was recorded at, and a null sourceRevision
-      sources: [{ url: 'https://example.invalid/spec', title: 'the spec', retrievedAt: '2026-09-18T00:00:00.000Z' }],
-      // CLAIM_ID_RE: 12 hex characters, so a claim id is the same shape wherever it is quoted
-      claims: [claimFixture('the console reads notes through the view registry', { id: 'a1b2c3d4e5f6', sourceRevision: null })],
-      sourceRevision: null,
-    }),
-    author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: SEED },
+    added: [{ id: 'e2eclaim', location: 'knowledge/README.md' }], changed: [], retired: [], files: ['knowledge/README.md'],
+    why: 'the console reads knowledge from files', decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [],
+    author: { source: AUTHOR_SOURCE.cli, workspaceId: workspace.id, origin: SEED },
   },
 })
 await storage.events.append({
@@ -261,30 +251,18 @@ const actions: OrcActions = {
   cancel: unsupported('cancel'),
   annotate: unsupported('annotate'),
   revise: unsupported('revise'),
-  writeNote: async (note, origin) => {
-    await storage.events.append({ ...origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note, author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin } } })
-    return { id: note.id, scope: 'project' }
-  },
-  deleteNote: async (id, scope, origin) => {
-    await storage.events.append({ ...origin, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted, payload: { id, scope: scope ?? 'project', author: { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin } } })
-    return { id }
-  },
   recordDecision: unsupported('recordDecision'),
   listDecisions: unsupported('listDecisions'),
   readDecision: unsupported('readDecision'),
   renameProject: unsupported('renameProject'),
   newProject: unsupported('newProject'),
-  // kernel-backed, not stubbed: it is a plain read of the log this fixture already folds, and the
-  // seeded workspace is what a copilot answer about "which checkout" would have to name. The health
-  // comes from the SAME pure derivation the CLI uses; what the fixture cannot honestly answer it
-  // says it cannot — /e2e is no checkout (dirExists false, git unasked) and there is no memory read
-  // model here, so the note count is UNKNOWN rather than a fabricated zero.
+  // the CLI's own pure derivation; /e2e is no checkout, so dirExists is false and git is unasked
   listWorkspaces: async () => {
     const events = await storage.events.all()
     const state = fold(events)
     return [...state.workspaces.values()].map(w => ({
       workspace: w,
-      health: workspaceHealth(state, events, null, w, { dirExists: false, clean: null }),
+      health: workspaceHealth(state, events, w, { dirExists: false, clean: null }),
     }))
   },
   // git-backed (a worktree + branch per request) — out of reach of a fixture that owns no checkout
@@ -301,7 +279,7 @@ startGraphUi({
   copilot: { resolveModel: () => copilotModel, defaultModelRef: 'mock/e2e', price: () => 0.0001 },
   defaultCwd: '/tmp',
   // no supervisor runs behind the fixture, and the console must SAY that rather than look idle
-  health: async () => ({ memory: { state: 'ok' as const, pending: 0 }, supervisor: { state: 'none' as const } }),
+  health: async () => ({ knowledge: { state: KnowledgeHealthState.ok, claims: 1, suspect: 0 }, supervisor: { state: 'none' as const } }),
   appendExchange: async x => appendCopilotExchange(storage.events, x, Door.web),
 })
 console.log(`e2e server on http://127.0.0.1:${E2E_PORT}`)

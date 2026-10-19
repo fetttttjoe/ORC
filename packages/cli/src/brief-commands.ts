@@ -5,7 +5,6 @@ import { ADR_SUBCOMMAND } from './adr-commands'
 import { renderBrief } from './brief'
 import { gatherBrief } from './brief-gather'
 import { NO_PROJECT_ERROR } from './exit'
-import { driftLine } from './drift-line'
 import { WS_SUBCOMMAND } from './ws-commands'
 
 // The `orc brief` command surface: commander option parsing and what a terminal prints, nothing
@@ -24,12 +23,12 @@ export function briefCommand(deps: {
   noProject?: (message: string) => unknown
 }): Command {
   return new Command(BRIEF_COMMAND)
-    .description('what a new session should know: this workspace, tasks waiting on someone, decisions in force, knowledge drift')
+    .description('what a new session should know: this workspace, tasks waiting on someone, decisions in force, knowledge health')
     .option('--json', 'the same facts as one JSON value')
     .action(async (o: { json?: boolean }) => {
       if (!deps.project) throw (deps.noProject ?? NO_PROJECT_ERROR)('brief needs a project context')
       const brief = await gatherBrief(deps.project)
       if (o.json) console.log(JSON.stringify(brief, null, 2))
-      else for (const line of renderBrief(brief, { now: new Date(), driftText: driftLine, oneLine: clipLine, hints: HINTS })) console.log(line)
+      else for (const line of renderBrief(brief, { now: new Date(), oneLine: clipLine, hints: HINTS })) console.log(line)
     })
 }

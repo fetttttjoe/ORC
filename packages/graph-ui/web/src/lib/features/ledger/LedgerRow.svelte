@@ -11,8 +11,7 @@
 
   let { row, showTask = true }: { row: LogRow; showTask?: boolean } = $props()
 
-  // the row's subject: the note it wrote, else the task that emitted it
-  const target = $derived(row.noteRef ?? row.taskId)
+  const target = $derived(row.taskId)
   const temp = $derived(row.failure ? 'rust' : row.kind.startsWith('feedback') ? 'human' : 'neutral')
 </script>
 

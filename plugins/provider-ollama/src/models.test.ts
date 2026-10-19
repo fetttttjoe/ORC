@@ -18,9 +18,9 @@ describe('listOllamaModels', () => {
   })
 
   it('drops embedding-only models — they cannot run a task', async () => {
-    // a daemon with the memory subsystem's encoders pulled: /api/tags lists them beside the chat
-    // models, and they reached the run-model picker (observed: all-minilm, mxbai-embed-large,
-    // nomic-embed-text offered as executors). capabilities comes verbatim from /api/tags.
+    // a daemon with encoders pulled: /api/tags lists them beside the chat models, and they reached
+    // the run-model picker (observed: all-minilm, mxbai-embed-large, nomic-embed-text offered as
+    // executors). capabilities comes verbatim from /api/tags.
     expect(await listOllamaModels('http://x', async () =>
       Response.json({ models: [
         { name: 'qwen3:8b', capabilities: ['completion', 'tools'] },

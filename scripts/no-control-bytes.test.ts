@@ -7,10 +7,8 @@ import { readFileSync } from 'node:fs'
  * survived a commit in `exec-tool.ts`, and then a fourth in the very file written to fix those —
  * a unicode escape typed into a template literal can land as a literal byte instead.
  *
- * Scoped to non-test sources on purpose. Two test files carry NULs deliberately: they assert on
- * real noteKey/edgeKey strings, where the byte IS the separator, and rewriting correct tests to
- * satisfy a lint would be the tail wagging the dog. When a SOURCE file needs that value at runtime,
- * encode the parts (JSON.stringify) rather than embedding the character — see tree-fingerprint.ts.
+ * Scoped to non-test sources. When a SOURCE file needs that value at runtime, encode the parts
+ * (JSON.stringify) rather than embedding the character — see tree-fingerprint.ts.
  */
 describe('source files stay searchable', () => {
   it('no non-test TypeScript or Svelte source contains a raw NUL byte', async () => {

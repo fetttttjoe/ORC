@@ -19,6 +19,12 @@ export const TASK_STATUS = TaskStatus
 export const TERMINAL_TASK_STATUS: ReadonlySet<TaskStatus> =
   new Set([TASK_STATUS.done, TASK_STATUS.failed, TASK_STATUS.cancelled])
 
+export enum TaskType {
+  generic = 'generic',
+  grounded = 'grounded',
+  split = 'split',
+}
+
 export const TaskNode = z.object({
   id: z.string().min(1),
   parentId: z.string().min(1).nullable(),
@@ -26,7 +32,7 @@ export const TaskNode = z.object({
   // task can be created, so a missing value is a wiring bug and the schema is the guard that
   // catches it. No legacy decoder — the operator asked for none, and the log is reset.
   workspaceId: z.string().min(1),
-  type: z.string().min(1),
+  type: z.enum(TaskType),
   title: z.string().min(1),
   spec: z.string(),
   status: z.enum(TaskStatus),

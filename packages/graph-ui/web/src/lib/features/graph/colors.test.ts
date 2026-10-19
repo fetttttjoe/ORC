@@ -1,10 +1,10 @@
 // Ports the status-precedence semantics of the retired page/status-style onto the app palette:
-// status override precedence failed > blocked > running > type default, and note/artifact/model
-// are NEVER recolored by a coincidental detail string.
+// status override precedence failed > blocked > running > type default, and artifact/model are
+// NEVER recolored by a coincidental detail string.
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { must } from '@orc/contracts/fixtures'
-import { colorFor, dim, EDGE_COLOR, edgeColorFor, FLASH_COLOR, isActive, LABEL_COLOR, STATUS_COLORS, TYPE_COLORS } from './colors'
+import { colorFor, dim, EDGE_BASE, EDGE_COLOR, edgeColorFor, FLASH_COLOR, isActive, LABEL_COLOR, STATUS_COLORS, TYPE_COLORS } from './colors'
 
 describe('status override precedence', () => {
   it('overrides task/step color for live statuses', () => {
@@ -35,10 +35,8 @@ describe('status override precedence', () => {
     expect(colorFor('task', 'done')).toBe(TYPE_COLORS.task)
   })
 
-  it('never overrides note/artifact/model — their detail is not a lifecycle', () => {
-    // a note's detail is its KIND, an artifact's its SIZE — must never be recolored
-    expect(colorFor('note', 'running')).toBe(TYPE_COLORS.note)
-    expect(colorFor('note', 'failed')).toBe(TYPE_COLORS.note)
+  it('never overrides artifact/model — their detail is not a lifecycle', () => {
+    // an artifact's detail is its SIZE, a model's its PROVIDER — must never be recolored
     expect(colorFor('artifact', '12B')).toBe(TYPE_COLORS.artifact)
     expect(colorFor('artifact', 'blocked')).toBe(TYPE_COLORS.artifact)
     expect(colorFor('model', 'anthropic')).toBe(TYPE_COLORS.model)
@@ -52,21 +50,7 @@ describe('isActive — drives the running size bump', () => {
     expect(isActive('task', 'running')).toBe(true)
     expect(isActive('step', 'completed')).toBe(false)
     expect(isActive('task', 'blocked')).toBe(false)
-    expect(isActive('note', 'running')).toBe(false)
-  })
-})
-
-describe('edgeColorFor — heat lerps the rule chrome toward paper', () => {
-  it('renders EDGE_COLOR at heat 0 and paper at heat 1', () => {
-    // #2e3742 (--color-rule) and #e6e1d6 (--color-paper) as rgb triplets
-    expect(edgeColorFor(0)).toBe('rgb(46, 55, 66)')
-    expect(EDGE_COLOR).toBe('#2e3742') // the triplet above IS the hex — same canvas color
-    expect(edgeColorFor(1)).toBe('rgb(230, 225, 214)')
-  })
-
-  it('clamps out-of-range heat instead of extrapolating', () => {
-    expect(edgeColorFor(-1)).toBe(edgeColorFor(0))
-    expect(edgeColorFor(2)).toBe(edgeColorFor(1))
+    expect(isActive('artifact', 'running')).toBe(false)
   })
 })
 
@@ -79,7 +63,7 @@ describe('edgeColorFor — heat lerps the rule chrome toward paper', () => {
  * constants quoted in docs. Nothing failed when they diverged; the graph just stopped matching the
  * rest of the console. This reads app.css and makes the divergence a test failure.
  *
- * Only EXACT copies are listed. TYPE_COLORS.task/step/artifact/note are deliberately derived
+ * Only EXACT copies are listed. TYPE_COLORS.task/step/artifact are deliberately derived
  * (dimmed, or mixed toward another token) and have no token to equal.
  */
 describe('the hardcoded canvas colors still equal their app.css tokens', () => {
@@ -119,7 +103,7 @@ describe('the worker reads as a worker', () => {
   /**
    * A model node is the thing that actually ran the step, and it was --color-mist — the same grey
    * as ordinary chrome — so it sank into the background. It sits outside the two-temperature axis
-   * for the same reason notes do: it carries no lifecycle, it is an actor.
+   * because it carries no lifecycle: it is an actor.
    */
   it('is its own hue, not shared with any other node type', () => {
     const others = Object.entries(TYPE_COLORS).filter(([t]) => t !== 'model')
@@ -135,15 +119,11 @@ describe('the worker reads as a worker', () => {
   })
 
   it('the `uses` edge is drawn in the worker family, every other edge in the shared chrome', () => {
-    expect(edgeColorFor(0, 'uses')).not.toBe(edgeColorFor(0))
-    for (const other of ['child', 'plan', 'depends', 'out', 'wrote'])
-      expect(edgeColorFor(0, other), `${other} must stay chrome`).toBe(edgeColorFor(0))
+    expect(edgeColorFor('uses')).toBe(must(EDGE_BASE.uses, 'EDGE_BASE.uses'))
+    expect(edgeColorFor('uses')).not.toBe(EDGE_COLOR)
+    for (const other of ['child', 'plan', 'depends', 'out'])
+      expect(edgeColorFor(other), `${other} must stay chrome`).toBe(EDGE_COLOR)
     // an unknown edge type falls back rather than rendering undefined
-    expect(edgeColorFor(0, 'not-a-real-edge')).toBe(edgeColorFor(0))
-  })
-
-  it('heat still lifts a uses edge toward paper, so walked connections read as lit', () => {
-    expect(edgeColorFor(1, 'uses')).toBe(edgeColorFor(1))  // both reach paper at full heat
-    expect(edgeColorFor(0.5, 'uses')).not.toBe(edgeColorFor(0.5, 'child'))
+    expect(edgeColorFor('not-a-real-edge')).toBe(EDGE_COLOR)
   })
 })

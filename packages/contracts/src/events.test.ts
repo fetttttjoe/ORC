@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { CommitRecordedPayload, EventEnvelope, EventKind, PAYLOAD_SCHEMAS, type EventInput } from './events'
 import { EVENT_KIND } from './event-kinds'
 import { ChatKind } from './chat'
+import { DeliveryMode } from './knowledge'
 import { Door, NO_CHAT } from './origin'
 import { TASK_STATUS } from './task'
 import { authorFixture, eventFixture, TEST_WORKSPACE_ID } from './fixtures'
@@ -84,11 +85,13 @@ describe('events', () => {
     expect(() => PAYLOAD_SCHEMAS.skill_loaded.parse(good)).not.toThrow()
     expect(() => PAYLOAD_SCHEMAS.skill_loaded.parse({ ...good, hash: '' })).toThrow()
   })
-  it('memory_deleted rejects a path-unsafe id or scope (no poison event)', () => {
-    const good = { id: 'auth', scope: 'project', author: authorFixture() }
-    expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse(good)).not.toThrow()
-    expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, scope: '../x' })).toThrow()
-    expect(() => PAYLOAD_SCHEMAS.memory_deleted.parse({ ...good, id: '../x' })).toThrow()
+  it('knowledge_written rejects a malformed claim id (no poison event)', () => {
+    const good = {
+      added: [{ id: 'abcd1234', location: 'knowledge/a.md' }], changed: [], retired: [], files: [], why: null, decision: null,
+      decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author: authorFixture(),
+    }
+    expect(() => PAYLOAD_SCHEMAS.knowledge_written.parse(good)).not.toThrow()
+    expect(() => PAYLOAD_SCHEMAS.knowledge_written.parse({ ...good, added: [{ id: '../x', location: 'knowledge/a.md' }] })).toThrow()
   })
   it('copilot_exchange carries the full conversation record, tool summaries bounded', () => {
     const ok = PAYLOAD_SCHEMAS.copilot_exchange.safeParse({
@@ -102,13 +105,11 @@ describe('events', () => {
     }).success).toBe(false)
   })
 
-  it('memory_accessed rejects a path-unsafe id or scope, and an unknown mode', () => {
-    const good = { id: 'auth', scope: 'project', mode: 'read', author: authorFixture() }
-    expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse(good)).not.toThrow()
-    expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, mode: 'neighbors' })).not.toThrow()
-    expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, scope: '../x' })).toThrow()
-    expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, id: '../x' })).toThrow()
-    expect(() => PAYLOAD_SCHEMAS.memory_accessed.parse({ ...good, mode: 'write' })).toThrow()
+  it('knowledge_delivered rejects a malformed id and an unknown mode', () => {
+    const good = { ids: ['abcd1234'], mode: DeliveryMode.card, subject: 'src/a.ts', author: authorFixture() }
+    expect(() => PAYLOAD_SCHEMAS.knowledge_delivered.parse(good)).not.toThrow()
+    expect(() => PAYLOAD_SCHEMAS.knowledge_delivered.parse({ ...good, ids: ['../x'] })).toThrow()
+    expect(() => PAYLOAD_SCHEMAS.knowledge_delivered.parse({ ...good, mode: 'write' })).toThrow()
   })
   it('split_proposed and split_resolved payloads validate; split_resolved pins RunOutcome + claim refs', () => {
     expect(PAYLOAD_SCHEMAS.split_proposed.safeParse({

@@ -4,6 +4,7 @@ import { EVENT_KIND } from './event-kinds'
 import { Door } from './origin'
 import { authorFixture, eventFixture, TEST_WORKSPACE_ID } from './fixtures'
 import { inScope } from './in-scope'
+import { CheckVerdict } from './knowledge'
 import { Scope, type ScopeIndex } from './scope'
 
 // t1 and t1-child both live in TEST_WORKSPACE_ID; t9 is a task the caller knows nothing about, so
@@ -18,9 +19,9 @@ const commit = eventFixture({
   payload: { sha: 'abc123', paths: ['a.ts'], workspaceId: TEST_WORKSPACE_ID },
 })
 const childStep = eventFixture({ seq: 5, taskId: 't1-child', chatId: 'c2', kind: EVENT_KIND.task_created })
-const noteDeleted = eventFixture({
-  seq: 6, taskId: null, chatId: 'c1', kind: EVENT_KIND.memory_deleted,
-  payload: { id: 'n1', scope: 'project', author: authorFixture({ taskId: 't1' }) },
+const claimChecked = eventFixture({
+  seq: 6, taskId: null, chatId: 'c1', kind: EVENT_KIND.knowledge_checked,
+  payload: { id: 'abcd1234', verdict: CheckVerdict.holds, text: 'T.', anchors: [], why: 'read it', author: authorFixture({ taskId: 't1' }) },
 })
 
 describe('inScope', () => {
@@ -51,11 +52,11 @@ describe('inScope', () => {
     expect(inScope(eventFixture({ taskId: 't1' }), flat, index)).toBe(true)
   })
 
-  it('a memory event is in its author task scope, not in another task scope', () => {
-    expect(inScope(noteDeleted, Scope.parse({ type: ScopeType.task, id: 't1', subtree: false }), index)).toBe(true)
-    expect(inScope(noteDeleted, Scope.parse({ type: ScopeType.task, id: 't2', subtree: false }), index)).toBe(false)
+  it('a knowledge event is in its author task scope, not in another task scope', () => {
+    expect(inScope(claimChecked, Scope.parse({ type: ScopeType.task, id: 't1', subtree: false }), index)).toBe(true)
+    expect(inScope(claimChecked, Scope.parse({ type: ScopeType.task, id: 't2', subtree: false }), index)).toBe(false)
     // and so reaches the workspace through that task
-    expect(inScope(noteDeleted, Scope.parse({ type: ScopeType.workspace, id: TEST_WORKSPACE_ID }), index)).toBe(true)
+    expect(inScope(claimChecked, Scope.parse({ type: ScopeType.workspace, id: TEST_WORKSPACE_ID }), index)).toBe(true)
   })
 
   it('a taskless knowledge event belongs to its author\'s workspace', () => {

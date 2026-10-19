@@ -32,19 +32,7 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     // default agent-loop budget for AUTHORED steps (single-step template, analyzer step) — plans
     // are frozen data, so this applies at plan-authoring time, never to already-approved plans.
     maxIterations: z.coerce.number().int().positive().default(DEFAULT_MAX_ITERATIONS),
-    // half-life for the memory activation derivation (days) — THE calibration knob the neuron
-    // ranking needs once real hot/cold data exists. Read-time only: changing it re-ranks and
-    // re-heats instantly, rewrites nothing. Threaded to BOTH consumers (store ranking;
-    // graph heat via sessions) so the two surfaces always decay at ONE rate.
-    memoryHalfLifeDays: z.coerce.number().positive().default(14),
     knowledgePreloadTokens: z.coerce.number().int().nonnegative().default(1200),
-    // the embedding model for SEMANTIC memory retrieval, as a 'provider/model' ref. '' disables it
-    // (keyword-only, the prior behaviour). Default is the LARGE local Ollama encoder: the retrieval
-    // floor (SEMANTIC_FLOOR, 0.495) was tuned on mxbai vectors, and under the smaller all-minilm a
-    // known-good probe measured best cosine 0.4015 — below the floor, so the semantic arm silently
-    // returned nothing on a default config. Swap via config or ORC_MEMORY_EMBED_MODEL. A model
-    // change needs `orc memory rebuild` to re-embed; vectors from different models don't compare.
-    memoryEmbedModel: z.string().default('ollama/mxbai-embed-large'),
     // Agent-loop budget for the REACTOR-DRAFTED heal sweep, deliberately far below maxIterations:
     // the sweep is the one recurring auto-drafted spend, and the measured 9-note sweep used well
     // under 20 iterations of the 60 the general default granted (2026-08-04). A sweep that
@@ -82,23 +70,13 @@ const settingsSchema = (dir: string, projectRoot: string) =>
     autoCommit: z.union([z.boolean(), z.stringbool()]).default(false),
     autoHeal: z.enum(AutoHealMode).default(AutoHealMode.draft),
     ollamaBaseUrl: z.url().default('http://localhost:11434'),
-    projectDbUrl: z.string().default('ws://127.0.0.1:8000/rpc'),
-    // ceiling for the surreal driver's initial dial — the driver does not reject unreachable
-    // endpoints on its own (measured: still pending after 400s against a closed port), so this
-    // guard IS the failure path for a down read model. Tests point at dead endpoints on purpose
-    // and lower it so the designed failure fits their budget.
-    projectDbConnectTimeoutMs: z.coerce.number().int().positive().default(5000),
-    projectDbName: z.string().default('memory'),
-    projectDbNamespace: z.string().default('orc'),
-    projectDbUser: z.string().default('root'),
-    projectDbPassword: z.string().default('orc'),
     costOverrides: z.record(z.string(), z.record(z.string(), ModelCost)).default({}),
     providers: ProviderConfigs.default({}),
     knowledge: KnowledgeConfig.nullable().prefault({ plugin: DEFAULT_KNOWLEDGE_PLUGIN }),
     vaultDir: z.string().default(path.join(projectRoot, 'vault')).transform(p => path.resolve(projectRoot, p)),
     // TREE-scoped, unlike the vault it sits inside: `vault/skills` is TRACKED SOURCE (the
     // .gitignore exception for authored content), so it moves with the branch, while the vault
-    // PROJECTION (memory/, tasks/) is one per project and rebuilt from the log. Resolved against
+    // PROJECTION (tasks/) is one per project and rebuilt from the log. Resolved against
     // `dir` — the checkout being worked in — not projectRoot. Measured: from a linked worktree this
     // gave the MAIN checkout's path, so a branch that ADDS a role skill could not run its own
     // plans; every step declaring it failed with "unknown skill 'role-finisher'" until the branch
@@ -128,19 +106,11 @@ const envOverrides = (): Record<string, string> => {
     concurrency: process.env.ORC_CONCURRENCY,
     maxDepth: process.env.ORC_MAX_DEPTH,
     maxIterations: process.env.ORC_MAX_ITERATIONS,
-    memoryHalfLifeDays: process.env.ORC_MEMORY_HALF_LIFE_DAYS,
     knowledgePreloadTokens: process.env.ORC_KNOWLEDGE_PRELOAD_TOKENS,
-    memoryEmbedModel: process.env.ORC_MEMORY_EMBED_MODEL,
     autoHealIterations: process.env.ORC_AUTO_HEAL_ITERATIONS,
     autoCommit: process.env.ORC_AUTO_COMMIT,
     autoHeal: process.env.ORC_AUTO_HEAL,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
-    projectDbUrl: process.env.ORC_PROJECT_DB_URL,
-    projectDbConnectTimeoutMs: process.env.ORC_PROJECT_DB_CONNECT_TIMEOUT_MS,
-    projectDbName: process.env.ORC_PROJECT_DB_NAME,
-    projectDbNamespace: process.env.ORC_PROJECT_DB_NAMESPACE,
-    projectDbUser: process.env.ORC_PROJECT_DB_USER,
-    projectDbPassword: process.env.ORC_PROJECT_DB_PASSWORD,
   }
   return Object.fromEntries(Object.entries(map).filter((e): e is [string, string] => Boolean(e[1])))
 }
@@ -153,12 +123,9 @@ export type OrcConfig = Omit<z.infer<ReturnType<typeof settingsSchema>>, 'skills
   skillsDir: string
 }
 
-// two projects sharing one Postgres/Surreal deployment must never cross-recover:
+// two projects sharing one Postgres deployment must never cross-recover:
 // every infrastructure boundary name embeds the project UUID
 export const projectSuffix = (id: string): string => id.replaceAll('-', '')
-
-export const projectDatabaseName = (base: string, id: string): string =>
-  `${base.slice(0, 30)}_${projectSuffix(id)}`
 
 // Env values written as "$NAME" in mcpServers pull a secret from orc's own environment and hand it
 // verbatim to a third-party server (mcp-client's resolveEnv). Those exact secret VALUES must be

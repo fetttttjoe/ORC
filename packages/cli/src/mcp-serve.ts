@@ -18,9 +18,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { ApprovedBy, Door, errorMessage, NO_CHAT, toolError, type MemoryAuthor, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
-import { probeMemory } from '@orc/memory'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
-import { KNOWLEDGE_READ_TOOLS, knowledgeTools } from '@orc/knowledge-core'
+import { KNOWLEDGE_HEALTH_TTL_MS } from './knowledge-health-of'
+import { memoizeFor } from './memoize-for'
+import { KNOWLEDGE_READ_TOOLS, knowledgeHealth, knowledgeTools } from '@orc/knowledge-core'
 import { asResolvedTools, buildCopilotTools, createProjectSessions, type OrcActions } from '@orc/ui-core'
 
 export type Autonomy = 'gated' | 'full'
@@ -62,6 +63,16 @@ export function mcpApproveTool(actions: OrcActions, autonomy: Autonomy): Resolve
 
 // Every tool call entered through THIS door; the door names it once, here.
 const MCP_ORIGIN = NO_CHAT(Door.mcp)
+
+export function serveHealth(
+  knowledge: Parameters<typeof knowledgeHealth>[0], author: MemoryAuthor, supervisor?: () => Promise<SupervisorHealth>,
+) {
+  const knowledgeOf = memoizeFor(KNOWLEDGE_HEALTH_TTL_MS, () => knowledgeHealth(knowledge, author))
+  return async () => ({
+    knowledge: await knowledgeOf(),
+    ...(supervisor && { supervisor: await supervisor() }),
+  })
+}
 
 // exported for the unit test: the registry is pure given its deps
 export function buildServeTools(deps: {
@@ -125,16 +136,12 @@ export async function startMcpServe(opts: {
     url: config.databaseUrl,
     cwdProject: { id: config.projectId, name: config.projectName, dir: config.dir },
   })
-  // the same probe `orc status` and graph-ui's /api/health read — an MCP driver watching a silent
-  // project must be able to see "the read model is rebuilding" without opening the databases
+  const knowledge = knowledgeAccess(openKnowledge(config), log, config.dir)
   const tools = buildServeTools({
     sessions, projectId: config.projectId, actions, autonomy,
-    knowledgeTools: knowledgeTools(knowledgeAccess(openKnowledge(config), log, config.dir), memoryAuthor, KNOWLEDGE_READ_TOOLS),
+    knowledgeTools: knowledgeTools(knowledge, memoryAuthor, KNOWLEDGE_READ_TOOLS),
     ...(listWorkspaces && { listWorkspaces }),
-    health: async () => ({
-      memory: await probeMemory(config, log),
-      ...(supervisor && { supervisor: await supervisor() }),
-    }),
+    health: serveHealth(knowledge, memoryAuthor, supervisor),
   })
   const byName = new Map(tools.map(t => [t.name, t]))
 

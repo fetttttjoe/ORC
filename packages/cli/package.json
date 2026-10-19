@@ -12,7 +12,6 @@
     "@orc/structure-treesitter": "workspace:*",
     "@orc/analyzer-agent": "workspace:*",
     "@orc/mcp-client": "workspace:*",
-    "@orc/memory": "workspace:*",
     "@orc/graph-ui": "workspace:*",
     "@orc/ui-core": "workspace:*",
     "@orc/vault-projector": "workspace:*",
@@ -24,8 +23,5 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "ai": "^7.0.30",
     "zod": "^4.4.3"
-  },
-  "devDependencies": {
-    "surrealdb": "2.0.4"
   }
 }

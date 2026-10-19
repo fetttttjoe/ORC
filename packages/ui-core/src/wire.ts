@@ -14,7 +14,7 @@ import { NODE_TYPES, type NodeType } from './graph-wire'
 
 // The node vocabulary as a schema, derived from NODE_TYPES rather than re-listed: the node view
 // answers about a node the GRAPH emitted, so the kind it answers with IS that node's `type`, and
-// there is no room here for a second spelling of the same five words.
+// there is no room here for a second spelling of the same words.
 export const NODE_KIND = z.enum(NODE_TYPES).enum
 
 // The view registry: every read the browser can ask for, named once — the same reason
@@ -25,17 +25,8 @@ export const ViewName = z.enum(['timeline', 'chats', 'node', 'transcript', 'plan
 export type ViewName = z.infer<typeof ViewName>
 export const VIEW = ViewName.enum
 
-/**
- * Every name a stream frame can report as STALE — a superset of `ViewName`, because not everything
- * a client re-reads is a view. Corpus health is the case: its answer probes SurrealDB and git,
- * where a view is a pure fold of the log, so it has no params/result pair below and no `read`.
- * Widening `ViewName` to carry it would leave `WIRE`'s coverage guard demanding both for something
- * that can never have them — the guard would then be satisfied by a stub and mean nothing.
- *
- * Derived from ViewName's options rather than re-listed, so a view named above is touchable the
- * moment it exists.
- */
-export const TouchableName = z.enum([...ViewName.options, 'health'])
+/** Every name a stream frame can report as STALE, derived from ViewName's options so a view is touchable the moment it exists. */
+export const TouchableName = z.enum(ViewName.options)
 export type TouchableName = z.infer<typeof TouchableName>
 export const TOUCHABLE = TouchableName.enum
 
@@ -122,7 +113,6 @@ export const TaskDetail = z.object({
     )
     .default([]),
   artifacts: z.array(z.object({ path: z.string(), size: z.number().optional() })).default([]),
-  memoryPulls: z.number().nullish(),
 })
 export type TaskDetail = z.infer<typeof TaskDetail>
 
@@ -151,42 +141,6 @@ export const StepDetail = z.object({
 })
 export type StepDetail = z.infer<typeof StepDetail>
 
-export const NoteDetail = z.object({
-  type: z.literal(NODE_KIND.note),
-  note: z.object({
-    id: z.string(),
-    scope: z.string(),
-    title: z.string(),
-    summary: z.string().optional(),
-    body: z.string().optional(),
-    tags: z.array(z.string()).default([]),
-    links: z.array(z.object({ id: z.string(), kind: z.string() })).default([]),
-    paths: z.array(z.string()).default([]),
-    // NULLABLE, not merely optional: a note written where no revision could be stamped carries
-    // `sourceRevision: null` out of the fold, and a string-only schema rejects the WHOLE note over
-    // that one field — measured against a real folded note, 2026-09-18.
-    sourceRevision: z.string().nullish(),
-    categories: z.array(z.string()).default([]),
-    tier: z.string().optional(),
-    kind: z.string().optional(),
-    retention: z.string().optional(),
-    // CITATIONS, not strings: a source is `{url, title?, retrievedAt}` in the log and in the fold.
-    // The string form rejected every note that cited anything — one wrong field type costs the
-    // whole note, not the field.
-    sources: z.array(z.object({ url: z.string(), title: z.string().optional(), retrievedAt: z.string().optional() })).default([]),
-    // claims are the note's atomic statements and live INSIDE the note — reading them from the
-    // envelope root meant they never rendered. Each carries the revision it was recorded at,
-    // which is what makes a single stale statement visible inside an otherwise current note.
-    claims: z.array(z.object({ id: z.string(), text: z.string(), sourceRevision: z.string().nullish() })).default([]),
-  }),
-  hits: z.number().nullish(),
-  // backlinks carry the neighbour's TITLE — rendering the slug threw away the readable half
-  backlinks: z.array(z.object({ id: z.string(), scope: z.string().optional(), title: z.string().optional(), kind: z.string() })).default([]),
-  author: z.object({ taskId: z.string().nullable().optional() }).optional(),
-  invalidates: z.array(z.string()).default([]),
-})
-export type NoteDetail = z.infer<typeof NoteDetail>
-
 // the artifact record arrives BARE (not wrapped), sized as `size`, and carries no taskId —
 // that lives in the node id. Expecting a wrapper made every artifact render as a raw record.
 export const ArtifactDetail = z.object({
@@ -194,9 +148,7 @@ export const ArtifactDetail = z.object({
   path: z.string(),
   size: z.number().optional(),
   sha256: z.string().optional(),
-  // nullable for the same reason the note's sourceRevision is: the artifact record carries
-  // `stepId: null` when nothing produced it inside a step, and a string-only schema rejects the
-  // whole record over it.
+  // `stepId: null` when nothing produced it inside a step; a string-only schema rejects the record
   stepId: z.string().nullish(),
   seq: z.number().optional(),
 })
@@ -234,20 +186,8 @@ export const LogRows = z.array(
     // scope reads and what tells an operator whether a line came from the web, the CLI or a run.
     chatId: z.string().nullable(),
     door: z.enum(Door),
-    // noteNodeId(scope, id) for the memory kinds — a row links to the note it is about without
-    // parsing an id back apart. Nullable but never ABSENT, like authorTaskId below.
-    noteRef: z.string().nullable(),
-    // The task that AUTHORED a project-scoped (envelope taskId null) memory_written/memory_deleted
-    // row, read from payload.author.taskId — the same provenance the graph's `wrote` edge uses.
-    // Null for every other kind (the envelope taskId already attributes those) and for an ownerless
-    // memory row (a human/cli-authored global note). This is what attributes a null-taskId memory
-    // row to its writing task under a per-task filter, instead of admitting it under every one.
-    //
-    // Required, because the per-task filter reads it as `row.authorTaskId === taskFilter`: an
-    // OPTIONAL field lets a row-builder omit it and still compile, and the memory row then fails
-    // that comparison and disappears from every per-task view — silently, since `undefined` and
-    // "authored by nobody" are the same answer to that test. Nullable says "no author"; absent
-    // would say "this producer forgot", and the two must not look alike.
+    // The task that AUTHORED a project-scoped (envelope taskId null) knowledge row, read from
+    // payload.author.taskId; null for every other kind and for an ownerless (cli/human) row.
     authorTaskId: z.string().nullable(),
     // Whether the tool call this row summarizes FAILED, and why. The summary line folds isError
     // into display text, so a pane reading rows alone could not tell a refusal from a success —
@@ -255,8 +195,8 @@ export const LogRows = z.array(
     // a sender holding the raw event beside the row.
     failure: z.object({ toolName: z.string(), error: z.string() }).nullable().optional(),
     // The whole exchange on a copilot_exchange row: the chat pane rebuilds real bubbles from the
-    // log rather than from browser storage. A side channel like noteRef — every other reader
-    // renders `line` and ignores this.
+    // log rather than from browser storage. A side channel — every other reader renders `line` and
+    // ignores this.
     exchange: CopilotExchange.nullable().optional(),
   }),
 )
@@ -352,10 +292,10 @@ export const ModelRefs = z.array(z.string())
  * accepted every object: the reader never had to be right about a shape, and on the producing side
  * `ViewResult<'node'>` accepted `{ nonsense: 1 }` and a task detail missing every field but `id`.
  * So the guarantee the view interface exists for — a read that stops matching the wire fails the
- * BUILD — did not hold for the one view answering five shapes. With the discriminant, each kind is
- * checked against its own member, on both sides.
+ * BUILD — did not hold for the one view answering a shape per node kind. With the discriminant,
+ * each kind is checked against its own member, on both sides.
  */
-export const NodeDetail = z.discriminatedUnion('type', [TaskDetail, StepDetail, NoteDetail, ArtifactDetail, ModelDetail])
+export const NodeDetail = z.discriminatedUnion('type', [TaskDetail, StepDetail, ArtifactDetail, ModelDetail])
 // A node kind added to NODE_TYPES with no detail schema fails HERE rather than at the pane, where
 // it would arrive as an unparseable answer nothing knows how to render.
 export type NodeDetailCoversTypes = Exclude<NodeType, z.infer<typeof NodeDetail>['type']> extends never ? true : never
@@ -406,17 +346,15 @@ export const WIRE = {
 // The graph shapes graph-wire.ts declares as interfaces, as the schemas that parse them. The two
 // cannot be one declaration — graph-wire takes no imports, so the browser can have it without the
 // projection's dependencies. What keeps them equal is a pair of assignability guards in the app
-// that consumes both (graph-ui/web/src/lib/api/types.ts), where `exactOptionalPropertyTypes` is on
-// and so `heat?: number` and `heat?: number | undefined` are still distinguishable.
+// that consumes both (graph-ui/web/src/lib/api/types.ts), where `exactOptionalPropertyTypes` is on.
 const GraphNode = z.object({
   id: z.string(),
   type: z.enum(NODE_TYPES),
   label: z.string(),
   detail: z.string(),
-  heat: z.number().optional(),
   workspaceId: z.string().optional(),
 })
-const GraphLink = z.object({ source: z.string(), target: z.string(), type: z.string(), heat: z.number().optional() })
+const GraphLink = z.object({ source: z.string(), target: z.string(), type: z.string() })
 
 export const GraphSnapshot = z.object({ seq: z.number(), nodes: z.array(GraphNode), links: z.array(GraphLink) })
 
@@ -425,7 +363,6 @@ const GraphPatch = z.object({
   updateNodes: z.array(GraphNode).default([]),
   removeNodeIds: z.array(z.string()).default([]),
   addLinks: z.array(GraphLink).default([]),
-  updateLinks: z.array(GraphLink).default([]),
   removeLinks: z.array(GraphLink).default([]),
 })
 

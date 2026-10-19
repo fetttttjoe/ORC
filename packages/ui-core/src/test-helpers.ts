@@ -1,7 +1,7 @@
 // Test scaffolding for anything that reads through a view: ONE spelling of "a read model built
 // from these events", shared with the packages that compose this one (the CLI's served-tool tests
 // build their session stub on it).
-import { emptyMemoryFold, foldMemoryInto, type EventRecord } from '@orc/contracts'
+import type { EventRecord } from '@orc/contracts'
 import { emptyFold, foldInto } from '@orc/kernel'
 import { buildGraph } from './graph'
 import type { ReadModel } from './views/view'
@@ -12,6 +12,5 @@ import type { ReadModel } from './views/view'
 // log instead of a canned answer, so a tool can never be fed a shape the fold could not produce.
 export const modelOf = (events: ReadonlyArray<EventRecord>): ReadModel => {
   const acc = events.reduce(foldInto, emptyFold())
-  const memory = events.reduce(foldMemoryInto, emptyMemoryFold())
-  return { seq: events.at(-1)?.seq ?? 0, events, state: acc.state, memory, graph: buildGraph(acc.state, memory, {}) }
+  return { seq: events.at(-1)?.seq ?? 0, events, state: acc.state, graph: buildGraph(acc.state) }
 }

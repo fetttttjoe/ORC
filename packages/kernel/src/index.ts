@@ -18,7 +18,7 @@ export * from './execution/split-tool'
 export * from './execution/commit-tool'
 export * from './execution/exec-tool'
 export * from './execution/checks-executor'
-// tree identity, shared with the memory plugin's drift cache — one spelling of "has the tree moved"
+// one spelling of "has the tree moved"
 export * from './execution/tree-fingerprint'
 export * from './execution/finalize-plan-tool'
 export * from './execution/plan-note-tools'

@@ -7,7 +7,7 @@ import pg from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { jsonb, pgTable, text } from 'drizzle-orm/pg-core'
-import { Door, EVENT_KIND, isRecord, isTerminalError, NO_CHAT, OperationKind, OperationStatus, SignalOutcome, TASK_STATUS, type EventInput, type OperationSpec, type TaskStatus } from '@orc/contracts'
+import { Door, EVENT_KIND, isRecord, isTerminalError, NO_CHAT, OperationKind, OperationStatus, SignalOutcome, TASK_STATUS, TaskType, type EventInput, type OperationSpec, type TaskStatus } from '@orc/contracts'
 import { authorFixture, eventFixture, must } from '@orc/contracts/fixtures'
 import { KernelError, KERNEL_ERROR_CODE } from './errors'
 import { listProjectIds, openStorage, type EventLog, type Storage } from './storage'
@@ -48,7 +48,10 @@ describe('listProjectIds', () => {
     const other = '99999999-9999-9999-9999-999999999999'
     const s2 = await openStorage(db.url, { projectId: other })
     db.onClose(() => s2.close())
-    const draft = { ...ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written, payload: { note: { id: 'p', title: 'p' }, author: authorFixture() } } as const
+    const draft: EventInput = {
+      ...ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.knowledge_written,
+      payload: { added: [], changed: [], retired: [], files: [], why: null, decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author: authorFixture() },
+    }
     await s1.events.append(draft)
     await s2.events.append(draft)
     expect(await listProjectIds(db.url)).toEqual([other, TEST_PROJECT_ID]) // s2 wrote last
@@ -168,6 +171,15 @@ describe('EventLog (postgres)', () => {
     expect(count).toBe(1)
   })
 
+  it('a migrated database carries no note lookup index', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const pool = new pg.Pool({ connectionString: db.url })
+    db.onClose(() => pool.end())
+    const found = await pool.query('SELECT indexname FROM pg_indexes WHERE indexname = $1', ['idx_events_note_seq'])
+    expect(found.rows).toEqual([])
+  })
+
   it('persists across reopen (migrations are idempotent)', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -252,7 +264,7 @@ describe('EventLog (postgres)', () => {
     await log.append(statusEvent('t1'))
     await log.append({
       ...ORIGIN, taskId: 't2', stepId: null, runToken: null, kind: EVENT_KIND.task_created,
-      payload: { task: { id: 't2', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: 'generic', title: 't2', spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null, depth: 0, createdAt: 'T' } },
+      payload: { task: { id: 't2', parentId: null, workspaceId: TEST_WORKSPACE_ID, type: TaskType.generic, title: 't2', spec: '', status: TASK_STATUS.draft, zone: [], budgetUSD: null, depth: 0, createdAt: 'T' } },
     })
     await log.append(statusEvent('t3'))
     expect((await log.after(0, [EVENT_KIND.task_created])).map(e => e.seq)).toEqual([2])
@@ -582,48 +594,3 @@ describe('OperationJournal', () => {
   })
 })
 
-// store.write needs ONE note as its merge base, and used to fold the project's entire memory
-// history to find it — inside the project advisory lock, which serializes every other writer.
-describe('latestNoteEvent', () => {
-  const wrote = (id: string, scope: string, body: string): EventInput => ({
-    ...ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-    payload: { note: { id, scope, title: id, body }, author: authorFixture() },
-  })
-  const deleted = (id: string, scope: string): EventInput => ({
-    ...ORIGIN, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_deleted,
-    payload: { id, scope, author: authorFixture() },
-  })
-
-  it('returns the newest event for that note, ignoring other notes and other scopes', async () => {
-    const log = await freshLog()
-    await log.append(wrote('auth', 'project', 'first'))
-    await log.append(wrote('other', 'project', 'noise'))
-    await log.append(wrote('auth', 'plan-t1', 'different lane'))
-    await log.append(wrote('auth', 'project', 'second'))
-    const found = await log.latestNoteEvent('project', 'auth')
-    expect(found?.kind).toBe(EVENT_KIND.memory_written)
-    expect(JSON.stringify(found?.payload)).toContain('second')
-  })
-
-  it('a delete is the newest event, so the caller sees no live base', async () => {
-    const log = await freshLog()
-    await log.append(wrote('auth', 'project', 'first'))
-    await log.append(deleted('auth', 'project'))
-    expect((await log.latestNoteEvent('project', 'auth'))?.kind).toBe(EVENT_KIND.memory_deleted)
-  })
-
-  it('a re-write after a delete wins again', async () => {
-    const log = await freshLog()
-    await log.append(wrote('auth', 'project', 'first'))
-    await log.append(deleted('auth', 'project'))
-    await log.append(wrote('auth', 'project', 'reborn'))
-    const found = await log.latestNoteEvent('project', 'auth')
-    expect(found?.kind).toBe(EVENT_KIND.memory_written)
-    expect(JSON.stringify(found?.payload)).toContain('reborn')
-  })
-
-  it('an unknown note is null', async () => {
-    const log = await freshLog()
-    expect(await log.latestNoteEvent('project', 'nope')).toBeNull()
-  })
-})

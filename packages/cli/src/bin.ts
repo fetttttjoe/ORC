@@ -35,7 +35,7 @@ async function parse(program: Command, argv: string[]): Promise<number> {
 async function main(): Promise<number> {
   const args = process.argv.slice(2)
   // P7 door #2: under `mcp serve`, stdout carries ONLY MCP protocol frames — rebind every
-  // stdout-bound console channel to stderr BEFORE any boot code (plugins, storage, memory)
+  // stdout-bound console channel to stderr BEFORE any boot code (plugins, storage)
   // can print. warn/error already target stderr; DBOS never boots on the read path (lazy port).
   if (args[0] === 'mcp' && args[1] === 'serve')
     for (const k of ['log', 'info', 'debug'] as const) console[k] = console.error.bind(console)

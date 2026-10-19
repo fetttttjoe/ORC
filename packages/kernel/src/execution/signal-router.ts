@@ -25,17 +25,9 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   plan_proposed: true, plan_edited: true, plan_approved: true,
   run_requested: true, run_started: true, step_started: true, step_completed: true, step_failed: true,
   split_proposed: true, split_resolved: true,
-  memory_written: false,
   skill_loaded: false, rate_limit_wait: false, agent_call: false, tool_call: false, tool_result: false,
   signal_received: false, operation_started: false, operation_completed: false,
-  operation_failed: false, artifact_produced: false, memory_deleted: false, memory_accessed: false,
-  // a topic access (list or fetch) reads DERIVED knowledge — it starts nothing, unblocks nothing,
-  // and changes no task state, same as its sibling memory_accessed
-  memory_topic_accessed: false,
-  // a verification stamps a note; it starts nothing, unblocks nothing, and changes no task state
-  memory_verified: false,
-  // an agent's self-reported use outcome — evidence the memory fold aggregates, nothing to route
-  memory_outcome: false,
+  operation_failed: false, artifact_produced: false,
   knowledge_delivered: false,
   // composeSplitResult fetches these separately (resolveSplit), once per split resolution — kept out of ROUTER_KINDS so routing does not pay for them on every event.
   knowledge_written: false,
@@ -45,9 +37,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   models_discovered: false, // catalog metadata — nothing to route
   copilot_exchange: false, // conversation record — nothing to route
   reaction_failed: false, // the router's OWN diagnosis — routing it would react to itself
-  // the auto-heal trigger: an out-of-task commit moves the tree under the knowledge graph's
-  // stamps, and the free restamp/heal reaction (onCommitRecorded) is how drift settles without
-  // an operator running `orc memory restamp` by hand — proven live twice on 2026-08-03
+  // the auto-heal trigger: a commit moves the tree under the claims' anchors (onCommitRecorded)
   commit_recorded: true,
   // workspace lifecycle facts: vocabulary only so far, same as models_discovered — no reactor
   // reads these yet, unlike commit_recorded's onCommitRecorded. Flip to true once a later
@@ -55,6 +45,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   workspace_created: false, workspace_retitled: false, workspace_archived: false, workspace_merged: false,
   // a chat's opening is a correlation fact — nothing routes off it
   chat_opened: false,
+  project_identified: false,
 }
 const ROUTER_KINDS = Object.values(EventKind).filter(k => ROUTER_RELEVANT[k])
 
@@ -102,9 +93,7 @@ export function createSignalRouter(opts: {
   // The DBOS half of a cancel, which a client with no execution port cannot do itself —
   // kernel.cancelSubtree only appends the status; the running supervisor finishes the job.
   onCancelled: (taskId: string) => Promise<void>
-  // The auto-heal reactor (optional — the kernel may not import plugins/memory, so the actual
-  // restamp/heal lives behind this callback at the composition root; absent = the old behavior,
-  // commits stay traceability records and nothing reacts).
+  // The auto-heal reactor, injected by the composition root; absent, commits stay traceability records.
   onCommitRecorded?: (payload: CommitRecordedPayload) => Promise<void>
   send: (destinationId: string, result: SplitResult, topic: string, idempotencyKey: string) => Promise<void>
   sendFeedback: (destinationId: string, message: string, topic: string, idempotencyKey: string) => Promise<void>

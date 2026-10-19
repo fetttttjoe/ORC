@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { EVENT_KIND, TASK_STATUS, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type TaskNode, type TaskStatus, type Workspace, type WorkspaceHealth } from '@orc/contracts'
+import { EVENT_KIND, TASK_STATUS, TaskType, WORKSPACE_KIND, WORKSPACE_STATE, type EventRecord, type TaskNode, type TaskStatus, type Workspace, type WorkspaceHealth } from '@orc/contracts'
 import { authorFixture, eventFixture } from '@orc/contracts/fixtures'
 import { fold, type State } from './projections'
 import { applyArchived, applyRetitle, compareWorkspaceHealth, orphanTasks, tasksByWorkspace, workspaceByCwd, workspaceCwdFor, workspaceHealth, type WorkspaceProbes } from './workspaces'
@@ -77,7 +77,7 @@ describe('workspace transitions', () => {
 })
 
 const task = (id: string, workspaceId: string, status: TaskStatus = TASK_STATUS.draft): TaskNode =>
-  ({ id, parentId: null, type: 'generic', title: id, spec: '', status, zone: [], budgetUSD: null, depth: 0, createdAt: 'x', workspaceId })
+  ({ id, parentId: null, type: TaskType.generic, title: id, spec: '', status, zone: [], budgetUSD: null, depth: 0, createdAt: 'x', workspaceId })
 
 describe('derivations', () => {
   const state = fold([
@@ -131,7 +131,6 @@ const CASES: Array<{
   name: string
   state: Pick<State, 'tasks' | 'workspaces' | 'workspaceMerges'>
   events?: EventRecord[]
-  notes?: ReadonlyMap<string, number> | null
   probes?: WorkspaceProbes
   expected: WorkspaceHealth['state']
   // The `merged` FLAG, asserted per row rather than derived from the row's own state: the flag and
@@ -191,28 +190,7 @@ const CASES: Array<{
     expected: WORKSPACE_STATE.dangling,
   },
   {
-    name: 'dangling — nothing open left, but knowledge is still pending in it',
-    state: stateOf([task('t1', ID.a, TASK_STATUS.done)]),
-    notes: new Map([[ID.a, 2]]),
-    expected: WORKSPACE_STATE.dangling,
-  },
-  {
-    // an OPEN task means the work is simply unfinished — provisional notes are expected there
-    name: 'idle — pending knowledge but a task is still open',
-    state: stateOf([task('t1', ID.a, TASK_STATUS.draft)]),
-    notes: new Map([[ID.a, 2]]),
-    expected: WORKSPACE_STATE.idle,
-  },
-  {
-    // NEVER INVENT DANGLING FROM IGNORANCE: a null count is "the read model could not be asked",
-    // and treating it as > 0 would send an operator to merge a workspace with nothing pending
-    name: 'idle — an uncountable note corpus is not evidence of anything pending',
-    state: stateOf([task('t1', ID.a, TASK_STATUS.done)]),
-    notes: null,
-    expected: WORKSPACE_STATE.idle,
-  },
-  {
-    name: 'idle — a checkout on disk, nothing running, nothing pending',
+    name: 'idle — unmerged, nothing open, its checkout present',
     state: stateOf([task('t1', ID.a, TASK_STATUS.done)]),
     expected: WORKSPACE_STATE.idle,
   },
@@ -221,7 +199,7 @@ const CASES: Array<{
 describe('workspaceHealth', () => {
   for (const c of CASES)
     it(c.name, () => {
-      const h = workspaceHealth(c.state, c.events ?? [], c.notes === undefined ? new Map() : c.notes, WS_A, c.probes ?? LIVE)
+      const h = workspaceHealth(c.state, c.events ?? [], WS_A, c.probes ?? LIVE)
       expect(h.state).toBe(c.expected)
       expect(h.merged).toBe(c.merged === true)
     })
@@ -229,13 +207,13 @@ describe('workspaceHealth', () => {
   it('a question open on ANOTHER workspace\'s task never makes this one wait', () => {
     const state = stateOf([task('t1', ID.a, TASK_STATUS.done), task('t9', ID.b, TASK_STATUS.blocked)])
     const asked = ev(EVENT_KIND.feedback_requested, { topic: 'cwd', question: 'which cwd?' }, 't9')
-    expect(workspaceHealth(state, [asked], new Map(), WS_A, LIVE).state).toBe(WORKSPACE_STATE.idle)
+    expect(workspaceHealth(state, [asked], WS_A, LIVE).state).toBe(WORKSPACE_STATE.idle)
   })
 
-  it('counts the workspace\'s tasks and carries the probes and the note count through', () => {
+  it('counts the workspace\'s tasks and carries the probes through', () => {
     const state = stateOf([task('t1', ID.a, TASK_STATUS.done), task('t2', ID.a, TASK_STATUS.draft), task('t9', ID.b)])
-    expect(workspaceHealth(state, [], new Map([[ID.a, 3]]), WS_A, { dirExists: true, clean: false })).toMatchObject({
-      taskCount: 2, openTaskCount: 1, provisionalNotes: 3, dirExists: true, clean: false,
+    expect(workspaceHealth(state, [], WS_A, { dirExists: true, clean: false })).toMatchObject({
+      taskCount: 2, openTaskCount: 1, dirExists: true, clean: false,
     })
   })
 
@@ -251,11 +229,11 @@ describe('workspaceHealth', () => {
       ev(EVENT_KIND.workspace_retitled, { workspaceId: ID.b, title: 'Other' }, null, '2026-09-20T00:00:00.000Z'),
       ev(EVENT_KIND.task_created, { task: task('t9', ID.b) }, 't9', '2026-09-21T00:00:00.000Z'),
     ]
-    expect(workspaceHealth(state, events, new Map(), WS_A, LIVE).lastActivityAt).toBe('2026-09-12T00:00:00.000Z')
+    expect(workspaceHealth(state, events, WS_A, LIVE).lastActivityAt).toBe('2026-09-12T00:00:00.000Z')
   })
 
   it('lastActivityAt is null when the log shows nothing for this workspace — never a fabricated stamp', () => {
-    expect(workspaceHealth(stateOf([]), [], new Map(), WS_A, LIVE).lastActivityAt).toBeNull()
+    expect(workspaceHealth(stateOf([]), [], WS_A, LIVE).lastActivityAt).toBeNull()
   })
 })
 

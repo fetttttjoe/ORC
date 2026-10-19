@@ -13,9 +13,7 @@ const config = { maxDepth: 3, finishChecks: [] }
 const note = (over: Partial<PlanNote> & { id: string }): PlanNote => planNoteFixture({ title: over.id, ...over })
 const finalizeFor = (opts: Parameters<typeof finalizePlanTool>[0]) => must(finalizePlanTool(opts)[0], 'finalize_plan tool')
 
-// finalize_plan sources the frozen plan from kernel.listPlanNotes (a LOG fold) — never the
-// SurrealDB projection. The double models that log-fold; there is NO memory store here, so a finalize
-// that still read the async read model could not possibly work.
+// finalize_plan sources the frozen plan from kernel.listPlanNotes, a log fold the double models.
 function fakeKernel(
   notes: PlanNote[], calls: unknown[] = [], approvedHash: string | null = planGraphHash(notes),
   nonHuman: { source: string } | null = null,

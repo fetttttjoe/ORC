@@ -19,7 +19,7 @@ class GraphStore {
   applyPatch(p: GraphPatch): void {
     for (const n of [...p.addNodes, ...p.updateNodes]) this.nodes.set(n.id, n)
     for (const id of p.removeNodeIds) this.nodes.delete(id)
-    for (const l of [...p.addLinks, ...p.updateLinks]) this.links.set(linkKey(l), l)
+    for (const l of p.addLinks) this.links.set(linkKey(l), l)
     for (const l of p.removeLinks) this.links.delete(linkKey(l))
     for (const id of p.removeNodeIds) for (const [k, l] of this.links) if (l.source === id || l.target === id) this.links.delete(k)
   }

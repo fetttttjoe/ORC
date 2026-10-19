@@ -3,76 +3,36 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { z } from 'zod'
-import { MEMORY_HEALTH, ClaimClass, COMMIT_STEP_ID, DEFAULT_KNOWLEDGE_PLUGIN, Door, NO_CHAT,
+import { ClaimClass, COMMIT_STEP_ID, DEFAULT_KNOWLEDGE_PLUGIN, Door, NO_CHAT,
   EVENT_KIND, FINISH_STEP_ID, KNOWLEDGE_REFUSAL, KnowledgeToolName, PlanNoteToolName, ROLE_SKILL, SignalOutcome, STEP_ID, STEP_ROLE, VERIFY_STEP_ID,
   type AgentExecutor, type EventDraft, type ExecutorContext, type SplitResult, type UnifiedEvent,
   RunOutcome,
 } from '@orc/contracts'
-import { Surreal } from 'surrealdb'
-import { openStorage, Kernel, projectDatabaseName, SCOPED_CHANGES_TOOL_NAME, TASK_PLAN_TOOL_NAME, type ProjectConfig } from '@orc/kernel'
+import { openStorage, Kernel, SCOPED_CHANGES_TOOL_NAME, TASK_PLAN_TOOL_NAME, type ProjectConfig } from '@orc/kernel'
 import { createTestDb, fakeProvider, seedTestWorkspace, sh, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
-import { authorFixture, draftFixture, stepFixture } from '@orc/contracts/fixtures'
+import { draftFixture, stepFixture } from '@orc/contracts/fixtures'
 
 // these tests arrange through the CLI door; the runtime's own authors are Door.supervisor
 const CLI = NO_CHAT(Door.cli)
-import { createMemory } from '@orc/memory'
 import { buildProgram } from './main'
-import { buildPlugins, buildRuntime, seedPhases, workspaceStamps } from './runtime'
-import { testSurrealDbName } from './test-helpers'
+import { buildPlugins, buildRuntime, seedPhases } from './runtime'
 import { seedShippedSkills } from './shipped-skills'
 import { openKnowledge } from './knowledge-open'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-const surrealBases: ProjectConfig[] = []
 // Registered the moment each resource exists, drained LIFO BEFORE the databases go. A bare
 // `await port.shutdown()` as the last statement of an it() is SKIPPED when an assertion above it
 // throws, leaking a launched DBOS runtime into every later test file in the process — that is
 // what turned one failed assertion on this branch into a 22-failure mystery, and it is why the
-// db.drop() below got skipped and left orc_test_* databases behind. Same idiom as
-// kernel/src/execution/memory-access.integration.test.ts.
+// db.drop() below got skipped and left orc_test_* databases behind.
 const cleanup: Array<() => Promise<void> | void> = []
 afterAll(async () => {
   for (const c of cleanup.reverse()) await c()
   for (const d of dbs) await d.drop()
-  for (const c of surrealBases) {
-    const s = new Surreal()
-    await s.connect(c.projectDbUrl)
-    await s.signin({ username: c.projectDbUser, password: c.projectDbPassword })
-    await s.use({ namespace: c.projectDbNamespace })
-    await s.query(`REMOVE DATABASE IF EXISTS \`${projectDatabaseName(c.projectDbName, c.projectId)}\`;`).catch(() => {})
-    await s.close()
-  }
 })
 afterEach(() => mock.restore())
 
-// captures the memory tools the port hands each step, then signals success
-const toolProbe: { results: { name: string; isError: boolean; output: unknown }[] } = { results: [] }
-const probeExecutor: AgentExecutor<unknown> = {
-  id: 'api-loop',
-  async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
-    const inputs: Record<string, unknown> = {
-      memory_write: { id: 'x', title: 'X' },
-      memory_search: { query: 'x' },
-      memory_read: { id: 'x' },
-      memory_neighbors: { seed: 'x' },
-      memory_topics: {},
-      memory_recheck: {},
-    }
-    for (const t of ctx.extraTools.filter(t => t.name.startsWith('memory_'))) {
-      const r = await t.execute(inputs[t.name])
-      toolProbe.results.push({ name: t.name, isError: r.isError, output: r.output })
-    }
-    const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary: 'probed' }
-    await ctx.checkpoint('signal:1', async () => signal,
-      (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } }])
-    yield { type: 'signal', signal }
-    yield { type: 'done' }
-  },
-}
-
-// records the extraTools names each step actually receives, keyed by step id — the mirror image
-// of toolProbe above (which only cares about memory_* execute() results): this one never calls a
-// tool, it just proves whether stepTools registered it.
+// records the extraTools names each step actually receives, keyed by step id
 const toolNamesByStep: Record<string, string[]> = {}
 // whether the port forwarded ctx.knowledge (dbos-port.ts's `...(stepKnowledge && { knowledge })`,
 // fed by runtime.ts's stepTools returning `knowledge: stepKnowledge.knowledge`), keyed by step id
@@ -117,20 +77,18 @@ describe('seedPhases (the boot line accounts for a storage open it did not perfo
   })
 })
 
-describe('stepTools knowledge and memory surfaces per step', () => {
+describe('stepTools knowledge surfaces per step', () => {
   it('every step gets the knowledge tools; only the plan step gets the plan tools; the plan and finish steps get the decision tools; audit steps get knowledge_check', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-verify-'))
-    const projectDbName = testSurrealDbName()
-    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName })
+    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills') })
     // Seeded the way `orc init` seeds a real project: the kernel appends a finish step declaring
     // ROLE_SKILL.finisher to every root plan, and a temp skills dir that nothing seeds fails the
     // run at step init with "unknown skill 'role-finisher'". ONE seeder (shipped-skills.ts) — a
     // harness pointing at the repo's own vault instead would hide exactly the case where orc ships
     // a skill no project has yet.
     seedShippedSkills(config.skillsDir)
-    surrealBases.push(config)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
@@ -140,11 +98,7 @@ describe('stepTools knowledge and memory surfaces per step', () => {
     host.providers.set('fake', fakeProvider)
     host.executors.set('api-loop', toolNameExecutor)
     const port = await buildRuntime({ host, hub, config, storage, kernel })
-    // Torn down HERE, not via the shared `cleanup` array: DBOS registration is process-global (one
-    // `DBOS.launch()` per process), and `cleanup` only drains at the file's afterAll — the NEXT
-    // test's buildRuntime() call ('buildRuntime degraded memory' below) would collide with this
-    // port still being "launched". Shutting it down immediately, in `finally` so a thrown
-    // assertion cannot skip it, is what lets the two coexist in one file.
+    // torn down HERE, in `finally`: DBOS launch is process-global and the next test builds its own runtime
     try {
       const verifyTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'verify step', spec: 'audits' }, CLI)
       await kernel.proposePlan(verifyTask.id, draftFixture([stepFixture({ id: VERIFY_STEP_ID, role: STEP_ROLE.auditor })]), CLI)
@@ -175,7 +129,7 @@ describe('stepTools knowledge and memory surfaces per step', () => {
       await kernel.approvePlan(planTask.id, undefined, undefined, CLI)
       expect(await (await port.startRun(planTask.id)).wait()).toBe(RunOutcome.done)
 
-      const family = (step: string) => new Set((toolNamesByStep[step] ?? []).filter(n => n.startsWith('memory_') || n.startsWith('knowledge_')))
+      const family = (step: string) => new Set((toolNamesByStep[step] ?? []).filter(n => n.startsWith('knowledge_')))
       const knowledge = [KnowledgeToolName.card, KnowledgeToolName.search, KnowledgeToolName.write]
       expect(family(VERIFY_STEP_ID)).toEqual(new Set([...knowledge, KnowledgeToolName.check]))
       expect(family(AUDITOR_STEP_NAMED_FOR_ITS_JOB)).toEqual(new Set([...knowledge, KnowledgeToolName.check]))
@@ -229,7 +183,7 @@ const knowledgeWriteExecutor: AgentExecutor<unknown> = {
 }
 
 describe('a step writes knowledge into the directory it runs in', () => {
-  it('lands in the run cwd checkout, not the supervisor\'s, and the evidence names the task and step', async () => {
+  it('lands in the run cwd checkout, not the supervisor\'s, the evidence names the task and step, and nothing warns about memory', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-knowledge-'))
@@ -239,11 +193,10 @@ describe('a step writes knowledge into the directory it runs in', () => {
     mkdirSync(path.join(elsewhere, path.dirname(ANCHOR)), { recursive: true })
     writeFileSync(path.join(elsewhere, ANCHOR), 'export const a = 1\n')
     const config = testConfig(db.url, {
-      vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName: testSurrealDbName(),
+      vaultDir, skillsDir: path.join(vaultDir, 'skills'),
       knowledge: { plugin: DEFAULT_KNOWLEDGE_PLUGIN, options: {} },
     })
     seedShippedSkills(config.skillsDir)
-    surrealBases.push(config)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
@@ -251,6 +204,8 @@ describe('a step writes knowledge into the directory it runs in', () => {
     const { host, hub } = await buildPlugins(config)
     host.providers.set('fake', fakeProvider)
     host.executors.set('api-loop', knowledgeWriteExecutor)
+    const warns: string[] = []
+    spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     const port = await buildRuntime({ host, hub, config, storage, kernel })
     try {
       const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'writes knowledge', spec: 'records a claim' }, CLI)
@@ -264,6 +219,7 @@ describe('a step writes knowledge into the directory it runs in', () => {
       expect(knowledgeWrites.map(w => w.isError)).toEqual([false])
       const written = await log.after(0, [EVENT_KIND.knowledge_written])
       expect(written.map(e => ({ taskId: e.taskId, stepId: e.stepId }))).toEqual([{ taskId: t.id, stepId: WRITING_STEP }])
+      expect(warns.filter(w => w.includes('memory'))).toEqual([])
     } finally {
       await port.shutdown()
       await log.close()
@@ -308,12 +264,11 @@ describe('a step writes knowledge into the directory it runs in', () => {
     const elsewhereHeadBefore = sh(elsewhere, 'rev-parse', 'HEAD')
 
     const config = testConfig(db.url, {
-      vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName: testSurrealDbName(),
+      vaultDir, skillsDir: path.join(vaultDir, 'skills'),
       knowledge: { plugin: DEFAULT_KNOWLEDGE_PLUGIN, options: {} },
       autoCommit: true,
     })
     seedShippedSkills(config.skillsDir)
-    surrealBases.push(config)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
@@ -358,9 +313,7 @@ describe('buildRuntime role-skill pre-flight', () => {
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-skills-'))
     // deliberately NOT seedShippedSkills(config.skillsDir) — that absence IS the case under test.
-    // projectDbUrl is malformed so no Surreal database is created for a run that never touches
-    // memory: the pre-flight reads the skill index, which has nothing to do with the read model.
-    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbUrl: 'not-a-url' })
+    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills') })
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
@@ -371,8 +324,7 @@ describe('buildRuntime role-skill pre-flight', () => {
     const warns: string[] = []
     spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     const port = await buildRuntime({ host, hub, config, storage, kernel })
-    // Shut down HERE in `finally`, not via the shared `cleanup` array: DBOS launch is
-    // process-global, and the degraded-memory test below builds its own runtime.
+    // shut down HERE, in `finally`: DBOS launch is process-global and the next test builds its own runtime
     try {
       const named = warns.filter(w => w.includes(ROLE_SKILL.finisher))
       // ONE line, not one per caller of the index: a repeated warning reads as a repeated fault
@@ -391,13 +343,57 @@ describe('buildRuntime role-skill pre-flight', () => {
   }, 60_000)
 })
 
+describe('a run with knowledge off', () => {
+  it('runs its step to done; the step\'s knowledge write answers off and appends nothing', async () => {
+    const db = await createTestDb()
+    dbs.push(db)
+    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-off-'))
+    cleanup.push(() => rmSync(vaultDir, { recursive: true, force: true }))
+    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), knowledge: null })
+    seedShippedSkills(config.skillsDir)
+    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
+    const log = storage.events
+    const kernel = new Kernel(log)
+    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
+    const writes: Array<{ isError: boolean; output: unknown }> = []
+    const offExecutor: AgentExecutor<unknown> = {
+      id: 'api-loop',
+      async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
+        const write = ctx.extraTools.find(t => t.name === KnowledgeToolName.write)
+        if (ctx.step.id === WRITING_STEP && write)
+          writes.push(await write.execute({ add: [{ text: 'Never lands.', class: ClaimClass.fact, anchors: [{ path: ANCHOR }] }], why: 'probe' }, 'call-1'))
+        const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome: SignalOutcome.success, summary: 'probed' }
+        await ctx.checkpoint('signal:1', async () => signal,
+          (): EventDraft[] => [{ kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } }])
+        yield { type: 'signal', signal }
+        yield { type: 'done' }
+      },
+    }
+    const { host, hub } = await buildPlugins(config)
+    host.providers.set('fake', fakeProvider)
+    host.executors.set('api-loop', offExecutor)
+    const port = await buildRuntime({ host, hub, config, storage, kernel })
+    try {
+      const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'knowledge off', spec: 'runs without knowledge' }, CLI)
+      await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: WRITING_STEP })]), CLI)
+      await kernel.approvePlan(t.id, undefined, undefined, CLI)
+      expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
+      expect(writes).toEqual([{ output: { error: KNOWLEDGE_REFUSAL.unavailable(KNOWLEDGE_REFUSAL.off()) }, isError: true }])
+      expect(await log.after(0, [EVENT_KIND.knowledge_written])).toEqual([])
+    } finally {
+      await port.shutdown()
+      await log.close()
+    }
+  }, 60_000)
+})
+
 describe('buildRuntime unavailable knowledge', () => {
   it('warns once with the reason when the configured plugin cannot open, and stays silent when knowledge is off', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-kwarn-'))
     cleanup.push(() => rmSync(vaultDir, { recursive: true, force: true }))
-    const base = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbUrl: 'not-a-url' })
+    const base = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills') })
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
     const kernel = new Kernel(log)
@@ -427,134 +423,21 @@ describe('buildRuntime unavailable knowledge', () => {
   }, 60_000)
 })
 
-describe('buildRuntime degraded memory', () => {
-  it('a broken Surreal config yields one warning; execution still completes, and no step holds a memory tool', async () => {
-    const db = await createTestDb()
-    dbs.push(db)
-    const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-'))
-    const config = testConfig(db.url, {
-      vaultDir,
-      skillsDir: path.join(vaultDir, 'skills'),
-      projectDbUrl: 'not-a-url', // malformed on purpose: createMemory must throw, runtime must degrade
-      knowledge: null, // off too: this run also covers a step completing with knowledge unavailable
-    })
-    // Seeded the way `orc init` seeds a real project: the kernel appends a finish step declaring
-    // ROLE_SKILL.finisher to every root plan, and a temp skills dir that nothing seeds fails the
-    // run at step init with "unknown skill 'role-finisher'". ONE seeder (shipped-skills.ts) — a
-    // harness pointing at the repo's own vault instead would hide exactly the case where orc ships
-    // a skill no project has yet.
-    seedShippedSkills(config.skillsDir)
-    const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
-    const log = storage.events
-    const kernel = new Kernel(log)
-    // the workspace must sit at THIS config's dir: buildRuntime resolves the auto-heal authors from it
-    await seedTestWorkspace(log, CLI, realpathSync(config.dir))
-    const { host, hub } = await buildPlugins(config)
-    host.providers.set('fake', fakeProvider)
-    host.executors.set('api-loop', probeExecutor)
-
-    const warns: string[] = []
-    spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
-    const port = await buildRuntime({ host, hub, config, storage, kernel })
-    try {
-      expect(warns.filter(w => w.includes('memory unavailable; continuing in degraded mode'))).toHaveLength(1)
-      // ...and the role-skill pre-flight stays SILENT here: this harness seeds the shipped set the
-      // way `orc init` does, and a warning that fires for a correctly seeded project is noise an
-      // operator learns to ignore — which is how the real one would then get missed.
-      expect(warns.filter(w => w.includes(ROLE_SKILL.finisher))).toEqual([])
-
-      const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'degraded run', spec: 'still executes' }, CLI)
-      await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: STEP_ID.plan, role: STEP_ROLE.auditor })]), CLI)
-      await kernel.approvePlan(t.id, undefined, undefined, CLI)
-      expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
-
-      expect(new Set(toolProbe.results.map(r => r.name))).toEqual(new Set())
-    } finally {
-      try {
-        await port.shutdown()
-      } finally {
-        await log.close()
-      }
-    }
-  }, 60_000)
-})
-
-describe('status memory health', () => {
-  it('reports healthy, pending-events, and unreachable states without failing', async () => {
+describe('orc status knowledge health', () => {
+  it('prints the knowledge line', async () => {
     const db = await createTestDb()
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-status-'))
-    const projectDbName = testSurrealDbName()
-    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills'), projectDbName })
-    // Seeded the way `orc init` seeds a real project: the kernel appends a finish step declaring
-    // ROLE_SKILL.finisher to every root plan, and a temp skills dir that nothing seeds fails the
-    // run at step init with "unknown skill 'role-finisher'". ONE seeder (shipped-skills.ts) — a
-    // harness pointing at the repo's own vault instead would hide exactly the case where orc ships
-    // a skill no project has yet.
-    seedShippedSkills(config.skillsDir)
-    surrealBases.push(config)
+    const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills') })
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     const kernel = new Kernel(log)
-    // the workspace must sit at THIS config's dir: buildRuntime resolves the auto-heal authors from it
     await seedTestWorkspace(log, CLI, realpathSync(config.dir))
     const { host, hub } = await buildPlugins(config)
     cleanup.push(() => log.close(), () => hub.close(), () => host.shutdown())
     const lines: string[] = []
     spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
-    const status = async (cfg: typeof config, taskId: string) => {
-      lines.length = 0
-      await buildProgram(kernel, undefined, { host, hub, config: cfg, log }).parseAsync(['status', taskId], { from: 'user' })
-      return lines.join('\n')
-    }
-
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'health check' }, CLI)
-    // ok: derived database opens (auto-created) with cursor 0 and no memory events
-    const memory = await createMemory({ log, config })
-    await memory.close()
-    expect(await status(config, t.id)).toContain(`memory: ${MEMORY_HEALTH.ok}`)
-
-    // behind, not broken: a projector that has not drained yet is a healthy system mid-write
-    await log.append({
-      ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.memory_written,
-      payload: {
-        note: { id: 'pending-note', title: 'P', scope: 'project', kind: 'fact', sourceRevision: null, categories: [], tags: [], links: [], paths: [], summary: '', body: '' },
-        author: authorFixture(),
-      },
-    })
-    expect(await status(config, t.id)).toContain(`memory: ${MEMORY_HEALTH.catchingUp} (1 event(s) not yet projected)`)
-
-    // unreachable database → the one real fault, and status still exits normally
-    const broken = testConfig(db.url, { ...config, projectDbUrl: 'not-a-url' })
-    expect(await status(broken, t.id)).toContain(`memory: ${MEMORY_HEALTH.unreachable}`)
+    await buildProgram(kernel, undefined, { host, hub, config, log }).parseAsync(['status', t.id], { from: 'user' })
+    expect(lines.join('\n')).toContain('knowledge:')
   }, 30_000)
-})
-
-// One supervisor serves every checkout at once, so a note's stamps must come from the AUTHOR's
-// workspace: a step running in a worktree that stamped the supervisor's HEAD would read clean
-// until its branch merged, and drifted afterwards.
-describe('workspaceStamps', () => {
-  const repo = (contents: string): string => {
-    const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'orc-rt-stamps-')))
-    cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
-    sh(dir, 'init', '-q'); sh(dir, 'config', 'user.email', 't@t.t'); sh(dir, 'config', 'user.name', 't')
-    writeFileSync(path.join(dir, 'a.ts'), contents)
-    sh(dir, 'add', '-A'); sh(dir, 'commit', '-qm', 'base')
-    return dir
-  }
-
-  it('stamps each author from their own workspace directory, and an orphan author not at all', async () => {
-    const dirs = new Map([['ws-a', repo('export const a = 1\n')], ['ws-b', repo('export const a = 2\n')]])
-    const stampsFor = workspaceStamps(async id => dirs.get(id) ?? null)
-    const inA = stampsFor(authorFixture({ workspaceId: 'ws-a' }))
-    const inB = stampsFor(authorFixture({ workspaceId: 'ws-b' }))
-
-    expect(await inA.revision()).toMatch(/^[0-9a-f]{40}$/)
-    expect(await inA.revision()).not.toBe(await inB.revision())
-    expect(await inA.blob('a.ts')).not.toBe(await inB.blob('a.ts'))
-
-    // a workspace the log does not carry is a defect, not a reason to stamp another tree
-    const orphan = stampsFor(authorFixture({ workspaceId: 'ws-gone' }))
-    expect(await orphan.revision()).toBeNull()
-    expect(await orphan.blob('a.ts')).toBeNull()
-  })
 })

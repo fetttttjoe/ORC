@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { Door, EVENT_KIND, ScopeType, type EventRecord } from '@orc/contracts'
+import { Door, EVENT_KIND, ScopeType, type EventRecord, type MemoryAuthor } from '@orc/contracts'
 import { authorFixture, eventFixture, taskFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { modelOf } from '../test-helpers'
 import { timeline } from './timeline'
@@ -42,19 +42,19 @@ describe('timeline view', () => {
 })
 
 // The task scope answers exactly what the removed `taskId` param answered — including its one hard
-// case: a project-scoped memory row (envelope taskId null) belongs to the task that WROTE it.
+// case: a project-scoped knowledge row (envelope taskId null) belongs to the task that WROTE it.
 describe('a task scope', () => {
-  const author = authorFixture({ taskId: 'C' })
+  const written = (author: MemoryAuthor) => ({ added: [], changed: [], retired: [], files: [], why: null, decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author })
   const m = modelOf([
     eventFixture({ seq: 1, kind: EVENT_KIND.task_created, taskId: 'C', payload: { task: taskFixture({ id: 'C', workspaceId: TEST_WORKSPACE_ID }) } }),
     eventFixture({ seq: 2, kind: EVENT_KIND.task_created, taskId: 'D', payload: { task: taskFixture({ id: 'D', parentId: 'C', depth: 1, workspaceId: TEST_WORKSPACE_ID }) } }),
     ev(3, EVENT_KIND.tool_call, 'C', { toolName: 'x', input: {} }),
     ev(4, EVENT_KIND.tool_call, 'D', { toolName: 'x', input: {} }),
-    ev(5, EVENT_KIND.memory_written, null, { note: { id: 'n', title: 'n', scope: 'project' }, author }),
-    ev(6, EVENT_KIND.memory_written, null, { note: { id: 'm', title: 'm', scope: 'project' }, author: authorFixture() }),
+    ev(5, EVENT_KIND.knowledge_written, null, written(authorFixture({ taskId: 'C' }))),
+    ev(6, EVENT_KIND.knowledge_written, null, written(authorFixture())),
   ])
 
-  it('admits the task rows and the memory row its author wrote, and nothing else', () => {
+  it('admits the task rows and the knowledge row its author wrote, and nothing else', () => {
     expect(timeline.read(m, { scope: task('C') })?.map(r => r.seq)).toEqual([1, 3, 5])
   })
 

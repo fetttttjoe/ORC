@@ -1,6 +1,6 @@
 import { realpathSync } from 'node:fs'
 import path from 'node:path'
-import type { AuthorSource, MemoryAuthor, Origin, Workspace } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, NO_CHAT, type AuthorSource, type MemoryAuthor, type Origin, type Workspace } from '@orc/contracts'
 import { workspaceByCwd } from '@orc/kernel'
 
 // The ONE thing either door reads off the kernel: the folded workspace table. Named and narrow so
@@ -77,3 +77,6 @@ export async function cwdAuthor(
   // extra FIRST: the three fields this function is responsible for cannot be shadowed by a caller.
   return { ...extra, source, origin, workspaceId: await cwdWorkspaceId(kernel, dir) }
 }
+
+export const knowledgeAuthor = (fold: WorkspaceFold, dir: string): Promise<MemoryAuthor> =>
+  cwdAuthor(fold, dir, AUTHOR_SOURCE.cli, NO_CHAT(Door.cli))

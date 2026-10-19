@@ -845,39 +845,6 @@ describe('iteration-budget awareness', () => {
   })
 })
 
-describe('memory lint nudge', () => {
-  it('a memory_write lint warning nudges the very next iteration only, not the one after', async () => {
-    const captured: EventDraft[] = []
-    const memoryWrite: ResolvedTool = {
-      ref: 'memory/write',
-      name: 'memory_write',
-      description: 'fake memory_write',
-      inputSchema: { type: 'object', properties: {} },
-      execute: async () => ({ output: { id: 'x', warnings: ['body is 1840 chars — …'] }, isError: false }),
-    }
-    const model = scriptModel([
-      { toolCalls: [{ toolCallId: 'c1', toolName: 'memory_write', input: { id: 'x', title: 'X' } }] },
-      { text: 'thinking' }, // no tool calls -> generic 'Continue' nudge, no memory lint to report
-      { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'done' } }] },
-    ])
-    // maxIterations 10: outside the endgame-budget window — the fixture default of 3 would mask gating bugs
-    const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, {
-      extraTools: [memoryWrite],
-      step: stepFixture({ instructions: 'do the thing', maxIterations: 10 }),
-    })))
-    expect(events.at(-1)?.type).toBe('done')
-
-    const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
-    expect(agentCallDrafts).toHaveLength(3)
-    const secondRequest = JSON.stringify(AgentCallRequest.parse(must(agentCallDrafts[1], 'agentCallDrafts[1]').payload).request.messages)
-    expect(secondRequest).toContain(`memory lint on 'x'`)
-    expect(secondRequest).toContain('not optional')
-    // fires once: the third iteration's delta must not repeat the nudge
-    const thirdRequest = JSON.stringify(AgentCallRequest.parse(must(agentCallDrafts[2], 'agentCallDrafts[2]').payload).request.messages)
-    expect(thirdRequest).not.toContain('memory lint')
-  })
-})
-
 describe('step knowledge seam', () => {
   const signalled = (outcome: 'success' | 'failure', summary: string) =>
     scriptModel([{ toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome, summary } }] }])
@@ -886,8 +853,9 @@ describe('step knowledge seam', () => {
   // added a CLI flag while the claim saying that command "accepts no options" stayed live, so one
   // note asserted a thing and its opposite. The executor finds the candidates deterministically;
   // deciding which are now FALSE stays the model's job.
+  const AT_RISK_TEXT = 'the export command accepts no options.'
   const atRiskClaim: KnowledgeClaim = {
-    id: 'aaaaaaaa', text: 'orc memory topics accepts no options.', class: ClaimClass.fact,
+    id: 'aaaaaaaa', text: AT_RISK_TEXT, class: ClaimClass.fact,
     anchors: [{ path: 'main.ts', symbol: null }], tags: [], sources: [], decision: null, location: 'knowledge/main.ts.md',
   }
   const fakeKnowledge = (claims: KnowledgeClaim[] = [], preloaded: PreloadedClaim[] = []) => {
@@ -929,7 +897,7 @@ describe('step knowledge seam', () => {
     const prompts = specs.filter(sp => sp.kind === OperationKind.model).map(sp => JSON.stringify(sp.before))
     const second = prompts[1] ?? ''
     expect(second).toContain('You edited main.ts')
-    expect(second).toContain('- [aaaaaaaa] fact: orc memory topics accepts no options.')
+    expect(second).toContain(`- [aaaaaaaa] fact: ${AT_RISK_TEXT}`)
     expect(second).toContain('knowledge_write')
     expect(second).toContain('Leave the ones still true alone')
     expect(second).not.toContain('invalidates')

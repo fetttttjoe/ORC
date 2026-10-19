@@ -1,4 +1,4 @@
-// Zero imports on purpose — the cluster.ts shape: the seq-ordering rule is a pure comparison,
+// Zero imports on purpose: the seq-ordering rule is a pure comparison,
 // testable and reusable with no query-client or fetch behind it.
 
 /**

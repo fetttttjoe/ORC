@@ -38,4 +38,4 @@ You are driving orc from outside, over its MCP tools. Ground every step in a too
 11. `retry` only works on a task that is `blocked`, and refuses when the block is a rejected
     verdict rather than a crash — the same siblings would fail the same way again. That refusal
     names the fix: `revise` the plan and get the new version approved, not retry. `cancel` is
-    terminal and sweeps the task's orphaned notes — confirm with the user before calling it.
+    terminal — confirm with the user before calling it.

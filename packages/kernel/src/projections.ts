@@ -1,14 +1,13 @@
 import { z } from 'zod'
 import {
   ArtifactProducedPayload, EVENT_KIND, FailureClass, FS_WRITE_TOOL_NAMES, OperationStatus, Plan,
-  RunOutcome, StepRunStatus, TASK_STATUS, TERMINAL_TASK_STATUS, TaskNode, TaskStatus, ZERO_USAGE, addUsage, runOutcomeFor,
+  RunOutcome, StepRunStatus, TASK_STATUS, TERMINAL_TASK_STATUS, TaskNode, TaskStatus, TaskType, ZERO_USAGE, addUsage, runOutcomeFor,
   normalizeRelPath,
   OperationCompletedPayload, OperationFailedPayload, OperationStartedPayload, ReactionFailedPayload,
-  WorkspaceArchivedPayload, WorkspaceCreatedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload,
+  ProjectIdentity, WorkspaceArchivedPayload, WorkspaceCreatedPayload, WorkspaceMergedPayload, WorkspaceRetitledPayload,
 } from '@orc/contracts'
 import type { EventRecord, OperationRecord, Usage, Workspace } from '@orc/contracts'
 import { applyArchived, applyRetitle } from './workspaces'
-import { GROUNDED_TASK_TYPE } from './execution/strategies/grounded-plan'
 
 export interface TaskPlans {
   versions: Plan[]
@@ -70,6 +69,7 @@ export interface State {
   // is what workspaceByCwd matches on, and that match must keep ignoring whether the branch landed
   // (a merged worktree is still the live directory its tasks run in until someone archives it).
   workspaceMerges: Map<string, WorkspaceMergedPayload>
+  project: ProjectIdentity | null
 }
 
 
@@ -175,7 +175,7 @@ export interface FoldAcc {
 }
 
 export const emptyFold = (): FoldAcc => ({
-  state: { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), stepUsage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map(), reactionFailures: new Map(), workspaces: new Map(), workspaceMerges: new Map() },
+  state: { tasks: new Map(), plans: new Map(), steps: new Map(), runs: new Map(), usage: new Map(), stepUsage: new Map(), splits: new Map(), operations: new Map(), artifacts: new Map(), reactionFailures: new Map(), workspaces: new Map(), workspaceMerges: new Map(), project: null },
   seen: new Set(),
 })
 
@@ -281,16 +281,6 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
       case EVENT_KIND.tool_call:
       case EVENT_KIND.tool_result:
       case EVENT_KIND.signal_received:
-      case EVENT_KIND.memory_written:
-      case EVENT_KIND.memory_deleted:
-      case EVENT_KIND.memory_accessed:
-      // reads derived knowledge (a topic listing or one topic's claims) — drives no task state,
-      // same as memory_accessed above
-      case EVENT_KIND.memory_topic_accessed:
-      // an auditor declaring a note checked — traceability, and the memory read model's own projection
-      case EVENT_KIND.memory_verified:
-      // an agent's self-reported use outcome — evidence for the memory read model, no task state
-      case EVENT_KIND.memory_outcome:
       case EVENT_KIND.knowledge_delivered:
       case EVENT_KIND.knowledge_written:
       case EVENT_KIND.knowledge_checked:
@@ -371,6 +361,11 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
       case EVENT_KIND.workspace_merged: {
         const p = View.workspace_merged.safeParse(e.payload)
         if (p.success) state.workspaceMerges.set(p.data.workspaceId, p.data)
+        break
+      }
+      case EVENT_KIND.project_identified: {
+        const p = ProjectIdentity.safeParse(e.payload)
+        if (p.success) state.project = p.data
         break
       }
       case EVENT_KIND.chat_opened:
@@ -543,12 +538,12 @@ export function knowledgeOwnerTaskIds(state: State, taskId: string): string[] {
   const parentId = state.tasks.get(taskId)?.parentId
   const parent = parentId ? state.tasks.get(parentId) : undefined
   const owned = subtreeTaskIds(state, taskId)
-  return parent?.type === GROUNDED_TASK_TYPE ? [...owned, parent.id] : owned
+  return parent?.type === TaskType.grounded ? [...owned, parent.id] : owned
 }
 
 // The chain ABOVE a task, nearest first (parent, grandparent, …, root); excludes the task itself.
 // One walk, because three callers had their own: the budget envelope, the CLI's root-of-tree lookup,
-// and the memory lanes a step may read from.
+// and the knowledge lanes a step may read from.
 export function ancestorTaskIds(state: State, taskId: string): string[] {
   const out: string[] = []
   for (let id = state.tasks.get(taskId)?.parentId ?? null; id !== null; id = state.tasks.get(id)?.parentId ?? null)

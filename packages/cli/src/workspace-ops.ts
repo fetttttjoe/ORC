@@ -179,8 +179,7 @@ export async function createRequestWorkspace(
     baseBranch: base,
     kind: WORKSPACE_KIND.worktree,
     managed: true,
-    // A freshly minted orc/<slug> branch is by construction not the trunk, so the notes written
-    // here stay provisional until this workspace merges.
+    // a freshly minted orc/<slug> branch is by construction not the trunk
     onTrunk: false,
   }, origin).catch((err: unknown) => { throw withNote(err, rollbackWorktree(cfg.projectRoot, dest, branch)) })
   if (!input.task) return { workspace, taskId: null, branch, base }

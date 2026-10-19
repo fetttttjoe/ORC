@@ -1,4 +1,4 @@
-// Zero imports on purpose — the cluster.ts shape: the debounce algorithm is pure over an injected
+// Zero imports on purpose: the debounce algorithm is pure over an injected
 // clock, so the 250ms window is pinned by a test that never waits 250ms.
 
 /** the two setTimeout primitives this file needs — injected so a test can fake time */

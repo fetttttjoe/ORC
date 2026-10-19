@@ -6,6 +6,7 @@
 // consumer because no interface mentioned them. A field can only reach a component by being parsed first.
 import type { z } from 'zod'
 import type * as S from './schemas'
+import type { KnowledgeHealth } from '@orc/contracts/health'
 import type { GraphNode as WireNode, GraphLink as WireLink, GraphPatch as WirePatch } from '@orc/ui-core/graph-wire'
 
 // Graph shapes come from ui-core's zero-import wire module: ONE declaration, so a field rename
@@ -28,19 +29,21 @@ export type { GraphNode, GraphLink, GraphPatch } from '@orc/ui-core/graph-wire'
  * that might catch it: `SameKeys` compares `keyof`, which counts optional keys, so a property on
  * one side and not the other is now an error.
  *
- * What each still owns: `Exact` catches a field whose TYPE diverges (heat as string, a widened
- * union of node types); `SameKeys` catches a field added or removed on either side. Neither can see
+ * What each still owns: `Exact` catches a field whose TYPE diverges (a widened union of node
+ * types); `SameKeys` catches a field added or removed on either side. Neither can see
  * a schema whose RUNTIME parse is narrower than the type it infers — `z.string().min(1)` and
  * `z.string()` both infer `string` — so a rejected-at-parse value stays a runtime concern.
  */
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never
 type SameKeys<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A] ? true : never) : never
+const _healthMatchesContract: Exact<z.infer<typeof S.Health>['knowledge'], KnowledgeHealth | null> = true
 const _nodeMatchesWire: Exact<z.infer<typeof S.GraphSnapshot>['nodes'][number], WireNode> = true
 const _linkMatchesWire: Exact<z.infer<typeof S.GraphSnapshot>['links'][number], WireLink> = true
 const _patchMatchesWire: Exact<NonNullable<z.infer<typeof S.Envelope>['patch']>, WirePatch> = true
 const _nodeKeysMatchWire: SameKeys<z.infer<typeof S.GraphSnapshot>['nodes'][number], WireNode> = true
 const _linkKeysMatchWire: SameKeys<z.infer<typeof S.GraphSnapshot>['links'][number], WireLink> = true
 const _patchKeysMatchWire: SameKeys<NonNullable<z.infer<typeof S.Envelope>['patch']>, WirePatch> = true
+void _healthMatchesContract
 void _nodeMatchesWire
 void _linkMatchesWire
 void _patchMatchesWire

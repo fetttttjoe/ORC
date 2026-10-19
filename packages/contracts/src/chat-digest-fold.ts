@@ -27,8 +27,8 @@ interface Acc {
   plans: string[]
   runs: string[]
   written: Set<string>
-  verified: Set<string>
-  deleted: Set<string>
+  checked: Set<string>
+  retired: Set<string>
   commits: string[]
   artifacts: string[]
   feedback: FeedbackEvent[]
@@ -38,7 +38,7 @@ interface Acc {
 
 const emptyAcc = (chatId: string): Acc => ({
   chatId, opened: null, lastSeq: 0, ends: [], asked: null,
-  tasks: [], plans: [], runs: [], written: new Set(), verified: new Set(), deleted: new Set(),
+  tasks: [], plans: [], runs: [], written: new Set(), checked: new Set(), retired: new Set(),
   commits: [], artifacts: [], feedback: [], usage: ZERO_USAGE, summary: null,
 })
 
@@ -86,7 +86,7 @@ const FIELDS: DigestFields = {
   outcome: (a) => ownEnd(a)?.to ?? null,
   asked: (a) => a.asked,
   caused: (a) => ({ tasks: a.tasks, plans: a.plans, runs: a.runs }),
-  notes: (a) => ({ written: [...a.written], verified: [...a.verified], deleted: [...a.deleted] }),
+  claims: (a) => ({ written: [...a.written], checked: [...a.checked], retired: [...a.retired] }),
   commits: (a) => a.commits,
   artifacts: (a) => a.artifacts,
   questions: (a) => ({ asked: askedKeys(a.feedback).size, open: openFeedbackTopics(a.feedback).size }),
@@ -131,19 +131,16 @@ function absorb(acc: Acc, event: EventRecord): void {
       if (p.success && acc.asked === null) acc.asked = p.data.user
       return
     }
-    case EVENT_KIND.memory_written: {
-      const p = PAYLOAD_SCHEMAS.memory_written.safeParse(event.payload)
-      if (p.success) acc.written.add(p.data.note.id)
+    case EVENT_KIND.knowledge_written: {
+      const p = PAYLOAD_SCHEMAS.knowledge_written.safeParse(event.payload)
+      if (!p.success) return
+      for (const ref of [...p.data.added, ...p.data.changed]) acc.written.add(ref.id)
+      for (const ref of p.data.retired) acc.retired.add(ref.id)
       return
     }
-    case EVENT_KIND.memory_verified: {
-      const p = PAYLOAD_SCHEMAS.memory_verified.safeParse(event.payload)
-      if (p.success) acc.verified.add(p.data.id)
-      return
-    }
-    case EVENT_KIND.memory_deleted: {
-      const p = PAYLOAD_SCHEMAS.memory_deleted.safeParse(event.payload)
-      if (p.success) acc.deleted.add(p.data.id)
+    case EVENT_KIND.knowledge_checked: {
+      const p = PAYLOAD_SCHEMAS.knowledge_checked.safeParse(event.payload)
+      if (p.success) acc.checked.add(p.data.id)
       return
     }
     case EVENT_KIND.commit_recorded: {
