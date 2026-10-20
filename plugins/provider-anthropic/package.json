@@ -6,9 +6,9 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.15",
+    "@ai-sdk/anthropic": "^4.0.84",
     "@orc/contracts": "workspace:*",
-    "ai": "^7.0.30",
-    "zod": "^4.4.3"
+    "ai": "^7.0.146",
+    "zod": "^4.6.7"
   }
 }

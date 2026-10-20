@@ -37,6 +37,10 @@ Carried beside the console:
   them. A call on one records `costUSD: null`, and the subtree budget counts null as 0
   (`Kernel.proposeSplit`), so such a run never draws down its budget. Price the models from the
   provider's published table, and refuse an unpriced model when a budget is set.
+- **Major dependency upgrades** — *open.* Every workspace is current within its semver ranges and
+  the tree audits clean with no overrides. Breaking majors wait: commander 15, vite 8 with
+  vite-plugin-svelte 7, the DBOS SDK 5, sigma 4, and TypeScript 7 for the web app (svelte-check
+  runs on 6). When: one at a time, each with its own gate run.
 - **Provider robustness** — *open.* A malformed Codex token surfaces as a raw `JSON.parse` error,
   and the openai plugin pins `client_version` (`plugins/provider-openai/src/options.ts`).
 

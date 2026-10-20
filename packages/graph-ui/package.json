@@ -10,14 +10,14 @@
   "dependencies": {
     "@orc/ui-core": "workspace:*",
     "@orc/contracts": "workspace:*",
-    "zod": "^4.4.3",
-    "ai": "^7.0.30"
+    "zod": "^4.6.7",
+    "ai": "^7.0.146"
   },
   "devDependencies": {
     "@orc/kernel": "workspace:*",
-    "@playwright/test": "^1.61.1"
+    "@playwright/test": "^1.64.1"
   },
   "scripts": {
-    "e2e": "bun run --cwd web build && bunx playwright test"
+    "e2e": "bun run --cwd web build && playwright test"
   }
 }

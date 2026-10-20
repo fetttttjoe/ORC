@@ -12,7 +12,7 @@
   "dependencies": {
     "@orc/contracts": "workspace:*",
     "@orc/kernel": "workspace:*",
-    "ai": "^7.0.30",
-    "zod": "^4.4.3"
+    "ai": "^7.0.146",
+    "zod": "^4.6.7"
   }
 }
