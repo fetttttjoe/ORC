@@ -9,10 +9,7 @@ import {
 
 interface ToolInfo { name: string; description: string; inputSchema: Record<string, unknown> }
 
-// literal env values pass through unchanged; a value starting with '$' resolves from the orc
-// process environment at spawn time — so secrets stay out of the committable config file and
-// only ever live in whatever already set them in orc's own env. Unset/empty parent vars are
-// dropped (container reality: `VAR=` is not a value), never passed through as the literal '$NAME'.
+// a '$NAME' value resolves from orc's env at spawn; unset or empty parent vars are dropped
 function resolveEnv(env: Record<string, string> | undefined, serverId: string): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(env ?? {})) {
@@ -35,13 +32,10 @@ export interface McpHub extends ToolSource {
   listTools(serverId: string): Promise<Array<{ name: string; description: string }>>
 }
 
-// T1 host: lazy spawn per server, cached client, tool list invalidated by list_changed,
-// close() kills children (SDK-verified <300ms). Trust is enforced HERE too, not only at
-// plan validation — a stale approved plan cannot spawn an untrusted server.
+// Trust is enforced here too: a stale approved plan cannot spawn an untrusted server
 export function createMcpHub(
   servers: Record<string, McpServerConfig>,
-  // predicate, not a startup snapshot: trust is re-evaluated at the moment a server is
-  // spawned, so a declaration that changed after launch can never ride an old grant
+  // a predicate, not a snapshot: trust is re-checked at every spawn
   isTrusted: (serverId: string, cfg: McpServerConfig) => boolean,
 ): McpHub {
   const clients = new Map<string, Client>()
@@ -49,8 +43,7 @@ export function createMcpHub(
   const toolCache = new Map<string, ToolInfo[]>()
 
   async function ensureClient(serverId: string): Promise<Client> {
-    // Without this, the per-call respawn would resurrect a server after shutdown and leak the
-    // process; resolve() clears the flag, so deliberate reuse still works.
+    // stops a per-call respawn from resurrecting a server after shutdown; resolve() clears it
     if (closed) throw new Error('MCP hub is closed')
     const cfg = servers[serverId]
     if (!cfg) throw new Error(`undeclared MCP server '${serverId}' (declare it in .orc/config.json mcpServers)`)
@@ -61,9 +54,7 @@ export function createMcpHub(
       command: cfg.command,
       args: cfg.args ?? [],
       env: { ...getDefaultEnvironment(), ...resolveEnv(cfg.env, serverId) }, // never full process.env (secrets)
-      // NOT piped into the error message: a third-party server's stderr is untrusted output that
-      // would land in the event log and the vault's log.md. Debuggability is not worth that —
-      // see index.test.ts's "without leaking stderr".
+      // stderr stays out of the error message: untrusted output would reach the event log
       stderr: 'ignore',
     })
     const client = new Client({ name: 'orc', version: '0.1.0' })
@@ -102,8 +93,7 @@ export function createMcpHub(
 
   return {
     async resolve(refs) {
-      // close() releases the servers; an explicit resolve is intent to use them again. The flag
-      // only stops a STALE tool handle from resurrecting a hub nobody asked to reopen.
+      // resolve is intent to reuse; the flag only stops a STALE tool handle reopening a closed hub
       closed = false
       const out: ResolvedTool[] = []
       const seen = new Set<string>()
@@ -122,12 +112,7 @@ export function createMcpHub(
           name,
           description: tool.description,
           inputSchema: tool.inputSchema,
-          // The client is fetched per CALL, never captured at resolve time. A step resolves its
-          // tools at the start and calls them minutes later; capturing meant a server that died in
-          // between left this closure holding a dead transport, so every later call returned
-          // "Not connected" — observed live on a research step's first web search. One respawn and
-          // retry turns that into a non-event; ensureClient re-checks the trust grant each time, so
-          // a respawn can never reach a server the operator has not declared and trusted.
+          // fetched per call: a server that died after resolve would leave a dead transport
           execute: async input => {
             const args = isRecord(input) ? input : {}
             let last: unknown

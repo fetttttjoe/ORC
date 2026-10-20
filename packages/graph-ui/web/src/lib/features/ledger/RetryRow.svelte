@@ -25,9 +25,7 @@
 </script>
 
 {#if session.canAct()}
-  <!-- The indent aligns this with the ledger's seq spine on a wide pane, but 132px of it left
-       ~150px for the sentence in a narrow one, wrapping "a step failed…" into four lines beside a
-       button. It is decoration, so it yields first: full width under lg, aligned above it. -->
+  <!-- The indent aligns with the seq spine on wide panes; decoration, so it yields on narrow -->
   <div class="flex flex-wrap items-center gap-2 border-b border-rust/25 bg-rust/5 px-3 py-2 lg:flex-nowrap lg:pl-33">
     <TaskChip {taskId} />
     <span class="min-w-0 grow text-row text-mist">a step failed — retry re-runs the failed steps as new attempts</span>

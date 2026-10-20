@@ -23,8 +23,7 @@ describe('report_coverage tool', () => {
     expect(must(tool, 'report_coverage tool').name).toBe('report_coverage')
     const r = await must(tool, 'report_coverage tool').execute({ analyzed: true, gaps: ['x'], claimsWritten: 99 })
     expect(r.isError).toBe(false)
-    // The scout's coverage belongs to the run's own chat, not to whoever asked for the run. The
-    // model's own claimsWritten (99) is DISCARDED — the count comes from the log, never the model.
+    // the model's claimsWritten (99) is DISCARDED: the count comes from the log
     expect(calls).toEqual([{
       ctx: { taskId: 't1', stepId: 'analyze', runToken: 'rt' },
       coverage: { analyzed: true, scope: [], gaps: ['x'], confidence: Confidence.none, claimsWritten: 2 },
@@ -32,9 +31,7 @@ describe('report_coverage tool', () => {
     }])
   })
 
-  // Registration gate, not an execute-time rejection: a visible always-erroring tool still gets
-  // called (a verify auditor burned an iteration per attempt on it) — so for any other role
-  // the tool must not exist at all.
+  // Registration gate: a visible always-erroring tool still gets called, so other roles lack it
   it('is not offered to a non-scout role', () => {
     const kernel = { reportCoverage: async () => { throw new Error('should not be called') }, ...fakeKnowledgeWrites() }
     expect(reportCoverageTool({ kernel, p: { ...scoutP, role: 'auditor' } })).toEqual([])

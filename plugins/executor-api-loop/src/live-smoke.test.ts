@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-// Live end-to-end against real providers. Run explicitly:
-//   ORC_LIVE_SMOKE=1 ANTHROPIC_API_KEY=... bun test plugins/executor-api-loop/src/live-smoke.test.ts
-//   ORC_LIVE_SMOKE=1 OLLAMA_MODEL=llama3 bun test plugins/executor-api-loop/src/live-smoke.test.ts
+// Live smoke, opt in: ORC_LIVE_SMOKE=1 with ANTHROPIC_API_KEY or OLLAMA_MODEL set
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'

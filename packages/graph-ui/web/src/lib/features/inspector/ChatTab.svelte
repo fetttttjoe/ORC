@@ -13,18 +13,12 @@
   import { operator } from '$lib/stores/operator.svelte'
   import { toolPreview } from './tool-preview'
 
-  /**
-   * The agent's transcript, scoped to one step when a step node is selected. Questions and
-   * signals render VERBATIM — a truncated question cannot be answered — and tool payloads are
-   * arbitrary JSON, so they are formatted, never interpolated (that printed "[object Object]").
-   */
+  // Transcript scoped to a step when one is selected; questions render VERBATIM, payloads formatted
   let { nodeId }: { nodeId: string } = $props()
 
   const taskId = $derived(taskIdOf(nodeId))
   const stepId = $derived(stepIdOf(nodeId))
-  // EVERY open question on this task, not just one — a task can be parked on two topics at once
-  // (see feedbackKey), and showing only the first silently hid the second from the one pane where
-  // a step-scoped question is answered.
+  // EVERY open question on the task: a task can be parked on two topics at once
   const gates = $derived(taskId === null ? [] : operator.questionsFor(taskId))
 
   const transcript = createQuery(viewQuery(VIEW.transcript, () => (taskId !== null ? { taskId, ...(stepId !== null && { stepId }) } : null)))
@@ -59,8 +53,7 @@
   </Empty.Root>
 {:else}
   <div class="flex flex-col gap-2 p-3">
-    <!-- keyed by position: the server returns a stable ordered list, and object identity changes
-         on every refetch (which re-rendered the whole transcript) -->
+    <!-- keyed by position: object identity changes on every refetch and re-rendered the transcript -->
     {#each items as item, i (i)}
       {#if item.kind === 'message'}
         <article class="rounded-(--radius-card) border border-line bg-bureau px-3 py-2">

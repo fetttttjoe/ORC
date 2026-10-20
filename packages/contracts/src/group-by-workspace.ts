@@ -1,7 +1,4 @@
-// Zero imports on purpose: the kernel groups TaskNodes, the copilot groups graph nodes and the
-// browser groups wire nodes — three element types, one rule. Two hand-written copies already
-// disagreed on what happens to an item whose workspace is unknown; this drops it, and the caller
-// that must show orphans asks for them separately (kernel `orphanTasks`).
+// zero imports; drops items with an unknown workspace; orphans are asked for apart
 export function groupByWorkspace<W extends { id: string }, T extends { workspaceId: string }>(
   workspaces: Iterable<W>,
   items: Iterable<T>,

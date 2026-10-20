@@ -10,8 +10,6 @@ import { CopilotFrameType, CopilotPart, Envelope, LogRows, VIEW, ViewEnvelope, v
 import { appendCopilotExchange } from './copilot-journal'
 import { startGraphUi } from './server'
 
-// the view route's URL comes from the wire's own builder — the format has one spelling, and this
-// file asserts against the same one the browser will build with
 const viewUrl = (base: string, project: string, name: string, params?: unknown): string =>
   base + viewPath(name, project, params)
 
@@ -19,12 +17,7 @@ const viewUrl = (base: string, project: string, name: string, params?: unknown):
 const PROJECT_SCOPE = { type: ScopeType.project }
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-// Everything setup() opens is torn down HERE, before its database is dropped, whether or not the
-// test remembered. startGraphUi holds an event stream AND a project watch, and a test that returned
-// early left both alive against a database afterAll then dropped: measured on CI, one leaked server
-// logged 116 reconnect failures into every LATER test file's output, burying the failures a reader
-// is scanning for. Ordered — servers and storage first, databases last — because the reverse is
-// exactly what produces the noise.
+// Close servers and storage before dropping databases; a leaked server floods later files
 const openServers: Array<{ stop: () => void | Promise<void> }> = []
 const openStores: Array<{ close: () => Promise<void> }> = []
 afterAll(async () => {
@@ -33,8 +26,6 @@ afterAll(async () => {
   await Promise.all(dbs.map(d => d.drop()))
 }, 30_000)
 
-// The origins this suite speaks as: the operator seeding through the terminal, and the supervisor
-// stamping what a running step produced.
 const CLI = NO_CHAT(Door.cli)
 const AGENT = NO_CHAT(Door.supervisor)
 
@@ -44,8 +35,6 @@ async function appendTask(storage: { events: EventLog }, title: string): Promise
   return { id, seq: (await storage.events.all()).at(-1)?.seq ?? 0 }
 }
 
-// Asserted subsets of the SSE stream contract (ui-core StreamEnvelope) — runtime-parsed
-// because the test reads raw frames; shapes are named here, never cast at a call site.
 const NodeRefView = z.object({ id: z.string() })
 const AddNodesPatch = z.object({ addNodes: z.array(NodeRefView) })
 const LiveEnvelope = z.object({ patch: AddNodesPatch, summary: z.object({ kind: z.string() }) })
@@ -55,16 +44,12 @@ const FailureEnvelope = z.object({
   summary: z.object({ kind: z.string(), failure: z.object({ toolName: z.string(), error: z.string() }) }),
 })
 
-// Asserted subsets of the JSON the web endpoints return — parsed at the read boundary so a
-// contract drift fails the parse here instead of a cast silently lying about the shape.
 const GraphView = z.object({ seq: z.number(), nodes: z.array(NodeRefView) })
 const NodeDetailView = z.object({ task: z.object({ title: z.string() }) })
 const SessionView = z.object({
   token: z.string(),
   actions: z.boolean(),
   copilot: z.boolean(),
-  // null when the server has no cwdProject (read-only / project-free boots) — a bare `string`
-  // cast here lied for every server started without one
   projectId: z.string().nullable(),
 })
 const ErrorView = z.object({ error: z.string() })
@@ -80,9 +65,6 @@ const chatIdOf = (body: string): string | null => {
 const ChatOpenedView = z.object({ chatId: z.string(), kind: z.string(), parent: z.null(), externalRef: z.null() })
 const ExchangeView = z.object({ workspaceId: z.string().nullable() })
 
-// A full OrcActions whose members throw unless overridden — the honest stub for route tests
-// that drive only a verb or two (the e2e/server.ts `unsupported` precedent). Every member is
-// present, so the value IS an OrcActions and needs no cast.
 const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not stubbed in this test`) }
 function stubActions(over: Partial<OrcActions>): OrcActions {
   return {
@@ -118,9 +100,6 @@ const ProjectsFrame = z.object({
   projects: z.array(z.object({ id: z.string(), name: z.string().nullable(), dir: z.string().nullable() })),
 })
 
-// read SSE messages off a live stream until the predicate matches (2s cap); `seen` observes
-// every frame on the way — for asserting an earlier frame and a later one on ONE stream
-// (a response body reader cannot be re-acquired after cancel)
 async function readSse(res: Response, until: (msg: { id: number; data: string }) => boolean, seen?: (msg: { id: number; data: string }) => void) {
   const reader = must(res.body, 'sse response body').getReader()
   const dec = new TextDecoder()
@@ -131,10 +110,7 @@ async function readSse(res: Response, until: (msg: { id: number; data: string })
       const { value, done } = await reader.read()
       if (done) break
       buf += dec.decode(value)
-      // Consume the complete blocks and KEEP only the partial tail. Re-splitting a growing buffer
-      // replayed every earlier frame on each read, which `seen` then reported two and three times:
-      // invisible to a `.some()`/`.find()` caller, fatal to one asserting the order frames arrived
-      // in.
+      // Keep only the partial tail: re-splitting a growing buffer replays earlier frames
       const blocks = buf.split('\n\n')
       buf = blocks.pop() ?? ''
       for (const block of blocks) {
@@ -152,11 +128,6 @@ async function readSse(res: Response, until: (msg: { id: number; data: string })
 }
 
 describe('graph-ui web adapter', () => {
-  // `project` is an untrusted query param on an UNAUTHENTICATED GET, and it reached sessionFor(),
-  // which caches a session permanently — a Postgres pool plus a dedicated LISTEN client — keyed by
-  // whatever string arrived. Every distinct value leaked one of each, from a request anyone on the
-  // machine could issue in a loop. Resolved against real projects now, so an unknown id is simply
-  // "no project" rather than an allocation.
   it('an unknown ?project= is treated as no project, not opened as a session', async () => {
     const { base } = await setup()
     const res = await fetch(`${base}/api/graph?project=00000000-0000-4000-8000-00000000dead`)
@@ -174,8 +145,6 @@ describe('graph-ui web adapter', () => {
     expect(g.nodes.map(n => n.id)).toContain(taskId)
     const d = ViewEnvelope(NodeDetailView).parse(await (await fetch(viewUrl(base, TEST_PROJECT_ID, VIEW.node, { id: taskId }))).json())
     expect(d.data.task.title).toBe('seed task')
-    // a node that does not exist is the view's own null, which the route answers 404 — not an
-    // empty body a pane would render as a node with no fields
     expect((await fetch(viewUrl(base, TEST_PROJECT_ID, VIEW.node, { id: 'nope' }))).status).toBe(404)
     expect((await fetch(`${base}/api/bogus`)).status).toBe(404)
     // DNS-rebinding defense: a request carrying a non-loopback Host is refused before routing
@@ -205,10 +174,6 @@ describe('graph-ui web adapter', () => {
     await ui.stop(); await storage.close()
   })
 
-  // A broken approval gate rejected eight consecutive "approve" answers and the pane showed none
-  // of it: the rejection was a tool_result, and the LogRow summary the pane consumes carries no
-  // isError flag, so the only surface that knew was the log. This adapter has the raw event —
-  // it lifts the failure onto the feed row so the pane can render the reason.
   it('a failed tool result rides the stream as a failure on the summary; a successful one does not', async () => {
     const { storage, taskId, ui, base } = await setup()
     const g = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
@@ -226,17 +191,11 @@ describe('graph-ui web adapter', () => {
     const env = FailureEnvelope.parse(JSON.parse(must(failed, 'failure envelope').data))
     expect(env.summary.kind).toBe(EVENT_KIND.tool_result)
     expect(env.summary.failure).toEqual({ toolName: 'finalize_plan', error: 'the plan graph changed since you approved' })
-    // the successful result streamed first and carried no failure — errors are the signal, not
-    // every tool result (the pane would drown)
     expect(frames.some(f => f.includes('plan frozen') && f.includes('"failure"'))).toBe(false)
 
     await ui.stop(); await storage.close()
   })
 
-  // The frame says what changed, not just that something did: the queries this event made stale,
-  // named by the registry that also answers the refetch. A client deciding that for itself needs a
-  // table of event kinds, and the one that lived in the browser disagreed with the server silently
-  // — a pane that simply stopped refreshing, with nothing to report.
   it('says what each event made stale, and pushes operator state only when it changed', async () => {
     const { storage, taskId, ui, base } = await setup()
     const g = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
@@ -256,18 +215,11 @@ describe('graph-ui web adapter', () => {
     expect(last).not.toBeNull()
 
     const asked = Envelope.parse(JSON.parse(must(frames.find(f => f.includes(EVENT_KIND.feedback_requested)), 'the ask frame')))
-    // the node the graph emitted for this task is stale — named by the registry, which is also
-    // what answers the refetch, so the two cannot disagree
     expect(asked.touched).toContainEqual({ name: VIEW.node, params: { id: taskId } })
     expect(asked.operator?.openQuestions.map(q => q.question)).toEqual(['approve this plan?'])
 
-    // …and the next event changed nothing an operator is waiting on, so the value is not resent:
-    // it changes on almost every append, and a full payload per event would ride the agent loop's
-    // cadence for a reading that did not move.
     const noise = Envelope.parse(JSON.parse(must(last, 'the tool-call frame').data))
     expect(noise.operator).toBeNull()
-    // the timeline is stale in the SCOPES this event belongs to, not everywhere: a chat pane reading
-    // another conversation holds a query no pattern here matches
     expect(noise.touched).toEqual([
       { name: VIEW.timeline, params: { scope: { type: ScopeType.project } } },
       { name: VIEW.timeline, params: { scope: { type: ScopeType.workspace, id: TEST_WORKSPACE_ID } } },
@@ -278,9 +230,6 @@ describe('graph-ui web adapter', () => {
     await ui.stop(); await storage.close()
   })
 
-  // The invalidation half of the chat scope: a pane holding one chat's transcript is refetched by
-  // that chat's traffic and by nothing else. A bare `[{}]` pattern put every pane on every other
-  // chat's cadence — the agent loop's, in a project with a run going.
   it('names the chat scope of the event that carries one, and never another chat held query', async () => {
     const { storage, taskId, ui, base } = await setup()
     const g = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
@@ -306,10 +255,6 @@ describe('graph-ui web adapter', () => {
     await ui.stop(); await storage.close()
   })
 
-  // Each frame answers for ITS OWN seq. The session hands the read model over with the notification
-  // rather than letting a subscriber fetch one back, so a frame cannot describe a state later than
-  // the event it announces — which is what a subscriber taking its own model across an await gets
-  // the moment anything lets a second event land first.
   it('carries the state as of each frame own seq, in seq order', async () => {
     const { storage, taskId, ui, base } = await setup()
     const g = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
@@ -330,18 +275,12 @@ describe('graph-ui web adapter', () => {
     const events = frames.filter(f => f.id > 0)
     expect(events.map(f => f.id)).toEqual([asked.seq, answered.seq])
 
-    // one open question as of the ASK, none as of the ANSWER — the pair is the whole point: a
-    // model taken late answers "none" for both, and the console never renders the gate at all
     expect(Envelope.parse(JSON.parse(must(events[0], 'the ask frame').data)).operator?.openQuestions).toHaveLength(1)
     expect(Envelope.parse(JSON.parse(must(events[1], 'the answer frame').data)).operator?.openQuestions).toHaveLength(0)
 
     await ui.stop(); await storage.close()
   })
 
-  // A reconnecting tab holds no operator state and is owed no event: a project where the last
-  // thing that happened was a question would otherwise read as idle until something else moved,
-  // and "idle" is the one state that tells an operator to look elsewhere. With nothing missed there
-  // is no frame to put it on, so it rides one of its own, id-less.
   it('tells a tab attaching AT the tip what is waiting on a human, on an id-less frame', async () => {
     const { storage, taskId, ui, base } = await setup()
     await storage.events.append({
@@ -353,8 +292,7 @@ describe('graph-ui web adapter', () => {
     const stream = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=${g.seq}`)
     const seed = await readSse(stream, m => m.data.includes('openQuestions'))
     expect(seed).not.toBeNull()
-    // state sync carries no SSE id: it describes no event, so it must never advance the client's
-    // Last-Event-ID resume cursor
+    // an id-less state sync must never advance the Last-Event-ID resume cursor
     expect(must(seed, 'operator seed').id).toBe(-1)
     const env = Envelope.parse(JSON.parse(must(seed, 'operator seed').data))
     expect(env.operator?.openQuestions.map(q => q.taskId)).toEqual([taskId])
@@ -362,10 +300,6 @@ describe('graph-ui web adapter', () => {
     await ui.stop(); await storage.close()
   })
 
-  // …but a tab attaching BEHIND the tip must get it on the catch-up frame, which has an id. An
-  // id-less frame is read against whatever Last-Event-ID the client still holds, and a client whose
-  // graph seq is ahead of that id treats the frame as a seq regression: it drops the payload and
-  // resyncs — on exactly the reconnect this value exists to serve.
   it('gives a tab attaching BEHIND the tip its operator state on the catch-up frame, not on an id-less one', async () => {
     const { storage, taskId, ui, base } = await setup()
     const before = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
@@ -375,8 +309,7 @@ describe('graph-ui web adapter', () => {
     })
     // a graph-visible event too, so the catch-up patch is non-empty and a catch-up frame exists
     const tip = await appendTask(storage, 'catch-up-task')
-    // the session absorbs appends over LISTEN/NOTIFY — attach only once it is at the tip, or the
-    // events arrive live and this tests the wrong path
+    // attach only once the session is at the tip, or this tests the live path
     for (let i = 0; i < 40; i++) {
       const g = GraphView.parse(await (await fetch(`${base}/api/graph?project=${TEST_PROJECT_ID}`)).json())
       if (g.seq >= tip.seq) break
@@ -400,8 +333,6 @@ describe('graph-ui web adapter', () => {
     const { storage, ui, base, url } = await setup()
     const stream = await fetch(`${base}/api/stream?project=${TEST_PROJECT_ID}&fromSeq=0`)
 
-    // a FOREIGN project's first event (CLI init elsewhere, a bench run, …) must push the new
-    // list to this already-open stream — the sidebar learns of chats this tab never touched
     const other = crypto.randomUUID()
     const foreign = await openStorage(url, { projectId: other })
     openStores.push(foreign)
@@ -480,9 +411,6 @@ describe('graph-ui web adapter', () => {
     expect(await healthOf(async () => { throw new Error('no checkout') })).toEqual({ knowledge: { state: KnowledgeHealthState.unavailable, reason: 'no checkout' } })
   })
 
-  // A click in the inspector comes from no copilot conversation, so /api/act stamps NO_CHAT — the
-  // route used to read a chatId out of whatever body arrived, attributing an operator's action to
-  // a chat nothing had said belonged to it.
   it('stamps an action with no chat even when its body carries one, and requires the budget key', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -505,8 +433,6 @@ describe('graph-ui web adapter', () => {
     const created = (await storage.events.all()).filter(e => e.kind === EVENT_KIND.task_created)
     expect(created.map(e => [e.chatId, e.door])).toEqual([[null, Door.web]])
 
-    // …and the ceiling is a required key, nullable value: an omitted one is refused rather than
-    // quietly turned into "no budget" behind the caller's back
     expect((await post({ title: 'no ceiling stated' })).status).toBe(400)
     await ui.stop(); await storage.close()
   })
@@ -543,9 +469,6 @@ describe('graph-ui web adapter', () => {
     expect(ErrorView.parse(await blocked.json()).error).toContain('home')
     expect(calls).toEqual([])
 
-    // …but answering an open question is a pure append, so it is dispatched INTO the foreign chat.
-    // The pane used to render the question and refuse to let the user answer it, sending them to a
-    // terminal for a row this server already had that project's log to write.
     expect((await post('reply', 'some-other-project', { taskId: 't1', text: 'yes' })).status).toBe(200)
 
     // home chat → dispatched; newProject/deleteProject allowed from ANY chat (project-free)
@@ -657,8 +580,6 @@ describe('graph-ui web adapter', () => {
     await ro.stop()
   })
 
-  // A copilot conversation IS a chat: the first exchange opens one, every later exchange echoes
-  // its id, and everything the exchange caused is stamped with it.
   it('copilot mints one chat: chat_opened + exchange together, an echoed id opens none, tools carry the chat', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -694,8 +615,6 @@ describe('graph-ui web adapter', () => {
         }
       },
     })
-    // the tool reaches the kernel through the action it was handed, so the origin the server built
-    // is stamped on a real task_created — asserted on the log, not on a spy
     const actions = stubActions({
       newTask: async (input, origin) => {
         const t = await kernel.createTask({ workspaceId: input.workspaceId ?? TEST_WORKSPACE_ID, title: input.title, spec: input.spec ?? '' }, origin)
@@ -741,10 +660,6 @@ describe('graph-ui web adapter', () => {
     await ui.stop(); await storage.close()
   }, 20_000)
 
-  // The id is published only once its chat is COMMITTED. Published from `finish` instead, the
-  // client adopted an id for an append that was skipped or threw, echoed it on every later turn,
-  // and the whole conversation lived in a chat with no chat_opened — which chatDigests drops, so
-  // it left the chats view for good.
   it('publishes the chat id only when the exchange was journaled', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -818,8 +733,6 @@ describe('graph-ui web adapter', () => {
     expect(chatIdOf(await ask(TEST_PROJECT_ID))).toBeNull()
     failing = false
 
-    // a foreign-project chat is read-only here: its record belongs to that project's own server,
-    // so nothing is journaled and nothing is published
     expect(chatIdOf(await ask(crypto.randomUUID()))).toBeNull()
     expect((await storage.events.all()).filter(e => e.kind === EVENT_KIND.chat_opened)).toHaveLength(1)
 
@@ -901,21 +814,14 @@ describe('graph-ui web adapter', () => {
     })
     const items = ViewEnvelope(TranscriptView).parse(await (await fetch(viewUrl(base, TEST_PROJECT_ID, VIEW.transcript, { taskId }))).json())
     expect(items.data.map(i => i.text)).toEqual(['transcript line'])
-    // a task nobody has planned has no plan — 404, where an empty versions list would read as a
-    // task whose plan was emptied
     expect((await fetch(viewUrl(base, TEST_PROJECT_ID, VIEW.plans, { taskId }))).status).toBe(404)
     expect(ViewEnvelope(z.array(z.unknown())).parse(await (await fetch(viewUrl(base, TEST_PROJECT_ID, VIEW.timeline, { scope: PROJECT_SCOPE, limit: 1 }))).json()).data).toHaveLength(1)
-    // a task scope answers REAL rows over HTTP, parsed as LogRows: the scope narrows the read
-    // server-side, so a pane never filters a whole-project tail itself
     const scoped = ViewEnvelope(LogRows).parse(await (await fetch(viewUrl(base, TEST_PROJECT_ID, VIEW.timeline, { scope: { type: ScopeType.task, id: taskId, subtree: false } }))).json())
     expect(scoped.data.map(r => r.kind)).toContain(EVENT_KIND.agent_call)
     expect(scoped.data.every(r => r.taskId === taskId)).toBe(true)
     await ui.stop(); await storage.close()
   })
 
-  // The filter is applied to the WHOLE log and the limit only afterwards. A read that sliced first
-  // would answer this with nothing at all and still return 200 — a rare kind buried under a long
-  // tail is exactly the row an operator goes looking for, so the content is pinned, not the status.
   it('answers a kind-filtered timeline out of a long tail, with the log tip as its seq', async () => {
     const { storage, taskId, ui, base } = await setup()
     const exchange = await storage.events.append({
@@ -937,15 +843,12 @@ describe('graph-ui web adapter', () => {
     const res = await fetch(viewUrl(base, TEST_PROJECT_ID, VIEW.timeline, { scope: PROJECT_SCOPE, kinds: [EVENT_KIND.copilot_exchange], limit: 20 }))
     expect(res.status).toBe(200)
     const env = ViewEnvelope(LogRows).parse(await res.json())
-    // the seq is the LOG TIP, not the matched row's: it is what a client orders its next refetch
-    // against, so it has to say how current the answer is, not how old the newest match is
     expect(env.seq).toBe(tip)
     expect(env.data).toHaveLength(1)
     expect(env.data[0]?.seq).toBe(exchange.seq)
     // the whole exchange rides the row — the chat pane rebuilds its bubbles from the log
     expect(env.data[0]?.exchange?.assistant).toBe('the seed task')
     await ui.stop(); await storage.close()
-    // 451 appends are 451 Postgres round trips even inside one transaction: 1.6s alone, and past
-    // bun's 5s default once this file runs beside the rest of the suite.
+    // 451 Postgres round trips: past bun's 5s default beside the rest of the suite
   }, 30_000)
 })

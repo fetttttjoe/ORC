@@ -7,14 +7,11 @@ import { feedbackKey, openFeedbackTopics, type FeedbackEvent } from './feedback-
 import type { Door } from './origin'
 import { TASK_STATUS, type TaskStatus } from './task'
 
-// The FOLD that derives a digest from the log alone. Nothing about a chat is stored except its
-// chat_opened: the end, the cost and everything it caused are derived here, so a chat cannot be
-// half-recorded by a client that died before writing its closing row.
+// everything but chat_opened is derived, so a dead client cannot half-record a chat
 
 interface Opened { payload: ChatOpenedPayload; door: Door; seq: number }
 
-// A status change that COULD be a chat's end. Which task it belongs to is decided in the field
-// table, not while folding: chat_opened may arrive after it, so the chat's own task is not yet known.
+// owner decided in the field table: chat_opened may arrive after it
 interface End { seq: number; taskId: string; to: TaskStatus }
 
 interface Acc {
@@ -42,8 +39,7 @@ const emptyAcc = (chatId: string): Acc => ({
   commits: [], artifacts: [], feedback: [], usage: ZERO_USAGE, summary: null,
 })
 
-// A chat that was opened. The fold accumulates every chatId it sees; only these become digests,
-// because a digest with no chat_opened could state neither its kind nor what it is about.
+// only opened chats become digests: without chat_opened neither kind nor subject is known
 interface Ready extends Acc { opened: Opened }
 
 const askedKeys = (events: ReadonlyArray<FeedbackEvent>): Set<string> => {
@@ -58,17 +54,14 @@ const askedKeys = (events: ReadonlyArray<FeedbackEvent>): Set<string> => {
 
 const isRun = (a: Ready): boolean => a.opened.payload.kind === ChatKind.run
 
-// A split child's status stamps are appended under the PARENT run's chat, so a change naming any
-// other task would report that task's status as this run's outcome.
+// a split child's status is appended under the parent run's chat; foreign tasks are not its end
 const ownEnd = (a: Ready): End | null => {
   const taskId = a.opened.payload.taskId
   if (!isRun(a) || taskId === null) return null
   return a.ends.filter((e) => e.taskId === taskId).at(-1) ?? null
 }
 
-// One folder per field, so a field added to ChatDigest and not folded fails the BUILD — the guard
-// DraftCoversTiers and FitterCoversNote exist for: a silently dropped field reads as "this chat
-// caused nothing", which is indistinguishable from the truth.
+// a field added to ChatDigest and not folded fails the build
 type DigestFields = { [K in keyof ChatDigest]: (a: Ready) => ChatDigest[K] }
 
 const FIELDS: DigestFields = {
@@ -94,8 +87,7 @@ const FIELDS: DigestFields = {
   summary: (a) => a.summary,
 }
 
-// Parsed rather than assembled: the table above proves every field was FOLDED, and this proves the
-// folded value is the shape the schema promises.
+// parsed, not assembled: proves the folded value has the shape the schema promises
 const build = (a: Ready): ChatDigest => {
   const folded = Object.entries(FIELDS).map(([key, fold]): [string, unknown] => [key, fold(a)])
   return ChatDigest.parse(Object.fromEntries(folded))
@@ -162,14 +154,7 @@ function absorb(acc: Acc, event: EventRecord): void {
   }
 }
 
-/**
- * Every opened chat in `events` (LOG ORDER), newest-opened first.
- *
- * One pass: a chat's own events may sit at LOWER seqs than its chat_opened — a copilot exchange and
- * the open that names it are appended together once the exchange ends — so nothing here may treat
- * chat_opened as a chat's first event, and a second pass would only re-read what the first saw.
- * Events with chatId null belong to no chat and are dropped.
- */
+// one pass: events may precede their chat_opened; chatId null belongs to no chat
 export function chatDigests(events: ReadonlyArray<EventRecord>): ChatDigest[] {
   const accs = new Map<string, Acc>()
   const accOf = (chatId: string): Acc => {

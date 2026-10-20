@@ -1,20 +1,14 @@
-// Shared test fixtures (import via '@orc/contracts/fixtures') — the single place a
-// PlanStep/Plan/EventRecord shape change has to touch across every package's tests.
+// shared test fixtures: one place for a PlanStep, Plan or EventRecord shape change
 import { z } from 'zod'
 import type { EventRecord } from './events'
 import { EventKind } from './event-kinds'
-import { AUTHOR_SOURCE, type MemoryAuthor } from './author'
+import { AUTHOR_SOURCE, type Author } from './author'
 import { Door, NO_CHAT } from './origin'
 import { IsolationTier, STRATEGY, type Plan, type PlanDraft, type PlanStep } from './plan'
 import type { PlanNote } from './plan-note'
 import { TASK_STATUS, TaskType, type TaskNode } from './task'
 
-// The ONE workspace id every test-side author and task literal names — the kernel's test-helpers
-// re-exports this exact binding and builds TEST_WORKSPACE (the seeded workspace_created) from it,
-// so the two can never disagree. It lives here rather than there because contracts is the bottom of
-// the dependency graph and its own tests need the id too, and here rather than once per test file
-// because MemoryAuthor.workspaceId is required on every author — a per-file copy would be twenty
-// spellings of one uuid. A uuid because Workspace.id is z.uuid(), not a readable 'test-ws'.
+// the one test workspace id; a uuid because Workspace.id is z.uuid(); kernel re-exports it
 export const TEST_WORKSPACE_ID = '00000000-0000-4000-8000-000000000002'
 
 export function planNoteFixture(over: Partial<PlanNote> = {}): PlanNote {
@@ -33,9 +27,8 @@ export function eventFixture(over: Partial<EventRecord> = {}): EventRecord {
   }
 }
 
-// One spelling of a test-side author: workspaceId and origin are both required, so a per-file
-// literal would be twenty copies to edit the next time provenance gains a key.
-export function authorFixture(over: Partial<MemoryAuthor> = {}): MemoryAuthor {
+// workspaceId and origin are required, so a per-file literal would be twenty edits
+export function authorFixture(over: Partial<Author> = {}): Author {
   return { source: AUTHOR_SOURCE.cli, workspaceId: TEST_WORKSPACE_ID, origin: NO_CHAT(Door.cli), ...over }
 }
 
@@ -65,16 +58,13 @@ export function taskFixture(over: Partial<TaskNode> = {}): TaskNode {
   }
 }
 
-// Test-only narrowing so `!` never appears in a test: a thrown, named error beats a silent
-// null/undefined slipping through into an assertion.
+// test-only narrowing so a test never needs a non-null assertion
 export const must = <T>(v: T | null | undefined, what: string): T => {
   if (v === null || v === undefined) throw new Error(`expected ${what}`)
   return v
 }
 
-// A tool result's `output` is `unknown` by contract (ToolResult carries no schema); a test reads it
-// through these instead of a cast, so a tool that returns the wrong shape fails the parse, not a
-// later property access.
+// reads a tool result's unknown output through a schema, not a cast
 const UnknownRecord = z.record(z.string(), z.unknown())
 export const recordOf = (v: unknown): Record<string, unknown> => UnknownRecord.parse(v)
 export const listOf = (v: unknown): unknown[] => z.array(z.unknown()).parse(v)

@@ -4,7 +4,7 @@ import { Usage } from './execution'
 import { Door } from './origin'
 import { TaskStatus } from './task'
 
-// One interaction's summary, a leaf the browser's wire holds: ./events would pull node:crypto in through ./knowledge.
+// a leaf the browser's wire holds: ./events would pull node:crypto in through ./knowledge
 
 export const ChatDigest = z.object({
   chatId: z.string().min(1),
@@ -12,15 +12,13 @@ export const ChatDigest = z.object({
   title: z.string(),
   workspaceId: z.string().min(1).nullable(),
   taskId: z.string().min(1).nullable(),
-  // the door of the chat_opened ENVELOPE, not of the events inside: a run chat opened by the
-  // supervisor can carry web and mcp events.
+  // the door of the chat_opened envelope, not of the events inside it
   door: z.enum(Door),
   parent: ChatRef.nullable(),
   externalRef: z.string().min(1).nullable(),
   openedSeq: z.number().int().nonnegative(),
   lastSeq: z.number().int().nonnegative(),
-  // Null for every kind but `run`: only a run has an end anyone can point at — a copilot chat is
-  // never closed, it just stops receiving events.
+  // null for every kind but run: a copilot chat is never closed, it just stops
   endedSeq: z.number().int().nonnegative().nullable(),
   outcome: z.enum(TaskStatus).nullable(),
   asked: z.string().nullable(),
@@ -41,8 +39,7 @@ export const ChatDigest = z.object({
     asked: z.number().int().nonnegative(),
     open: z.number().int().nonnegative(),
   }),
-  // this chat's events only — a parent that swallowed its children's cost would double-count the
-  // same tokens at every level of the tree
+  // this chat's events only: a parent that swallowed its children's cost would double-count
   usage: Usage,
   summary: z.string().nullable(),
 })

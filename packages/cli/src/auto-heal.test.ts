@@ -3,8 +3,7 @@ import { AutoHealMode, ClaimClass, ClaimState, FS_LIST_TOOL_NAME, KnowledgeToolN
 import { must } from '@orc/contracts/fixtures'
 import { AUTO_SWEEP_TITLE, createAutoHeal, SWEEP_LISTED_IDS, sweepPlanDraft, sweepSpec, type AutoHealDeps } from './auto-heal'
 
-// A hand-cranked scheduler: the debounce contract is about WHICH calls collapse, not wall-clock,
-// so the tests own the clock the way loop tests own their fake ports.
+// hand-cranked scheduler: the debounce contract is about which calls collapse, not wall-clock
 function fakeScheduler() {
   let pending: (() => void | Promise<void>) | null = null
   let cancels = 0

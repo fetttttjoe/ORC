@@ -20,8 +20,7 @@ async function exists(admin: pg.Client, name: string): Promise<boolean> {
   return (rowCount ?? 0) > 0
 }
 
-// one pg.Client serializes its queries; a Promise.all of several here just races them on the
-// same connection and pg logs a deprecation warning for it
+// one pg.Client serializes its queries: Promise.all races them and pg logs a deprecation
 async function existsAll(admin: pg.Client, names: readonly string[]): Promise<boolean[]> {
   const out: boolean[] = []
   for (const name of names) out.push(await exists(admin, name))

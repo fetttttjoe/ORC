@@ -14,18 +14,11 @@ import { createDbosPort, dbosSend, type DbosPort } from './dbos-port'
 // `orc` at a terminal: these calls belong to no chat, and the run opens its own.
 const CLI: Origin = NO_CHAT(Door.cli)
 
-// The continuation contract under test: the agent REPORTS `partial`, the runtime GRANTS.
-// Auto-continue while the round cap allows (no budget is configured here, so the cap is the only
-// brake); past it, the ask parks on the standing feedback gate and a human decides. Before this
-// existed, a partial-shaped ending was an agent_error whose retry forgot everything but the
-// workspace — test 1 is the discriminator (a partial run now ENDS DONE, it used to block).
+// The agent reports `partial`; the runtime grants within the round cap, then a human gate decides.
 
 // rounds each task should signal `partial` before succeeding — 0 means success immediately
 const partialsByTask = new Map<string, number>()
-// The step this file scripts: stepFixture's default id, and the only step whose rounds the
-// assertions below are about. The kernel appends a finish step to every root plan, and it runs
-// this same fake executor — so rounds are recorded per TASK+STEP, or the finish step's single
-// invocation would read as one more continuation round of this one.
+// Rounds are recorded per TASK+STEP: the kernel's finish step runs this same executor.
 const SCRIPTED_STEP = 's1'
 const roundsKey = (taskId: string, stepId: string): string => `${taskId}:${stepId}`
 // what each round's ctx.continuation looked like, in invocation order
@@ -49,14 +42,12 @@ function continuationFake(): AgentExecutor<unknown> {
         async () => { modelCalls.set(key, (modelCalls.get(key) ?? 0) + 1); return { round } },
         () => [],
       )
-      // the kernel-appended finish step is not what this file scripts: it succeeds on its first
-      // round, so the partial script stays a statement about the step under test alone
+      // the kernel-appended finish step succeeds in one round so the script is about the step under test
       const partials = ctx.step.id === FINISH_STEP_ID ? 0 : (partialsByTask.get(taskId) ?? 0)
       const outcome = round < partials ? SignalOutcome.partial : SignalOutcome.success
       const summary = `round ${round}: ${outcome === SignalOutcome.partial ? `did part ${round}, remaining after ${round}` : 'finished'}`
       const signal = { stepId: ctx.step.id, runToken: ctx.runToken, outcome, summary }
-      // the loop's own checkpoint naming (per-iteration, restarts each round) — the port must
-      // round-prefix it or round 1 replays round 0's recorded signal as its own
+      // the loop's checkpoint naming restarts each round; the port must round-prefix it
       await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
         { kind: EVENT_KIND.signal_received, payload: { stepId: ctx.step.id, runToken: ctx.runToken, signal } },
       ])
@@ -111,8 +102,7 @@ describe('partial-signal continuation', () => {
 
     const events = await kernel.eventsFor(t.id)
     expect(events.filter(e => e.kind === EVENT_KIND.feedback_requested)).toHaveLength(0)
-    // both rounds' signals are durable facts, and the step completed exactly once — counted for
-    // THIS step: the kernel's finish step runs after it and signals once on its own envelope
+    // counted for THIS step: the kernel's finish step signals once on its own envelope
     expect(events.filter(e => e.kind === EVENT_KIND.signal_received && e.stepId === SCRIPTED_STEP)).toHaveLength(2)
     expect(events.filter(e => e.kind === EVENT_KIND.step_completed && e.stepId === SCRIPTED_STEP)).toHaveLength(1)
     expect(events.filter(e => e.kind === EVENT_KIND.step_completed && e.stepId === FINISH_STEP_ID)).toHaveLength(1)

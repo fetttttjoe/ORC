@@ -11,8 +11,7 @@
   import { topoOrder } from './topo'
   import type { PlanStepView, WaveStep } from '$lib/api/types'
 
-  // The plan as a road: every step in execution order with what it runs on, what it waits for,
-  // and how it went. The waves view answers "what runs together"; this answers "what happens".
+  // Every step in execution order: what it runs on, what it waits for, how it went
   let { taskId, steps, states }: { taskId: string; steps: readonly PlanStepView[]; states: readonly WaveStep[] } = $props()
 
   const statusOf = $derived(new Map(states.map(s => [s.id, s.status])))

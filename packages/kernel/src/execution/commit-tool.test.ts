@@ -27,8 +27,7 @@ function repo(): string {
 const p: { taskId: string; stepId: string; role: string; runToken: string; origin: Origin } =
   { taskId: 't1', stepId: COMMIT_STEP_ID, role: STEP_ROLE.committer, runToken: 'rt1', origin: { chatId: 'run:t1:v1', door: Door.supervisor } }
 const UNSET = '<unset>'
-// A hook runs inside git's OWN process, so it is the only witness that the chat id reached git
-// rather than merely the tool's argv; the sentinel keeps an absent key distinct from an empty one.
+// A hook runs in git's own process, so it alone proves the chat id reached git, not just argv.
 function chatIdHook(dir: string): () => string {
   writeFileSync(path.join(dir, '.git', 'hooks', 'pre-commit'),
     `#!/bin/sh\nprintf %s "\${${ORC_CHAT_ID}-${UNSET}}" > chat-env.txt\n`, { mode: 0o755 })
@@ -136,9 +135,7 @@ describe('diff-first flow', () => {
 
 describe('git_commit', () => {
   it('refuses a message over two non-empty lines with the rule in the error', async () => {
-    // the operator's history rule: subject + at most one body line. A live committer wrote a
-    // three-line message whose body broke off mid-sentence (79303eb) — the cap makes the next
-    // one impossible instead of hoping the next agent writes better.
+    // the operator's history rule: subject plus at most one body line
     const dir = repo()
     const b = build(dir, { paths: ['a.ts'] })
     await b.tool('commit_preview').execute({})
@@ -294,9 +291,7 @@ describe('stillDrifted', () => {
 })
 
 
-// Cost carriage (fail-first before commit-tool.ts computed a usage field at all): the receipt
-// names a total for the task subtree via projections' subtreeUsage, the same read model the
-// per-step status line and the approval-door estimate draw from — never a hand-rolled shape.
+// the receipt names the task subtree's total via subtreeUsage, never a hand-rolled shape
 describe('usage in the receipt', () => {
   it('carries the task subtree\'s usage total, from the injected kernel.state()', async () => {
     const dir = repo()

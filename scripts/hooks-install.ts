@@ -1,33 +1,13 @@
-// Refresh the executable dispatchers in scripts/hooks/ from the logic files beside them.
-//
-// git execs a hook file DIRECTLY and only if it is executable, so the mode bit is load-bearing —
-// and it is the one thing an agent cannot produce (fs_write creates 0644 by design; granting it
-// more would let an agent plant an executable under .git/hooks and bypass the exec allowlist).
-// Splitting permission from behaviour is what makes hooks authorable: this script owns the
-// privileged half, and every hook's logic is a plain sibling file anyone can write.
-//
-// Idempotent, and safe to run any time — it only ever adds a dispatcher for a logic file that has
-// none, and re-asserts the mode on those it manages. Run it after adding a new hook NAME:
-//   bun run hooks:install
-// Pointing git at the directory stays a separate one-time step (CONTRIBUTING documents it):
-//   git config core.hooksPath scripts/hooks
+// Adds and chmods dispatchers for hook logic files; run `bun run hooks:install` after adding a hook
 import { chmodSync, copyFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 
 const HOOKS_DIR = path.join(import.meta.dir, 'hooks')
-// the dispatcher every hook name gets a copy of — itself a hook file, so it is the template too
+// the template copied per hook name; the mode bit is the part an agent cannot produce
 const TEMPLATE = path.join(HOOKS_DIR, 'commit-msg')
 const EXECUTABLE = 0o755
 
-/**
- * The hook names git will ever invoke. A WHITELIST, not a filename pattern: helpers live in this
- * directory too, and inferring names from extensions gave `post-commit-append.ts` and
- * `post-commit-paths.ts` dispatchers of their own on the first run of this script. It also means a
- * typo — `post-comit.sh` — gets no dispatcher and stays visibly dead rather than silently ignored.
- *
- * Client-side hooks only. Server-side ones (pre-receive, update, post-receive) never run from a
- * working clone, so shipping dispatchers for them would be noise.
- */
+/** A whitelist, not a filename pattern: a typo like `post-comit.sh` stays visibly dead */
 export const GIT_HOOK_NAMES: readonly string[] = [
   'applypatch-msg', 'pre-applypatch', 'post-applypatch',
   'pre-commit', 'pre-merge-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit',
@@ -51,8 +31,7 @@ if (import.meta.main) {
   let added = 0
   for (const name of names) {
     const dispatcher = path.join(HOOKS_DIR, name)
-    // never clobber content: a dispatcher already present is only re-chmodded, so a hand-edited one
-    // survives. Only the MODE is this script's business.
+    // never clobber: an existing dispatcher is only re-chmodded, so a hand-edited one survives
     let exists = true
     try { statSync(dispatcher) } catch { exists = false }
     if (!exists) { copyFileSync(TEMPLATE, dispatcher); added += 1 }

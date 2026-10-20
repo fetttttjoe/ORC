@@ -1,13 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { parseChangedPaths } from './post-commit-paths'
 
-/**
- * The PURE half of the post-commit hook: turns whatever a git plumbing command printed (e.g.
- * `git show --name-only --format= HEAD`, the same spelling commit-tool.ts's committedPaths
- * already uses) into a path list. No git process spawned here, no filesystem access — the hook
- * script owns capturing the raw text; this only owns parsing it, so it is testable with plain
- * strings.
- */
+/** The pure half of the post-commit hook: plumbing text in, path list out */
 describe('parseChangedPaths', () => {
   it('splits normal multi-line plumbing output into trimmed paths', () => {
     const raw = 'packages/kernel/src/index.ts\npackages/contracts/src/events.ts\nscripts/hooks/post-commit\n'

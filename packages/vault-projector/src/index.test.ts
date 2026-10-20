@@ -57,9 +57,6 @@ describe('createVaultProjector.renderAll', () => {
     const byTaskSpy = spyOn(log, 'byTask')
     await expect(projector.renderAll()).resolves.toBeUndefined()
 
-    // load-bearing: the `.filter(e => e.taskId)` guard in renderAll means byTask is called
-    // exactly once — for the real task — and never for the knowledge event's null taskId.
-    // Without the guard, byTask(null) would also be called and these would fail.
     expect(byTaskSpy).toHaveBeenCalledTimes(1)
     expect(byTaskSpy).toHaveBeenCalledWith(t.id)
 
@@ -111,9 +108,6 @@ describe('createVaultProjector.renderAll', () => {
 
     await Bun.sleep(120) // flush the 50ms debounce for both appended events
 
-    // load-bearing: the `if (!e.taskId) return` guard in the subscribe handler means
-    // byTask is never called for the knowledge event's null taskId. Without the guard,
-    // the debounced render for the null "task" would call byTask(null) and this would fail.
     for (const call of byTaskSpy.mock.calls) expect(call[0]).not.toBeNull()
     expect(byTaskSpy).toHaveBeenCalledWith(t.id)
 

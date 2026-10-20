@@ -19,8 +19,6 @@ describe('isApprovalAnswer', () => {
     expect(isApprovalAnswer('LGTM')).toBe(true)
   })
 
-  // The safety half. A substring match here would read a refusal as a go-ahead: finalize_plan
-  // force-auto-approves the split it derives, so a false accept executes a plan nobody approved.
   it('rejects refusals, hedges, and anything that merely CONTAINS an approval word', () => {
     for (const t of [
       'no', 'nope', 'reject', 'deny', 'not yet',

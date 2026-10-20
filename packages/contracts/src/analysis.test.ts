@@ -3,7 +3,7 @@ import { Confidence, CoverageReport, PlanAnnotatedPayload } from './analysis'
 import { PAYLOAD_SCHEMAS } from './events'
 import { authorFixture } from './fixtures'
 
-describe('M5b contracts', () => {
+describe('analysis contracts', () => {
   it('CoverageReport parses full + no-access shapes', () => {
     expect(CoverageReport.parse({ analyzed: true, scope: ['src'], gaps: [], confidence: Confidence.high, claimsWritten: 3 }).analyzed).toBe(true)
     expect(CoverageReport.parse({ analyzed: false }).confidence).toBe(Confidence.none) // defaults

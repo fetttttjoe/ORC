@@ -1,7 +1,6 @@
-// POST-SSE client for /api/copilot — the one streaming call; plain JSON fetches live in client.ts.
+// POST-SSE client for /api/copilot, the one streaming call; plain fetches live in client.ts
 import { authHeaders } from './client'
-// Wire contract: server.ts CopilotBody in, `data: <json CopilotPart>` events out. The body carries
-// projectId — the legacy page sent no x-orc-project header on this route, only on /api/actions.
+// Wire contract: server.ts CopilotBody in, `data: <json CopilotPart>` events out
 import { CopilotPart } from '@orc/ui-core/wire'
 import { MessageRole } from '@orc/contracts/chat'
 import { ApiError } from './client'
@@ -41,9 +40,7 @@ async function readSse(res: Response, onData: (data: string) => void): Promise<v
 /** Streams one exchange; resolves when the stream closes. The signal aborts mid-stream. */
 export async function copilotSend(opts: {
   project: string
-  // The conversation this turn belongs to (null opens one) and what it is ABOUT. All three are
-  // required-nullable, like CopilotBody: an omitted key reads as "opening a new chat", which is
-  // how a dropped id silently forks a live conversation.
+  // required-nullable like CopilotBody: an omitted chat id silently forks a live conversation
   chatId: string | null
   taskId: string | null
   workspaceId: string | null

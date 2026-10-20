@@ -18,9 +18,7 @@ import { buildPlugins } from './runtime'
 import { cli } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-// Unconditional teardown: a real plugin host and an MCP hub are process-scoped, and a bare
-// shutdown after the assertions is SKIPPED when one throws — which leaks the host into every later
-// test file in the process. Registered at creation, drained LIFO, before the databases go away.
+// registered teardown: a bare shutdown after the assertions is skipped when one throws
 const cleanup: Array<() => Promise<void> | void> = []
 afterAll(async () => {
   for (const c of cleanup.reverse()) await c()
@@ -28,8 +26,6 @@ afterAll(async () => {
 }, 30_000)
 afterEach(() => mock.restore())
 
-// A per-test Postgres log, a git checkout, the real plugin wiring, and a workspace seeded AT this
-// config's directory — the brief names "this checkout" by matching the directory it runs in.
 async function makeBriefCli() {
   const db = await createTestDb()
   dbs.push(db)
@@ -81,9 +77,7 @@ describe('orc brief', () => {
     expect(brief.decisions).toEqual({ shown: [], total: 0 })
   }, 30_000)
 
-  // A task outlives the archiving of its workspace; the brief still has to say where it lives.
-  // Pins the archived rows gatherBrief asks the listing for — without them the label is dropped
-  // and the task reads as one of this checkout's own.
+  // a task outlives the archiving of its workspace; the brief still has to say where it lives
   it('a task waiting in an archived workspace is still labelled with it', async () => {
     const { run, kernel } = await makeBriefCli()
     const old = await kernel.createWorkspace({ title: 'Old import', cwd: '/old-import', branch: 'orc/old-import', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false }, CLI)

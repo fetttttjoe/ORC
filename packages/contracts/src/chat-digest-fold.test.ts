@@ -54,8 +54,7 @@ describe('chatDigests — shape and ordering', () => {
 })
 
 describe('chatDigests — a copilot chat', () => {
-  // The open and the first exchange are appended together AFTER the exchange, so the chat's own
-  // tool events sit at lower seqs than its chat_opened.
+  // chat_opened lands after the exchange, so the chat's events sit at lower seqs
   const events: EventRecord[] = [
     eventFixture({ seq: 1, chatId: 'c1', door: Door.web, taskId: null, kind: EVENT_KIND.tool_call,
       payload: { stepId: 's', runToken: 'r', iteration: 1, toolCallId: 'x', toolName: 'task_create', input: {} } }),
@@ -133,8 +132,7 @@ describe('chatDigests — a run chat under a copilot parent', () => {
 })
 
 describe('chatDigests — a run chat whose split children stamp under it', () => {
-  // A split child's draft/awaiting_approval/approved stamps carry the PARENT run's chatId, and one
-  // of them lands after the parent's own end.
+  // a split child's status events carry the parent run's chatId; one lands after its end
   const events: EventRecord[] = [
     open(1, 'r1', ChatKind.run, { taskId: 't7' }, Door.supervisor),
     eventFixture({ seq: 2, chatId: 'r1', door: Door.supervisor, taskId: 't7', kind: EVENT_KIND.task_status_changed,

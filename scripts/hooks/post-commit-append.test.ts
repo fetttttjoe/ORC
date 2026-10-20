@@ -46,8 +46,7 @@ describe('post-commit append', () => {
     expect(hookOrigin({ [ORC_CHAT_ID]: '' })).toEqual({ chatId: null, door: Door.hook })
   })
 
-  // the hook must read the key the commit tool writes: spelling it here would let a rename in
-  // contracts pass while the hook silently stopped seeing the chat.
+  // spelled here, a contracts rename would pass while the hook stopped seeing the chat
   it('reads the chat from the env var contracts names', () => {
     expect(hookOrigin({ [ORC_CHAT_ID]: 'chat-9' })).toEqual({ chatId: 'chat-9', door: Door.hook })
   })

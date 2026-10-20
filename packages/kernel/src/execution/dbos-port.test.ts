@@ -21,27 +21,20 @@ import { createTestDb, fakeProvider, seedTestWorkspace, TEST_PROJECT_ID, TEST_WO
 import { appendRunInit, createDbosPort, runQueueOptions, type DbosPort } from './dbos-port'
 import { runOrigin } from './run-chat'
 
-// The door the supervisor's own test setup knocks on; the run's own events carry the run chat
-// instead, which is what the chat assertions in this file read.
+// The door the supervisor's test setup uses; the run's own events carry the run chat.
 const CLI: Origin = NO_CHAT(Door.cli)
 
-// One DBOS runtime per process: registerWorkflow throws on duplicate names, so the whole file
-// shares ONE port + DB. Per-task scripting isolates the scenarios (behavior keyed by taskId,
-// which the executor recovers from runToken = step:<taskId>:<stepId>:a<attempt>).
+// One DBOS runtime per process (registerWorkflow rejects duplicates): one port + DB, per-task
 const behaviors = new Map<string, Record<string, 'ok' | 'fail'>>()
 // tasks in this set run their model effect through ctx.operation and count executions
 const operationTasks = new Set<string>()
 const operationRuns = new Map<string, number>()
 // tasks here write `write` files into the workspace and declare `declare` in their signal
 const outputsByTask = new Map<string, { write: string[]; declare: string[] }>()
-// The spy below is keyed by TASK AND STEP: every root plan now ends with the kernel-appended
-// finish step, which drives this same fake executor, so a per-task counter would read its turn as
-// one more turn of the step under test (and its depOutputs would overwrite the scout's).
+// Keyed by TASK AND STEP: the kernel's finish step runs this same fake executor.
 const spyKey = (taskId: string, stepId: string): string => `${taskId}:${stepId}`
 const priorFailures = new Map<string, ExecutorContext<unknown>['priorFailure'] | null>()
-// Every step surface the port asked for, verbatim. The composition root builds an agent step's
-// MemoryAuthor out of exactly this object, so what it carries is the only evidence that a write
-// from a step is stamped with the workspace its TASK names rather than the supervisor's own cwd.
+// Every step surface the port asked for, verbatim; shows writes use the task's workspace.
 const stepToolsCalls: Array<{ taskId: string; stepId: string; workspaceId: string }> = []
 
 function fakeExecutor(): AgentExecutor<unknown> {
@@ -52,9 +45,7 @@ function fakeExecutor(): AgentExecutor<unknown> {
       const key = spyKey(taskId, ctx.step.id)
       priorFailures.set(key, ctx.priorFailure ?? null)
       const behavior = behaviors.get(taskId) ?? {}
-      // the journal and declared-output scripts are per-TASK and describe the step under test —
-      // the appended finish step journals no operation and declares no output of its own, or one
-      // script would be replayed twice and every count in those two tests would double
+      // journal and output scripts are per-TASK: the finish step journals nothing, or counts would double
       const scripted = ctx.step.id !== FINISH_STEP_ID
       if (scripted && operationTasks.has(taskId))
         await ctx.operation(
@@ -100,8 +91,7 @@ describe('DBOS execution port (integration)', () => {
   let teardown: () => Promise<void>
   let dbUrl: string
   let projectDir: string
-  // Interleaving seam: runs just before any log transaction opens, so a test can commit a
-  // competing write into a check-then-append window. Null except inside the test that arms it.
+  // Interleaving seam: runs before any log transaction opens; null except in the test that arms it.
   let beforeTransaction: (() => Promise<void>) | null = null
 
   beforeAll(async () => {
@@ -118,8 +108,7 @@ describe('DBOS execution port (integration)', () => {
     kernel = new Kernel(log)
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
-    // isolated dir: bare runs now default their workspace to config.dir — tests that write
-    // real files (declared outputs) must land in a scratch dir, never the actual repo
+    // isolated dir: tests that write real files must land in scratch, never the actual repo
     projectDir = mkdtempSync(path.join(tmpdir(), 'orc-project-'))
     const config = testConfig(db.url, { dir: projectDir })
     port = await createDbosPort({
@@ -132,8 +121,7 @@ describe('DBOS execution port (integration)', () => {
           return { name, body: `body of ${name}`, hash: `hash-${name}` }
         },
       },
-      // Records what the port offers a step and adds no tools — the surface every other test in
-      // this file sees is unchanged (a port without stepTools contributes nothing either).
+      // Records what the port offers a step and adds no tools, so other tests see the same surface.
       stepTools: p => { stepToolsCalls.push({ taskId: p.taskId, stepId: p.stepId, workspaceId: p.workspaceId }); return [] },
       tools: {
         close: async () => {},
@@ -160,8 +148,7 @@ describe('DBOS execution port (integration)', () => {
   }
 
   it('boots under the identity it was given, so DBOS recovery is scoped to that supervisor', async () => {
-    // DBOS.executorID is the SDK's own view — process.env.DBOS__VMID is read at module load,
-    // long before launch(), so asserting on the env var would pass while DBOS still used 'local'.
+    // DBOS.executorID is the SDK's own view; the env var is read at module load, before launch().
     expect(DBOS.executorID).toBe('supervisor-test')
     expect(port.executorId).toBe('supervisor-test')
   })
@@ -182,8 +169,7 @@ describe('DBOS execution port (integration)', () => {
     expect(kinds.indexOf(EVENT_KIND.run_started)).toBeLessThan(kinds.indexOf(EVENT_KIND.step_started))
   }, 15_000)
 
-  // A run IS a chat. Asserted on the committed log, not on the port's arguments: an event that
-  // named another chat (or lost its door) would split one run's transcript in two forever.
+  // A run IS a chat; asserted on the committed log, not on the port's arguments.
   it('a run is one chat: chat_opened once before run_started, and every event of the run carries the run id under the supervisor door', async () => {
     const t = await approvedTask()
     const handle = await port.startRun(t.id)
@@ -203,8 +189,7 @@ describe('DBOS execution port (integration)', () => {
     expect(inRun.filter(e => e.door !== Door.supervisor).map(stray)).toEqual([])
   }, 15_000)
 
-  // A retry gets a new workflow id, so it is a new interaction: folding both runs into one chat
-  // would make the transcript of the failed attempt and its repair indistinguishable.
+  // A retry gets a new workflow id, so it is a new chat.
   it('a retry opens a SECOND chat, named by the retry workflow id', async () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
     const t = await approvedTask(behavior)
@@ -222,12 +207,10 @@ describe('DBOS execution port (integration)', () => {
     expect(must(chats[1], 'retry chat id').endsWith(':r1')).toBe(true)
   }, 20_000)
 
-  // The one causation pointer a client never supplies: a split child is asked for by its parent's
-  // step, so its chat answers to the split_proposed on the PARENT's stream, by {chatId, seq}.
+  // A split child's chat answers to the split_proposed on the PARENT's stream, by {chatId, seq}.
   it("a split child's run chat names the parent run's split_proposed as its parent", async () => {
     const t = await approvedTask()
-    // a chatless split names no parent (runChatParent skips a split_proposed with a null chatId),
-    // so this split has to come from a real chat for the pointer to exist at all
+    // a chatless split names no parent, so this split must come from a real chat
     const splitterChatId = 'chat-split-parent'
     const splitter: Origin = { chatId: splitterChatId, door: Door.web }
     const split = await kernel.proposeSplit({
@@ -253,11 +236,9 @@ describe('DBOS execution port (integration)', () => {
     expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
     const seen = stepToolsCalls.filter(c => c.taskId === t.id)
     expect(seen.map(c => c.stepId).sort()).toEqual(['a', 'b', FINISH_STEP_ID])
-    // The value, not merely presence: the port reads it off the TaskNode it already folds for the
-    // spec, so a step that ran in a worktree cannot inherit whichever checkout booted the port.
+    // The value, not presence: a step run in a worktree must not inherit the booting checkout.
     for (const c of seen) expect(c.workspaceId).toBe(TEST_WORKSPACE_ID)
-    // 15s, this file's budget for a full run: the plan is two steps plus the kernel's appended
-    // finish step now, and bun's default 5s cut the run off mid-pipeline
+    // 15s: a full run is three steps and bun's default 5s cuts it off mid-pipeline
   }, 15_000)
 
   it('startRun is idempotent — second call attaches, no duplicate run_started', async () => {
@@ -269,10 +250,7 @@ describe('DBOS execution port (integration)', () => {
     expect(runs).toHaveLength(1)
   }, 15_000) // two steps plus the appended finish step no longer fit bun's default 5s
 
-  // runWorkflow returns RunOutcome.blocked as a NORMAL return, so DBOS marks the workflow SUCCESS
-  // and keeps its deterministic id. Re-running therefore re-attached to a FINISHED workflow and
-  // replayed its cached result: `orc run` on a blocked task was admitted at every door (blocked is
-  // drivable) and silently did nothing at all.
+  // A blocked run returns normally, so DBOS marks it SUCCESS: re-running must not re-attach to it.
   it('re-running a settled task starts a new run instead of replaying the finished one', async () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
     const t = await approvedTask(behavior)
@@ -314,29 +292,21 @@ describe('DBOS execution port (integration)', () => {
     expect(priorFailures.get(spyKey(t.id, 'a'))).toBeNull()
   }, 15_000)
 
-  // A run with no explicit cwd works on the project, never in an empty scratch dir —
-  // a verify auditor burned five attempts in workspaces where every fs_read of the repo was ENOENT.
+  // A run with no explicit cwd works on the project, never in an empty scratch dir
   it('a bare startRun records the project dir as its cwd', async () => {
     const t = await approvedTask()
     expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.done)
     expect((await kernel.state()).runs.get(t.id)?.at(-1)?.cwd).toBe(projectDir)
   }, 15_000)
 
-  // The blocking failure this repair path exists for: a plan froze a step whose zone entry could
-  // match no path, so the step could not write its own files, and the task settled blocked with a
-  // DEFECTIVE frozen plan. Retrying re-ran the same broken plan, and editPlan refused a blocked
-  // task — the only exit was cancelling the task and discarding the steps that had succeeded.
-  // Repair is now: edit while blocked → approve → `orc run` (port.startRun; port.retry stays
-  // blocked-only, so approved resumes through the run door). The run must pick up the REPAIRED
-  // version, not the one the blocked run froze, and must not re-run what already completed.
+  // Repair path: edit blocked, approve, `orc run` picks the REPAIRED version, re-runs nothing done
   it("a blocked task's plan can be edited and the repaired plan is what the resumed run uses", async () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
     const t = await approvedTask(behavior)
     expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.blocked)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked)
 
-    // the correction: same DAG, but step b now carries a marker the frozen v1 does not have, so
-    // the resumed step's own output proves WHICH version was instantiated
+    // same DAG, but b carries a marker the frozen v1 lacks, so its output proves WHICH version ran
     const repaired = await kernel.editPlan(t.id, draftFixture([
       stepFixture({ id: 'a', title: 'a', instructions: 'first' }),
       stepFixture({ id: 'b', title: 'b', instructions: 'second', dependsOn: ['a'], skillRefs: ['repaired-skill'] }),
@@ -359,9 +329,7 @@ describe('DBOS execution port (integration)', () => {
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
   }, 20_000)
 
-  // A retry must re-enter the world the run failed in. Inheritance skips null-cwd runs: histories
-  // from before the project-dir default carry bare retries (the history was exactly
-  // [repo, null, null, null]) that would poison plain last-run inheritance.
+  // A retry inherits the latest non-null cwd: null-cwd runs in history must not poison inheritance.
   it("retry without --cwd inherits the last run that HAD a cwd, over null-cwd history", async () => {
     const behavior: Record<string, 'ok' | 'fail'> = { a: 'ok', b: 'fail' }
     const t = await approvedTask(behavior)
@@ -382,17 +350,12 @@ describe('DBOS execution port (integration)', () => {
     expect(runs.map(r => r.cwd)).toEqual([shared, null, shared]) // inherited past the poison, not defaulted away
   }, 15_000)
 
-  // Containment: an uncaught error in the run workflow AFTER the task is 'running' must not
-  // strand it 'running' with a burned ERROR workflow — it settles 'blocked', the retryable state.
-  // Inject a throw into the finish path for all its retries, then let the contain transaction through.
+  // Containment: an uncaught run-workflow error after 'running' settles 'blocked', not stuck
   it('an uncaught run-workflow failure is contained: the task settles blocked, not stuck running', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture({ id: 'a', title: 'a', instructions: 'only' })]))
     let finishThrows = 0
     beforeTransaction = async () => {
-      // the LAST step's completion, which is the kernel's appended finish step: the injection has
-      // to land in the run workflow's finish path. Armed on the FIRST step_completed it fell on the
-      // finish STEP's own transactions instead — that step failed, the run settled blocked the
-      // ordinary way, and nothing propagated to the caller.
+      // the LAST step's completion is the finish step: the injection must land in the run's finish path
       if (!(await log.byTask(t.id)).some(e => e.kind === EVENT_KIND.step_completed && e.stepId === FINISH_STEP_ID)) return
       // fail every finish attempt (RETRY_POLICY = 4), then stop so the catch's contain append commits
       if (finishThrows < 4) { finishThrows++; throw new Error('PROBE: injected finish-path failure') }
@@ -408,14 +371,8 @@ describe('DBOS execution port (integration)', () => {
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked) // contained → retryable, not stuck running
   }, 30_000)
 
-  // §D#2: DBOS re-executes a step's fn() from scratch when a crash lands between the init
-  // checkpoint's own transaction committing and DBOS recording that step's output. Resume replays
-  // init's whole body, including this append — simulate it by calling appendRunInit twice with the
-  // same deterministic args + workflowId. The old code drafted the running-transition under a FIXED
-  // key with a `from` recomputed in a separate transaction, so the second run saw status already
-  // 'running' and redrafted {from:running} under the same key → idempotency_conflict, bricking the
-  // task. The in-transaction status re-check makes the second call a clean no-op instead.
-  it('D2: re-running init (the resume replay window) is a no-op, not an idempotency conflict', async () => {
+  // A resumed init re-runs its body: appendRunInit twice with the same args must be a no-op.
+  it('re-running init (the resume replay window) is a no-op, not an idempotency conflict', async () => {
     const t = await approvedTask()
     const workflowId = `run:${t.id}:v1`
     const args = { taskId: t.id, planVersion: 1, retryIndex: 0, cwd: null, origin: runOrigin(workflowId) }
@@ -423,8 +380,7 @@ describe('DBOS execution port (integration)', () => {
     await log.transaction(tx => appendRunInit(tx, args, workflowId)) // = DBOS replaying init fn() — must not throw
     const events = await kernel.eventsFor(t.id)
     expect(events.filter(e => e.kind === EVENT_KIND.run_started)).toHaveLength(1)
-    // the replay must not re-open the run's chat: chat_opened is keyed by the chat id, so the
-    // second init finds its open committed and appends nothing
+    // the replay must not re-open the run's chat: chat_opened is keyed by the chat id
     expect(events.filter(e => e.kind === EVENT_KIND.chat_opened)).toHaveLength(1)
     const toStatus = z.object({ to: z.string() })
     const running = events.filter(e => e.kind === EVENT_KIND.task_status_changed && toStatus.parse(e.payload).to === TASK_STATUS.running)
@@ -504,28 +460,13 @@ describe('DBOS execution port (integration)', () => {
     expect((await kernel.eventsFor(t.id)).length).toBe(before)
   }, 15_000) // two steps plus the appended finish step no longer fit bun's default 5s
 
-  // The cancel/finish race, driven rather than argued. The run's terminal append is the only
-  // write that can land on top of a cancellation: fold is last-seq-wins with no `from` check
-  // (projections.ts), so whichever status is appended last wins outright.
-  //
-  // The seam is `log.transaction` itself. `beforeTransaction` fires immediately BEFORE the
-  // finish path opens its transaction — chosen because it is the one window that reproduces the
-  // defect under BOTH shapes of the code. The original wrote the status check and the append as
-  // two transactions (read in `fn()`, append from `toEvents` via makeCheckpoint), so a cancel
-  // here lands after that read and gets overwritten by running→done. The current code does the
-  // re-check and the append in one locked transaction, so the same cancel commits first and the
-  // re-check sees it. Same injection, opposite outcome — which is what makes this a test and
-  // not a restatement.
-  //
-  // Armed only once `step_completed` is committed, so the injected cancel cannot land mid-run,
-  // where the old code's read would have caught it anyway and the test would pass vacuously.
+  // The cancel/finish race, driven: a cancel before the finish append must not be overwritten.
   it('a cancel landing at the finish append is not overwritten by running→done', async () => {
     const t = await approvedTask({}, draftFixture([stepFixture({ id: 'a', title: 'a', instructions: 'only' })]))
     let injected = false
     beforeTransaction = async () => {
       if (injected) return
-      // the LAST step's completion (the kernel's appended finish step), so the cancel still lands
-      // at the run's finish append and not one whole step before it
+      // the LAST step's completion (the finish step), so the cancel lands at the run's finish append
       if (!(await log.byTask(t.id)).some(e => e.kind === EVENT_KIND.step_completed && e.stepId === FINISH_STEP_ID)) return
       injected = true // set BEFORE the append: log.append re-enters this same hook
       await log.append({
@@ -534,12 +475,7 @@ describe('DBOS execution port (integration)', () => {
       })
     }
     try {
-      // the live router cancels the run's DBOS workflow on ANY cancelled
-      // status, not only ones cancelRun itself produced. That reaction races this run's own
-      // finish step for real, so DBOS may now refuse to record the run's success outcome —
-      // a DBOSWorkflowCancelledError here is the correct new result of that race, and orthogonal
-      // to what this test protects (asserted below: the event log never records a stale 'done'
-      // behind the injected cancel).
+      // a DBOSWorkflowCancelledError is a valid outcome: the live router cancels the workflow too
       await (await port.startRun(t.id)).wait().catch(err => {
         if (!(err instanceof DBOSError.DBOSWorkflowCancelledError)) throw err
       })
@@ -547,8 +483,7 @@ describe('DBOS execution port (integration)', () => {
       beforeTransaction = null
     }
 
-    // guards the test itself: if the hook never armed, the assertion below would pass for the
-    // wrong reason (a task that was simply never cancelled)
+    // guards the test itself: an unarmed hook would pass for the wrong reason
     expect(injected).toBe(true)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.cancelled)
     // and the run did not append a competing terminal status behind it
@@ -564,8 +499,7 @@ describe('DBOS execution port (integration)', () => {
     expect(await (await port.startRun(t.id)).wait()).toBe(RunOutcome.blocked)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.blocked)
 
-    // manual (default) policy parks the child at awaiting_approval — it never gets a run,
-    // so the router never touches it and this setup is race-free against the live router.
+    // manual policy parks the child at awaiting_approval, so setup is race-free against the router
     const split = await kernel.proposeSplit({
       parentTaskId: t.id, stepId: 's1', runToken: `step:${t.id}:s1:a1`, toolCallId: 'call_1',
       title: 'child', spec: 'child work',
@@ -578,14 +512,13 @@ describe('DBOS execution port (integration)', () => {
 
     await port.cancelRun(t.id, CLI)
 
-    // the canceller's door, not the port's: cancelRun stamps the origin it was handed.
+    // the canceller's door, not the port's: cancelRun records the origin it was handed.
     const cancelled = (await kernel.eventsFor(split.childTaskId)).filter(e => e.kind === EVENT_KIND.task_status_changed)
     expect(cancelled.at(-1)?.door).toBe(Door.cli)
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.cancelled)
     expect((await kernel.getTask(split.childTaskId))?.status).toBe(TASK_STATUS.cancelled)
 
-    // the router (live in this harness) resolves the still-pending split off the cancelled
-    // child's terminal status — split_resolved lands on the PARENT (split.taskId = parentTaskId)
+    // the router resolves the pending split off the cancelled child; split_resolved lands on the PARENT
     expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.split_resolved))).toBe(true)
     const resolved = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.split_resolved)
     expect(PAYLOAD_SCHEMAS.split_resolved.parse(must(resolved, 'split resolved event').payload).outcome).toBe(RunOutcome.cancelled)
@@ -604,8 +537,7 @@ describe('DBOS execution port (integration)', () => {
     const handle = await port.startRun(t.id)
     expect(await handle.wait()).toBe(RunOutcome.done)
     const events = await kernel.eventsFor(t.id)
-    // per step: the kernel's finish step force-loads its own role skill, and counting both here
-    // would say nothing about whether THIS step's declared skill was loaded
+    // per step: the finish step force-loads its own role skill, which would blur THIS step's count
     const loaded = events.filter(e => e.kind === EVENT_KIND.skill_loaded && e.stepId === 's1')
     expect(loaded).toHaveLength(1)
     expect(events.filter(e => e.kind === EVENT_KIND.skill_loaded && e.stepId === FINISH_STEP_ID)).toHaveLength(1)
@@ -642,12 +574,9 @@ describe('DBOS execution port (integration)', () => {
     expect(events.filter(e => e.kind === EVENT_KIND.agent_call)).toHaveLength(0)
   })
 
-  it('a pre-M3 plan with no toolRefs in the log replays to done (no TypeError on undefined.length)', async () => {
+  it('a workflow input whose step has no toolRefs replays to done (no TypeError on undefined.length)', async () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'legacy plan', spec: 'x' }, CLI)
-    // Kernel.proposePlan and even a direct EventLog.append re-parse payloads through the Plan
-    // zod schema, which would restore toolRefs via its .default([]) — masking the bug. The only
-    // honest way to reproduce a row that predates the field is to write it straight into the
-    // events table, bypassing that parse, exactly like a pre-M3 row already sitting in the log.
+    // write straight into the events table: a re-parse would restore toolRefs via .default([])
     const draft = draftFixture([stepFixture()])
     const legacyStep: Record<string, unknown> = { ...stepFixture() }
     delete legacyStep.toolRefs
@@ -674,9 +603,7 @@ describe('DBOS execution port (integration)', () => {
 })
 
 describe('runQueueOptions', () => {
-  // The regression this pins is two call sites deciding independently: startChildRun queued a child
-  // on runs:<depth> while startRunAt (subtree follow, `orc run <childId>`, retry) passed no queue,
-  // so the same run escaped the depth concurrency cap depending on who started it.
+  // startChildRun and startRunAt must agree on the queue, or a run escapes the depth concurrency cap
   it('leaves a root run unqueued and puts every deeper run on its depth queue', () => {
     expect(runQueueOptions(0)).toEqual({})            // runs:0 is never registered
     expect(runQueueOptions(1)).toEqual({ queueName: 'runs:1' })

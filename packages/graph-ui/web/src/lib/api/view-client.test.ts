@@ -7,10 +7,6 @@ import { allViewsKey, fetchView, healthKey, touchKey, viewKey } from './view-cli
 
 const isStale = (qc: QueryClient, k: readonly unknown[]): boolean | undefined => qc.getQueryState(k as unknown[])?.isInvalidated
 
-// Pins whether TanStack's default partial-key matching invalidates a touch pattern against every
-// held query whose params CONTAIN it, and no other. If this holds, touchKey can reuse viewKey's
-// own shape with the touch's pattern params in place of a full param object — no predicate, no
-// second matcher.
 describe('touchKey / viewKey — partial matching', () => {
   it('a touch pattern invalidates every held query whose params contain it, and no other', async () => {
     const qc = new QueryClient()
@@ -25,17 +21,12 @@ describe('touchKey / viewKey — partial matching', () => {
     expect(isStale(qc, viewKey('p', VIEW.node, { id: 'a' }))).toBe(true)
     expect(isStale(qc, viewKey('p', VIEW.node, { id: 'b' }))).toBe(false)
 
-    // a scope pattern matches NESTED-partially: the chat it names goes stale, the other chat's
-    // pane does not — which is what keeps every chat pane off every other chat's cadence
     await qc.invalidateQueries({ queryKey: touchKey('p', { name: VIEW.timeline, params: { scope: { type: ScopeType.chat, id: 'c1' } } }) })
     expect(isStale(qc, viewKey('p', VIEW.timeline, held))).toBe(true)
     expect(isStale(qc, viewKey('p', VIEW.timeline, { scope: { type: ScopeType.chat, id: 'c2' }, limit: 5 }))).toBe(false)
   })
 })
 
-// A seq regression/log reset (App.svelte's loadProject) resyncs the graph and ledger from a fresh
-// snapshot but ships no touches — nothing else invalidates a view answered from before the reset,
-// so the whole namespace has to drop in one call rather than one key per open pane.
 describe('allViewsKey', () => {
   it('invalidates every held view AND touchable query, of any name/project/params', async () => {
     const qc = new QueryClient()

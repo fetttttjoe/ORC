@@ -1,9 +1,7 @@
 import type { HookHandlers, HookName } from '@orc/contracts'
 import { errorMessage } from '@orc/contracts'
 
-// Observe-only hook bus (spec D6): handlers see, never veto. Errors are contained —
-// a broken extension must not take down an append or a run. Under DBOS at-least-once
-// steps a handler can fire twice across a crash boundary; handlers must tolerate that.
+// observe-only: handlers see, never veto; errors are contained; a handler may fire twice
 export class HookBus {
   private handlers = new Map<HookName, Array<(...args: never[]) => unknown>>()
   private pending = new Set<Promise<void>>()

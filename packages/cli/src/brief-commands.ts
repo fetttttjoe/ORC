@@ -7,18 +7,15 @@ import { gatherBrief } from './brief-gather'
 import { NO_PROJECT_ERROR } from './exit'
 import { WS_SUBCOMMAND } from './ws-commands'
 
-// The `orc brief` command surface: commander option parsing and what a terminal prints, nothing
-// else. What the brief SAYS is brief.ts; where it reads from is brief-gather.ts.
+// parsing and printing only: brief.ts decides what it says, brief-gather.ts reads
 
 export const BRIEF_COMMAND = 'brief'
 
-// The commands the text sends a reader to, from the constants the commands themselves are
-// registered under — a renamed subcommand then changes the brief in the same edit.
+// built from the registered subcommand constants: a rename changes the brief in the same edit
 const HINTS = { workspaces: `orc ws ${WS_SUBCOMMAND.ls}`, decisions: `orc adr ${ADR_SUBCOMMAND.ls}` } as const
 
 export function briefCommand(deps: {
-  // ONE optional dep (wsCommand's rule): the brief reads the log and the read model the config
-  // names, and two independently optional fields would let a caller wire half a project.
+  // ONE optional dep: two optional fields would let a caller wire half a project
   project?: { config: ProjectConfig; log: EventLog }
   noProject?: (message: string) => unknown
 }): Command {

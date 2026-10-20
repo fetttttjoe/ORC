@@ -1,14 +1,9 @@
-export const MEMORY_ID_RE = /^[a-z0-9][a-z0-9-]*$/
+export const SLUG_ID_RE = /^[a-z0-9][a-z0-9-]*$/
 
-// The one spelling of a sha256-hex digest. It was spelled inline at three sites (artifact
-// receipts, plan hashes, kernel trust fingerprints) — a widened or typo'd copy would admit
-// digests the other two reject.
+// the one spelling of a sha256-hex digest, shared by receipts, plan hashes and fingerprints
 export const SHA256_HEX_RE = /^[a-f0-9]{64}$/
 
-// Trim one repeated character off both ends by index. The regex this replaces (`/^-+|-+$/`) was
-// linear ONLY because the collapse below guarantees no repeated dashes — an invariant neither a
-// reader nor a scanner can see, and one an innocent edit could turn into quadratic backtracking on
-// a hostile title. Indexing carries no such footgun.
+// trims by index: a regex is linear only while the collapse guarantees no repeated dashes
 export function trimEdges(value: string, ch: string): string {
   let start = 0
   let end = value.length
@@ -17,11 +12,11 @@ export function trimEdges(value: string, ch: string): string {
   return value.slice(start, end)
 }
 
-// Deterministic MEMORY_ID_RE-safe id from a human title.
+// Deterministic SLUG_ID_RE-safe id from a human title.
 export function slugId(title: string): string {
   const collapsed = title.toLowerCase().replace(/[^a-z0-9]+/g, '-') // one pass, no backtracking
   const s = trimEdges(trimEdges(collapsed, '-').slice(0, 64), '-')
-  if (!MEMORY_ID_RE.test(s))
+  if (!SLUG_ID_RE.test(s))
     throw new Error(`cannot derive an id from '${title}' — use latin letters or digits`)
   return s
 }

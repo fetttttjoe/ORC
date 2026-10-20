@@ -14,18 +14,12 @@
   import { stepNodeId, taskIdOf } from '$lib/node-id'
   import { fmtBytes, fmtCost, fmtTokens } from './node-head'
 
-  // One typed view per node kind. The node view answers a DISCRIMINATED union (`NodeDetail.type`),
-  // parsed ONCE by fetchView against the wire's own schema, so a per-kind parse here would be a
-  // second parse of an answer the view client already validated. A shape the client and server
-  // disagree about fails loudly at the fetch layer, as an ApiError toast naming the field — never
-  // silently, as an unlabelled dump of whatever the response happened to contain.
+  // One typed view per node kind: fetchView already parsed the discriminated union once
   let { nodeId }: { nodeId: string } = $props()
 
   const detail = createQuery(viewQuery(VIEW.node, () => ({ id: nodeId })))
 
-  // A NodeDetail kind added to the wire's discriminated union with no branch below reaches the
-  // terminal `{:else}` still narrowed to something other than `never` — this fails the BUILD at
-  // that call, rather than rendering a blank pane the operator has no way to explain.
+  // A NodeDetail kind with no branch below fails the build here instead of a blank pane
   function assertNever(kind: never): never {
     throw new Error(`DetailTab: unhandled node kind ${JSON.stringify(kind)}`)
   }
@@ -44,9 +38,7 @@
     </Empty.Header>
   </Empty.Root>
 {:else}
-  <!-- captured ONCE: `detail.data` is a getter on the query result, so narrowing it via `.type`
-       inline at each `{:else if}` does not carry across a separate `{@const}` read of the same
-       getter — binding it to a plain local here is what lets `d.type` narrow `d` below. -->
+  <!-- captured ONCE: narrowing detail.data inline does not carry across a separate @const read -->
   {@const d = detail.data}
   {#if d.type === NODE_KIND.task}
     {@const t = d}

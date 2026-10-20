@@ -1,7 +1,7 @@
 export enum ClaimState { clean = 'clean', suspect = 'suspect', unknown = 'unknown', unanchored = 'unanchored' }
 
 export const CLAIM_STATES_BY_TRUST = [ClaimState.clean, ClaimState.unanchored, ClaimState.unknown, ClaimState.suspect] as const
-// a state added to the enum but forgotten here is a compile error, not a claim silently dropped by an ordering
+// a state missing from the ordering is a compile error, not a silently dropped claim
 type OrderCoversStates = Exclude<ClaimState, (typeof CLAIM_STATES_BY_TRUST)[number]> extends never ? true : never
 const orderCoversStates: OrderCoversStates = true
 void orderCoversStates

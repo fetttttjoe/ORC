@@ -1,10 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { listOpenAIModels } from './index'
 
-// listModels contract (packages/contracts/src/execution.ts): REJECT when the API cannot answer;
-// [] is reserved for "answered, nothing usable". openai ships no static cost table, so a
-// swallowed blip here read as reachable-and-empty and discovery's append-on-change recorded
-// models: [] over the real catalog — the exact failure the ollama flip (2026-08-03) exists to kill.
+// listModels rejects when the API cannot answer; [] means answered with nothing usable
 describe('listOpenAIModels', () => {
   const saved: Record<string, string | undefined> = {}
   beforeEach(() => {

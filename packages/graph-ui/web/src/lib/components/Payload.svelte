@@ -3,11 +3,7 @@
   import type { Temperature } from '$lib/temperature'
   import { TEMP_BORDER, TEMP_TEXT } from '$lib/temperature'
 
-  /**
-   * A tool's JSON in and out. Sunken against the surface it sits on and marked with a temperature
-   * rail so the RESULT reads as the answer rather than as more of the same grey — an operator
-   * scanning a transcript is looking for what came back, not what went in.
-   */
+  // Tool JSON sunken, with a temperature rail so the result reads as the answer
   let {
     label,
     value,

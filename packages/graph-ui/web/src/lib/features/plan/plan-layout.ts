@@ -2,14 +2,7 @@ import { stepRanks, type LayerableStep } from '@orc/contracts/plan-layering'
 
 export type { LayerableStep }
 
-/**
- * Where each step sits in a layered drawing: `rank` is the column, `lane` the row within it.
- *
- * The ranks come from contracts/plan-layering — the SAME function the server's wave rail groups
- * by. It used to be computed here too, and the two copies disagreed about cyclic plans, so a plan
- * could render with different steps in the rail than in the graph. This file now decides only the
- * one thing the layering does not: which row a step takes inside its column.
- */
+// Where each step sits: `rank` is the column, `lane` the row; ranks come from plan-layering
 export interface PlacedStep {
   id: string
   rank: number

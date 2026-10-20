@@ -20,8 +20,7 @@
     return { running, stuck, done }
   })
 
-  // the tasks actually executing — children included, since that is where the steps run.
-  // Capped so the strip cannot eat the ledger beneath it; the overflow is stated, never silent.
+  // the tasks actually executing, children included; capped, with the overflow stated
   const MAX_MONITORS = 2
   const allLive = $derived(graph.tasks().filter(t => t.detail === TASK_STATUS.running))
   const liveTasks = $derived(allLive.slice(0, MAX_MONITORS))

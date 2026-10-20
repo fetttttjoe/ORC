@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { DeliveryMode, EntityPath, errorMessage, KNOWLEDGE_DEFAULTS, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeToolName, ROOT_ENTITY, stepMayPlan, stepMayReconcile, stepMayVerify, toolError, type KnowledgeAccess, type KnowledgeClaim, type KnowledgePort, type KnowledgeWrites, type MemoryAuthor, type PreloadedClaim, type ResolvedTool, type StepKnowledge, NO_INPUT_SCHEMA } from '@orc/contracts'
+import { DeliveryMode, EntityPath, errorMessage, KNOWLEDGE_DEFAULTS, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeToolName, ROOT_ENTITY, stepMayPlan, stepMayReconcile, stepMayVerify, toolError, type KnowledgeAccess, type KnowledgeClaim, type KnowledgePort, type KnowledgeWrites, type Author, type PreloadedClaim, type ResolvedTool, type StepKnowledge, NO_INPUT_SCHEMA } from '@orc/contracts'
 import { decisionTools } from './decision-tools'
 import { namedPaths, preloadQuery, zonePrefix } from './preload-request'
 import { KNOWLEDGE_STEP_TOOLS, KNOWLEDGE_VERIFY_TOOLS, knowledgeIdempotencyKey, knowledgeTools } from './tools'
@@ -24,7 +24,7 @@ interface StepParams {
 
 const TASK_CLAIMS_DESCRIPTION = `The claims THIS task and its split children recorded and did not retire, read from the knowledge files; the refs of the claims they retired; and the ids of recorded claims no longer in the files. Start here: each claim is yours to keep, correct (${KnowledgeToolName.write} change) or retire.`
 
-async function claimsAt(port: KnowledgePort, author: MemoryAuthor, paths: readonly string[], mode: DeliveryMode): Promise<KnowledgeClaim[]> {
+async function claimsAt(port: KnowledgePort, author: Author, paths: readonly string[], mode: DeliveryMode): Promise<KnowledgeClaim[]> {
   const found = new Map<string, KnowledgeClaim>()
   for (const entity of new Set(paths.map(p => path.posix.normalize(p)))) {
     const card = await port.card({ author, idempotencyKey: null, mode }, entity, { limit: KNOWLEDGE_DEFAULTS.pageItems })
@@ -39,7 +39,7 @@ function requestedPaths(step: StepParams['step']): string[] {
   return [...new Set(parsed)].slice(0, KNOWLEDGE_LIMITS.patchItems)
 }
 
-async function preload(port: KnowledgePort, author: MemoryAuthor, p: StepParams, writesOf: (taskId: string) => Promise<KnowledgeWrites>, budget: number, round: number): Promise<PreloadedClaim[]> {
+async function preload(port: KnowledgePort, author: Author, p: StepParams, writesOf: (taskId: string) => Promise<KnowledgeWrites>, budget: number, round: number): Promise<PreloadedClaim[]> {
   const root = p.ancestorTaskIds.at(-1) ?? p.taskId
   const pushed = (await writesOf(root)).live.map(r => r.id).toReversed().slice(0, KNOWLEDGE_LIMITS.patchItems)
   return port.preload({ author, idempotencyKey: author.runToken ? preloadKey(author.runToken, round) : null }, {
@@ -47,7 +47,7 @@ async function preload(port: KnowledgePort, author: MemoryAuthor, p: StepParams,
   })
 }
 
-function taskClaimsTool(access: KnowledgeAccess, author: MemoryAuthor, writesOf: () => Promise<KnowledgeWrites>): ResolvedTool {
+function taskClaimsTool(access: KnowledgeAccess, author: Author, writesOf: () => Promise<KnowledgeWrites>): ResolvedTool {
   return {
     ref: `knowledge/${KnowledgeToolName.taskClaims}`, name: KnowledgeToolName.taskClaims,
     description: TASK_CLAIMS_DESCRIPTION, inputSchema: NO_INPUT_SCHEMA,
@@ -66,7 +66,7 @@ function taskClaimsTool(access: KnowledgeAccess, author: MemoryAuthor, writesOf:
 
 export function bindStepKnowledge(opts: {
   access: KnowledgeAccess
-  author: MemoryAuthor
+  author: Author
   p: StepParams
   writesOf: (taskId: string) => Promise<KnowledgeWrites>
   warn?: (line: string) => void

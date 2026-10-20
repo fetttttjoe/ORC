@@ -1,10 +1,10 @@
-import { ClaimState, KNOWLEDGE_LIMITS, type KnowledgePort, type KnowledgeRef, type MemoryAuthor } from '@orc/contracts'
+import { ClaimState, KNOWLEDGE_LIMITS, type KnowledgePort, type KnowledgeRef, type Author } from '@orc/contracts'
 import type { SuspectAt } from '@orc/kernel'
 
 const chunks = <T>(items: readonly T[], size: number): T[][] =>
   Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, (i + 1) * size))
 
-export function suspectAtFor(access: { port: Pick<KnowledgePort, 'drift'> } | { unavailable: string }, author: MemoryAuthor): SuspectAt | undefined {
+export function suspectAtFor(access: { port: Pick<KnowledgePort, 'drift'> } | { unavailable: string }, author: Author): SuspectAt | undefined {
   if ('unavailable' in access) return undefined
   const { port } = access
   return async paths => {

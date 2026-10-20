@@ -1,15 +1,9 @@
-// Audit every file access a task's agents made against forbidden path patterns
-// (e.g. the sealed baseline). Run: bun bench/contamination-check.ts <taskId-prefix> [pattern...]
-// Exit 1 if any forbidden path was read — the run's judgement data is then tainted.
-// ponytail: relative imports — bench/ is not a workspace package and doesn't need to be
+// relative imports: bench/ is not a workspace package
 import { EventKind, PAYLOAD_SCHEMAS } from '../packages/contracts/src/index.ts'
 import { loadConfig, openStorage, requireProject } from '../packages/kernel/src/index.ts'
 import { z } from 'zod'
 
-// tool_call's `input` is z.unknown() in contracts (it records whatever the model sent), and the
-// executor's own ReadInput/ListInput schemas are not exported — so the audit parses the one field
-// it grades here. `path` defaults to '' because fs_list may legally omit it (the tool defaults
-// to '.'); anything else malformed throws rather than silently counting as clean.
+// path defaults to '' (fs_list may omit it); malformed input throws, never counts as clean
 const FsPathInput = z.object({ path: z.string().default('') })
 
 const [prefix, ...patterns] = process.argv.slice(2)

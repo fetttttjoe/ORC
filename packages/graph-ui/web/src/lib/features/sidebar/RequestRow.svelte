@@ -11,10 +11,7 @@
 
   const temp = $derived(waiting ? 'human' : statusTemperature(task.detail))
 
-  // Active when the selection BELONGS to this request, not only when it IS this request. Clicking
-  // a step or an artifact inside an open request selects `step:<task>:<id>`, which never equalled
-  // the task id — so the row you were reading silently lost its highlight the moment you drilled
-  // into it, and the rail stopped saying where you were.
+  // Active when the selection BELONGS to this request: a step selection never equals the task id
   const active = $derived(session.sel.node !== null && taskIdOf(session.sel.node) === task.id)
 </script>
 

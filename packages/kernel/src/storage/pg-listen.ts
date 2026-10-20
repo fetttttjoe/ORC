@@ -1,11 +1,6 @@
 import pg from 'pg'
 import { errorMessage } from '@orc/contracts'
 
-// The connect → LISTEN → 'error' handler → 'end' → reconnect-with-backoff → close loop, shared by
-// every long-lived Postgres LISTEN (EventLog.subscribe, watchProjectIds). Each caller supplies only
-// what differs: what to do on notification, what to do right after (re)connecting, and how to tell
-// a permanent failure from a transient one. The loop, the backoff table, and the two "must not
-// crash / must not spam" comments below are the part that was drifting between two copies.
 export const RECONNECT_DELAYS_MS: readonly [number, ...number[]] = [100, 200, 400, 800, 1600, 3000]
 
 export interface PgListenOpts {
@@ -15,8 +10,7 @@ export interface PgListenOpts {
   onNotification: (payload: string | undefined) => void
   onConnected: () => void | Promise<void>
   isGonePermanently: (err: unknown) => boolean
-  // fired once when the loop gives up for good: the caller owns other timers (a pump retry, a
-  // debounce) that must quiesce with it, or they spin against the vanished database forever
+  // fired once on a permanent stop: the caller's retry and debounce timers must quiesce
   onStopped: () => void
   warn: (msg: string) => void
 }
@@ -42,17 +36,12 @@ export async function pgListen(opts: PgListenOpts): Promise<PgListenHandle> {
   const connect = async (initial: boolean): Promise<void> => {
     if (closed) return
     const c = new pg.Client({ connectionString: url, application_name: applicationName })
-    // an 'error' event with no listener crashes the process (Node default), so the handler must
-    // stay attached even after close — but it must stop TALKING, the way the 'end' handler
-    // already does. A subscription that was disposed has nothing to report: the socket dying
-    // afterwards is the expected consequence of closing it, and warning about it prints an
-    // alarming line after the caller's work already finished.
+    // stays attached after close (an unhandled 'error' crashes the process) but goes silent
     c.on('error', err => { if (!closed) warn(`listener error: ${errorMessage(err)}`) })
     try {
       await c.connect()
       await c.query(`LISTEN ${channel}`)
-      // the disposer may have run during the awaits above; if so, don't adopt this fresh LISTEN
-      // client — the disposer already ended the previous `client` and left.
+      // the disposer ran during the awaits: do not adopt this fresh LISTEN client
       if (closed) { await c.end().catch(() => {}); return }
       client = c
       c.on('notification', msg => onNotification(msg.payload))
@@ -62,16 +51,11 @@ export async function pgListen(opts: PgListenOpts): Promise<PgListenHandle> {
     } catch (err) {
       await c.end().catch(() => {})
       if (initial) {
-        // Nothing owns this subscription yet: the caller receives a throw and NO disposer, so
-        // `closed` can never be set and any timer still armed reconnects forever with no way to
-        // stop it. `c.end()` above fires the 'end' handler, which schedules exactly such a
-        // reconnect — so the teardown the disposer would have done has to happen here instead.
+        // a throw hands the caller no disposer, so the reconnect c.end() schedules must stop here
         closed = true
         if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null }
         throw err
       }
-      // isGonePermanently's caller-supplied verdict: a failure that retrying can never fix (see
-      // its definition in postgres.ts for which codes and why). Stop, and say so once.
       if (isGonePermanently(err)) {
         closed = true
         warn(`stopped: ${errorMessage(err)}`)

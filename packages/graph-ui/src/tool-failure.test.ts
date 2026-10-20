@@ -32,8 +32,6 @@ describe('toolFailure — the one tool result the conversation pane must render'
       .toEqual({ toolName: 'finalize_plan', error: '{"error":"not approved"}' })
   })
 
-  // lenient read side (the transcript.ts pattern): a payload that does not parse skips its event
-  // instead of throwing — one malformed row must never take the whole live stream down
   it('is null for a malformed payload', () => {
     expect(toolFailure(event(EVENT_KIND.tool_result, { isError: true }))).toBeNull()
   })

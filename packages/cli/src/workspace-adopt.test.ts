@@ -14,8 +14,7 @@ const CLI = NO_CHAT(Door.cli)
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { await Promise.all(dbs.map(d => d.drop())) }, 30_000)
 
-// A kernel per case, not one for the file: the first case counts the workspaces in the whole
-// project, which only answers honestly against a log nothing else appends to.
+// a kernel per case: the first case counts the project's workspaces, which needs a private log
 async function freshKernel(): Promise<Kernel> {
   const db = await createTestDb()
   dbs.push(db)
@@ -24,24 +23,19 @@ async function freshKernel(): Promise<Kernel> {
   return kernel
 }
 
-// real git against a throwaway repo (the same choice git.test.ts makes) — these cases are about
-// what git actually answers, so a stub would only pin our idea of it
+// real git on a throwaway repo: a stub would only pin our idea of what git answers
 function git(dir: string, ...args: string[]): void {
   const r = Bun.spawnSync(['git', '-C', dir, ...args], { stdout: 'pipe', stderr: 'pipe' })
   if (r.exitCode !== 0) throw new Error(new TextDecoder().decode(r.stderr))
 }
 
-// git.test.ts's recipe: `symbolic-ref` resolves a target that need not exist, so a repo with no
-// remote at all can still answer `defaultBranch` — which is what makes the git rung testable.
+// `symbolic-ref` resolves a target that need not exist, so a remote-less repo answers defaultBranch
 function setOriginHead(repo: string, branch: string): void {
   git(repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', `refs/remotes/origin/${branch}`)
 }
 
 describe('resolveTrunk', () => {
-  // The one answer to "which branch is trunk", asked by adoption (about the checkout you stand in)
-  // and by `orc ws merge` (about the project root that owns trunk). Three rungs, and each has to be
-  // reachable on its own — a fallback that silently answered 'main' for a `develop` repo is exactly
-  // the failure the operator rung exists to prevent.
+  // each rung reachable on its own: a silent 'main' for a `develop` repo is the failure to prevent
   it('answers operator → git → default, for the directory it is asked about', () => {
     const { main } = tmpGitRepo()
     expect(resolveTrunk({}, main)).toBe(DEFAULT_TRUNK) // no origin at all in a throwaway repo
@@ -60,8 +54,6 @@ describe('adoptCwd', () => {
     initializeProject(main, 'p')
     const mainWs = await adoptCwd(kernel, requireProject(loadConfig(main)), CLI)
     const wtWs = await adoptCwd(kernel, requireProject(loadConfig(worktree)), CLI)
-    // no origin in a throwaway repo, so defaultBranch is null and the trunk falls back to
-    // DEFAULT_TRUNK — the main checkout is on it, the worktree's `feature` is not
     expect(mainWs).toMatchObject({ kind: WORKSPACE_KIND.checkout, branch: 'main', cwd: realpathSync(main), managed: false, onTrunk: true })
     expect(wtWs).toMatchObject({ kind: WORKSPACE_KIND.worktree, branch: 'feature', title: 'feature', managed: false, onTrunk: false })
     expect((await adoptCwd(kernel, requireProject(loadConfig(worktree)), CLI)).id).toBe(wtWs.id)
@@ -72,8 +64,7 @@ describe('adoptCwd', () => {
     const kernel = await freshKernel()
     const { main, worktree } = tmpGitRepo()
     initializeProject(main, 'p')
-    // the discriminating shape: this repo's trunk is `feature`, which is NOT DEFAULT_TRUNK, so only
-    // the git rung can answer — drop it and the worktree reads as off-trunk
+    // the discriminating shape: trunk is `feature`, not DEFAULT_TRUNK, so only the git rung can answer
     setOriginHead(main, 'feature')
     const wtWs = await adoptCwd(kernel, requireProject(loadConfig(worktree)), CLI)
     expect(wtWs).toMatchObject({ branch: 'feature', onTrunk: true })
@@ -85,8 +76,7 @@ describe('adoptCwd', () => {
     const kernel = await freshKernel()
     const { main, worktree } = tmpGitRepo()
     initializeProject(main, 'p')
-    // git says the trunk is `feature`; the operator says it is `main`. The operator decides, so the
-    // worktree sitting on `feature` is NOT trunk.
+    // git says trunk is `feature`, the operator says `main`: the operator decides
     setOriginHead(main, 'feature')
     const wtWs = await adoptCwd(kernel, { ...requireProject(loadConfig(worktree)), trunkBranch: 'main' }, CLI)
     expect(wtWs).toMatchObject({ branch: 'feature', onTrunk: false })
@@ -100,11 +90,7 @@ describe('adoptCwd', () => {
     expect(ws).toMatchObject({ kind: WORKSPACE_KIND.checkout, branch: null, onTrunk: true })
   }, 30_000)
 
-  // `onTrunk` is captured at adoption and never re-derived, which is what makes a BRANCH SWITCH a
-  // re-adoption rather than a no-op. Without this, a main checkout moved to a feature branch kept
-  // the record it was adopted with: `onTrunk: true`, branch `main`. Every note written from there
-  // would read as final project knowledge while it sat on an unmerged branch — and no merge of that
-  // branch could ever clear it, because the workspace the notes name is the trunk record.
+  // onTrunk is captured at adoption: a branch switch is a re-adoption, not a no-op
   it('a checkout that switched branches is re-adopted: the old record is archived, a new one carries the new branch', async () => {
     const kernel = await freshKernel()
     const { main } = tmpGitRepo()
@@ -117,14 +103,12 @@ describe('adoptCwd', () => {
     const after = await adoptCwd(kernel, config, CLI)
     expect(after.id).not.toBe(before.id)
     expect(after).toMatchObject({ branch: 'feature2', onTrunk: false, cwd: realpathSync(main) })
-    // the old record is FINISHED BUSINESS, not a second live record for one directory —
-    // workspaceByCwd answers whichever active record it finds first, so two would be a coin flip
+    // the old record is finished business: two live records for one directory would be a coin flip
     const all = await kernel.listWorkspaces({ includeArchived: true })
     expect(all.find(w => w.id === before.id)?.archivedAt).not.toBeNull()
     expect((await kernel.listWorkspaces()).map(w => w.id)).toEqual([after.id])
 
-    // …and adoption is still idempotent when nothing moved: a third command on `feature2` must not
-    // archive-and-mint on every invocation, which would be one workspace record per orc command
+    // adoption is idempotent when nothing moved: no archive-and-mint on every invocation
     expect((await adoptCwd(kernel, config, CLI)).id).toBe(after.id)
     expect((await kernel.listWorkspaces()).map(w => w.id)).toEqual([after.id])
   }, 30_000)

@@ -1,68 +1,40 @@
 import { z } from 'zod'
-// the event vocabulary comes from contracts, never a second spelling: event-kinds.ts is a leaf
-// module (zod + a type-only import), so the browser can take it without the rest of @orc/contracts
+// a leaf (zod plus a type-only import): the browser takes it without the rest of contracts
 import { EventKind } from '@orc/contracts/event-kinds'
 // guards.ts is a leaf too (zod only) — one spelling of error→string, browser bundle included
 import { errorMessage } from '@orc/contracts/guards'
-// A read's scope and a chat's digest are the SAME schemas the derivations parse: a second spelling
-// of either on the wire is a shape the browser could hold and no view could answer.
+// the same schemas the derivations parse: a second spelling is a shape no view could answer
 import { Scope } from '@orc/contracts/scope'
 import { ChatDigest } from '@orc/contracts/chat-digest'
 import { Door } from '@orc/contracts/origin'
 import type { PlanNote } from '@orc/contracts/plan-note'
 import { NODE_TYPES, type NodeType } from './graph-wire'
 
-// The node vocabulary as a schema, derived from NODE_TYPES rather than re-listed: the node view
-// answers about a node the GRAPH emitted, so the kind it answers with IS that node's `type`, and
-// there is no room here for a second spelling of the same words.
+// derived from NODE_TYPES: the answer's kind is the node's own type
 export const NODE_KIND = z.enum(NODE_TYPES).enum
 
-// The view registry: every read the browser can ask for, named once — the same reason
-// graph-wire.ts's NODE_TYPES exists, so a view name is never re-spelled at a call site. `WIRE`
-// below is keyed by `VIEW` and `satisfies Record<ViewName, ...>`, so a view added here without a
-// matching params/result pair fails the build instead of turning into a runtime 404.
+// keyed by VIEW, satisfies Record<ViewName, ...>: a view without params and result fails the build
 export const ViewName = z.enum(['timeline', 'chats', 'node', 'transcript', 'plans', 'planNotes', 'models', 'operatorState'])
 export type ViewName = z.infer<typeof ViewName>
 export const VIEW = ViewName.enum
 
-/** Every name a stream frame can report as STALE, derived from ViewName's options so a view is touchable the moment it exists. */
+// every name a stream frame can report as stale, derived from ViewName's options
 export const TouchableName = z.enum(ViewName.options)
 export type TouchableName = z.infer<typeof TouchableName>
 export const TOUCHABLE = TouchableName.enum
 
-/**
- * The view route's URL vocabulary, spoken by the server that reads it and the client that builds
- * it — the same rule as graph-wire's linkKey: a name on the wire lives at the wire.
- *
- * Params travel as ONE url-encoded JSON value rather than flattened query keys because a view's
- * params are typed objects (a kind list, seq numbers), and re-deriving those types from strings per
- * view is the hand-rolled validation zod replaced everywhere else here.
- */
+// params travel as one url-encoded JSON value: they are typed objects, not flat query keys
 export const VIEW_ROUTE = { prefix: '/api/view/', params: 'q' } as const
 
-/** the project a project-scoped GET names — one spelling for every door that reads it */
+// the project a project-scoped GET names: one spelling for every door
 export const PROJECT_PARAM = 'project'
 
-/**
- * One view read's URL. `project` is required rather than left to the caller because a view is
- * answered out of one project's read model, so a view URL without one names no read — and because
- * it is what decides whether `q` joins with `?` or `&`, the join that was got wrong in two
- * different hand-built copies of this format.
- *
- * Absent params mean NO `q` at all, which `viewParams` below reads back as no params.
- */
+// project is required: it decides the ? or & join; absent params mean no q at all
 export const viewPath = (name: string, project: string, params?: unknown): string =>
   `${VIEW_ROUTE.prefix}${name}?${PROJECT_PARAM}=${encodeURIComponent(project)}`
   + (params === undefined ? '' : `&${VIEW_ROUTE.params}=${encodeURIComponent(JSON.stringify(params))}`)
 
-/**
- * The mirror of `viewPath`, and here beside it so the two halves of the format cannot drift: what a
- * door received under `q`. An absent `q` is no params, not a failure — a view whose params are all
- * optional is asked for by name alone.
- *
- * Returns the failure rather than throwing: malformed JSON is a bad REQUEST, which a door answers
- * 400 naming the parameter, where an empty answer would read as "this project has nothing".
- */
+// mirror of viewPath: absent q is no params; malformed JSON returns a failure for a 400
 export const viewParams = (q: string | null): { ok: true; params: unknown } | { ok: false; error: string } => {
   if (q === null) return { ok: true, params: {} }
   try {
@@ -72,11 +44,7 @@ export const viewParams = (q: string | null): { ok: true; params: unknown } | { 
   }
 }
 
-/**
- * The node-detail payloads, parsed at the boundary. The node view returns a different shape per
- * node kind and the browser must not guess: each shape is pinned here, and each carries the node
- * `type` it answers for — the discriminant of the union at the bottom of this section.
- */
+// node-detail payloads parsed at the boundary, each carrying the node type it answers for
 const Usage = z.object({
   inputTokens: z.number(),
   outputTokens: z.number(),
@@ -141,8 +109,7 @@ export const StepDetail = z.object({
 })
 export type StepDetail = z.infer<typeof StepDetail>
 
-// the artifact record arrives BARE (not wrapped), sized as `size`, and carries no taskId —
-// that lives in the node id. Expecting a wrapper made every artifact render as a raw record.
+// the artifact record arrives bare (not wrapped), as size, with no taskId (it is in the node id)
 export const ArtifactDetail = z.object({
   type: z.literal(NODE_KIND.artifact),
   path: z.string(),
@@ -154,8 +121,7 @@ export const ArtifactDetail = z.object({
 })
 export type ArtifactDetail = z.infer<typeof ArtifactDetail>
 
-// `ref` and `totals` sit at the root and each task carries its own usage — the previous shape
-// parsed (every field optional) and rendered a bare list with none of the measured spend.
+// ref and totals sit at the root and each task carries its own usage
 export const ModelDetail = z.object({
   type: z.literal(NODE_KIND.model),
   ref: z.string(),
@@ -181,22 +147,14 @@ export const LogRows = z.array(
     line: z.string(),
     taskId: z.string().nullable(),
     stepId: z.string().nullable(),
-    // The chat this row belongs to (null = no chat) and the door that appended it. Both come off
-    // the envelope: a row without them cannot be placed in a conversation, which is what the chat
-    // scope reads and what tells an operator whether a line came from the web, the CLI or a run.
+    // chat and door come off the envelope: without them a row cannot be placed in a conversation
     chatId: z.string().nullable(),
     door: z.enum(Door),
-    // The task that AUTHORED a project-scoped (envelope taskId null) knowledge row, read from
-    // payload.author.taskId; null for every other kind and for an ownerless (cli/human) row.
+    // the task that authored a project-scoped knowledge row, from payload.author.taskId
     authorTaskId: z.string().nullable(),
-    // Whether the tool call this row summarizes FAILED, and why. The summary line folds isError
-    // into display text, so a pane reading rows alone could not tell a refusal from a success —
-    // eight consecutive rejected approvals rendered as eight near-identical questions. Set only by
-    // a sender holding the raw event beside the row.
+    // set only by a sender holding the raw event: the summary line folds isError into text
     failure: z.object({ toolName: z.string(), error: z.string() }).nullable().optional(),
-    // The whole exchange on a copilot_exchange row: the chat pane rebuilds real bubbles from the
-    // log rather than from browser storage. A side channel — every other reader renders `line` and
-    // ignores this.
+    // the whole exchange on a copilot_exchange row: a side channel the chat pane rebuilds bubbles from
     exchange: CopilotExchange.nullable().optional(),
   }),
 )
@@ -229,10 +187,7 @@ export const PlansView = z.object({
       strategyRef: z.string(),
       analyzerRef: z.string().optional(),
       costEstimateUSD: z.number().nullable(),
-      // Every field PlanDraft REQUIRES must survive this parse, not just the ones the read views
-      // render: `reopen plan for editing` posts these steps straight back as a new version, and a
-      // schema that dropped executorRef/isolation made the server refuse the draft — a replan
-      // button that looked wired and could never succeed.
+      // keeps every field PlanDraft requires: reopening a plan posts these steps back
       steps: z.array(
         z.object({
           id: z.string(),
@@ -274,30 +229,19 @@ const PlanNoteOnWire = z.object({
   skillRefs: z.array(z.string()).default([]),
   toolRefs: z.array(z.string()).default([]),
 })
-// a PlanNote field the wire does not name is one no reader can see; this line names it at build time
+// a PlanNote field the wire does not name is invisible to readers; this fails the build
 type UnwiredPlanNoteField = Exclude<keyof PlanNote, keyof z.output<typeof PlanNoteOnWire>>
 const WIRE_COVERS_PLAN_NOTE: [UnwiredPlanNoteField] extends [never] ? true : UnwiredPlanNoteField = true
 void WIRE_COVERS_PLAN_NOTE
 
 export const PlanNotesView = z.object({ notes: z.array(PlanNoteOnWire) })
 
-/** the models catalog is a BARE array of refs — the `{refs}` wrapper it never had cost a flow */
+// the models catalog is a bare array of refs, not a {refs} wrapper
 export const ModelRefs = z.array(z.string())
 
-/**
- * The node view answers with a different shape per node kind, and says WHICH in `type` — the node's
- * own kind, so the answer and the graph node it is about carry one vocabulary.
- *
- * Discriminated, not a plain union with a permissive tail. A trailing `z.record(string, unknown)`
- * accepted every object: the reader never had to be right about a shape, and on the producing side
- * `ViewResult<'node'>` accepted `{ nonsense: 1 }` and a task detail missing every field but `id`.
- * So the guarantee the view interface exists for — a read that stops matching the wire fails the
- * BUILD — did not hold for the one view answering a shape per node kind. With the discriminant,
- * each kind is checked against its own member, on both sides.
- */
+// discriminated, not a permissive union: each kind is checked against its own member on both sides
 export const NodeDetail = z.discriminatedUnion('type', [TaskDetail, StepDetail, ArtifactDetail, ModelDetail])
-// A node kind added to NODE_TYPES with no detail schema fails HERE rather than at the pane, where
-// it would arrive as an unparseable answer nothing knows how to render.
+// a node kind with no detail schema fails here rather than at the pane
 export type NodeDetailCoversTypes = Exclude<NodeType, z.infer<typeof NodeDetail>['type']> extends never ? true : never
 const _detailCovers: NodeDetailCoversTypes = true
 void _detailCovers
@@ -307,30 +251,17 @@ export type OpenQuestion = z.infer<typeof OpenQuestion>
 export const OperatorState = z.object({ openQuestions: z.array(OpenQuestion), retryable: z.array(z.string()), planned: z.array(z.string()) })
 export type OperatorState = z.infer<typeof OperatorState>
 
-// every view answers inside this: `seq` is what lets a client order a refetch against a stream frame
+// every view answers inside this: seq orders a refetch against a stream frame
 export const ViewEnvelope = <R extends z.ZodType>(data: R) => z.object({ seq: z.number(), data })
 
-// EventKind from '@orc/contracts/event-kinds'. No lower bound on purpose: an EMPTY list means NO
-// filter — that is what the timeline's read does with one, and what a caller assembling a kind set
-// from an empty selection means by it. A `.min(1)` here made the schema the only part of the stack
-// calling that an error, and would have rejected calls the MCP door has always answered.
+// an empty list means no filter, as the timeline read and the MCP door already treat it
 const Kinds = z.array(z.enum(EventKind))
-// A seq cursor is a whole, non-negative event number — a fractional or negative one names no row.
-// Both cursors are EXCLUSIVE, which is what lets a reader page in either direction without
-// re-reading the row it already holds.
+// cursors are exclusive whole non-negative event numbers, so a reader can page either way
 const Seq = z.number().int().nonnegative()
 
-/**
- * Params travel under the names the rest of the codebase already uses for these things — `taskId`,
- * `sinceSeq`, `beforeSeq`, `stepId` — not a shorter query-string spelling: params reach a view as
- * one JSON value (see `viewPath`/`viewParams` above), so there is no URL-length reason to
- * abbreviate them, and a second, shorter vocabulary here would buy nothing but a rename to keep in
- * sync at every call site. `node` keeps `id` because a graph node id is not a task id.
- */
+// params use the codebase's names; node keeps id because a graph node id is not a task id
 export const WIRE = {
-  // `scope` is REQUIRED: a read of the log is a read of some scope, and the caller is the only
-  // side that knows which. There is no taskId beside it — two ways to name the same subject is how
-  // a door starts answering one of them.
+  // scope is required: the caller alone knows which; no taskId beside it, two names for one subject
   [VIEW.timeline]: { params: z.object({ scope: Scope, kinds: Kinds.optional(), sinceSeq: Seq.optional(), beforeSeq: Seq.optional(), limit: z.number().int().positive().max(1000).optional() }), result: z.array(LogRow) },
   [VIEW.chats]: { params: z.object({ scope: Scope }), result: z.array(ChatDigest) },
   [VIEW.node]: { params: z.object({ id: z.string().min(1) }), result: NodeDetail },
@@ -341,12 +272,8 @@ export const WIRE = {
   [VIEW.operatorState]: { params: z.object({}), result: OperatorState },
 } as const satisfies Record<ViewName, { params: z.ZodType; result: z.ZodType }>
 
-// ---- the live stream ----
 
-// The graph shapes graph-wire.ts declares as interfaces, as the schemas that parse them. The two
-// cannot be one declaration — graph-wire takes no imports, so the browser can have it without the
-// projection's dependencies. What keeps them equal is a pair of assignability guards in the app
-// that consumes both (graph-ui/web/src/lib/api/types.ts), where `exactOptionalPropertyTypes` is on.
+// parses graph-wire's interfaces; assignability guards in graph-ui's types.ts keep them equal
 const GraphNode = z.object({
   id: z.string(),
   type: z.enum(NODE_TYPES),
@@ -366,46 +293,26 @@ const GraphPatch = z.object({
   removeLinks: z.array(GraphLink).default([]),
 })
 
-/** the chats list, as the sidebar reads it: `name`/`dir` are null until that project is opened */
+// the sidebar's chats list: name and dir are null until the project is opened
 export const ProjectList = z.array(z.object({ id: z.string(), name: z.string().nullable(), dir: z.string().nullable().optional() }))
 
-/**
- * One query an appended event left stale, named by whatever holds it — a view, or a read that is
- * not one (see TouchableName). `params` is the PATTERN, not necessarily a whole param set: a client
- * refetches the queries it holds that match it.
- */
+// params is a pattern: a client refetches the queries it holds that match it
 export const Touch = z.object({ name: TouchableName, params: z.record(z.string(), z.unknown()) })
 export type Touch = z.infer<typeof Touch>
 
-/**
- * An SSE frame. This carries the whole live experience — a malformed one used to be cast, so a
- * server-side rename would have corrupted the graph store silently rather than failing. Rejected
- * frames are dropped and reported, never applied half-parsed.
- *
- * `touched` and `operator` default rather than being required because the frames that carry neither
- * are real frames: the chats-list push and the connect-time catch-up say nothing about an event.
- */
+// rejected frames are dropped and reported, never applied half-parsed
 export const Envelope = z.object({
   patch: GraphPatch.nullable().optional(),
   summary: LogRow.nullable().optional(),
   projects: ProjectList.optional(),
   touched: z.array(Touch).default([]),
-  // The pushed operator value, or null for "unchanged since the last frame THIS connection was
-  // sent" — a client holds the last non-null one. Pushed rather than touched because it changes on
-  // almost every append and a refetch per event would be a round trip for a value already beside
-  // the frame.
+  // null = unchanged since the last frame on this connection; pushed because it changes per event
   operator: OperatorState.nullable().default(null),
 })
 
-/**
- * What a PRODUCER hands the frame schema — the defaulted fields may be omitted, which the inferred
- * (output) type would demand. The sender is typed against this so a frame whose field the parser
- * would reject fails the BUILD, rather than reaching a browser that drops the frame at runtime and
- * reports it in a console nobody is reading.
- */
+// the producer's type: a frame the parser would reject fails the build
 export type StreamFrame = z.input<typeof Envelope>
 
-// ---- the copilot stream ----
 
 export enum CopilotFrameType {
   text = 'text',

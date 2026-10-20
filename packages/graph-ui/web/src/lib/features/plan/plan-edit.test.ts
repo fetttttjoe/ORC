@@ -7,9 +7,7 @@ const chain: EditableStep[] = [
   { id: 'c', dependsOn: ['b'] },
 ]
 
-// Direction, spelled out once because it is the thing that is easy to get backwards:
-// `(from, to)` means "`to` starts waiting on `from`", i.e. `from` runs first. The fixture is the
-// chain a → b → c, so a runs first and c last.
+// (from, to) means `to` waits on `from`; the fixture is the chain a, b, c
 describe('wouldCycle', () => {
   it('sees a direct back-link', () => {
     // b already waits on a; making a wait on b closes a two-step loop

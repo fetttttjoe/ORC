@@ -1,7 +1,4 @@
-// Subprocess entry for the kill -9 resume test. Args: <dbUrl> <taskId> <markerPath>
-// A fake executor stalls 60s inside its first model checkpoint UNLESS the marker file
-// already exists (i.e. we are the respawned process) — first run: create marker, stall,
-// get killed; second run: DBOS recovery + idempotent startRun complete the run fast.
+// Subprocess for the kill -9 resume test: <dbUrl> <taskId> <markerPath>; stalls until marked
 import { existsSync, writeFileSync } from 'node:fs'
 import {
   EVENT_KIND, OperationKind, SignalOutcome,
@@ -17,9 +14,7 @@ if (!dbUrl || !taskId || !marker) throw new Error('usage: resume-fixture <dbUrl>
 const stallOnce: AgentExecutor<unknown> = {
   id: 'api-loop',
   async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
-    // stall INSIDE the operation: operation_started has committed by the time fn runs, so the
-    // kill lands between the journal's before-record and its completion — the audit gap the
-    // journal exists to make visible.
+    // Stall inside the operation: the kill lands between operation_started and its completion.
     await ctx.operation(
       { operationId: `${ctx.runToken}:model:1`, kind: OperationKind.model, name: 'fake/m', before: { iteration: 1 } },
       async () => {

@@ -3,10 +3,7 @@ import { EVENT_KIND } from './event-kinds'
 import { feedbackKey, openFeedbackTopics, type FeedbackEvent } from './feedback-open'
 import { authorFixture } from './fixtures'
 
-// A TABLE, because the table IS the contract: the kernel's `openRequest` and the workspace health
-// rung both read this one rule, so a case that stopped being handled would otherwise have to be
-// caught twice — once per consumer — and in practice was caught by neither, since each consumer's
-// tests only cover the cases it happens to reach.
+// a table: both consumers read this one rule and neither's tests cover every case
 const ask = (taskId: string | null, topic: string): FeedbackEvent =>
   ({ taskId, kind: EVENT_KIND.feedback_requested, payload: { topic, question: `${topic}?` } })
 const answer = (taskId: string | null, topic: string): FeedbackEvent =>
@@ -16,15 +13,13 @@ const CASES: Array<{ name: string; events: FeedbackEvent[]; open: string[] }> = 
   { name: 'asked → open', events: [ask('t1', 'cwd')], open: [feedbackKey('t1', 'cwd')] },
   { name: 'asked then answered → closed', events: [ask('t1', 'cwd'), answer('t1', 'cwd')], open: [] },
   {
-    // the case a "has ever been answered" spelling gets wrong: the step asked AGAIN, and the reply
-    // it is parked on has not arrived
+    // a 'has ever been answered' spelling gets this wrong
     name: 're-asked after an answer → open again',
     events: [ask('t1', 'cwd'), answer('t1', 'cwd'), ask('t1', 'cwd')],
     open: [feedbackKey('t1', 'cwd')],
   },
   {
-    // and the case a "count asks minus answers" spelling gets wrong in the other direction: one
-    // reply resolves the topic, however many times it was asked — there is only ever one gate
+    // a 'count asks minus answers' spelling gets this wrong
     name: 'two asks, one answer → closed',
     events: [ask('t1', 'cwd'), ask('t1', 'cwd'), answer('t1', 'cwd')],
     open: [],
@@ -41,8 +36,7 @@ const CASES: Array<{ name: string; events: FeedbackEvent[]; open: string[] }> = 
     open: [feedbackKey('t1', 'cwd')],
   },
   {
-    // lenient like every fold here: a poison event must not present itself as a gate nobody can
-    // open, nor silently close one that is really open
+    // lenient: a poison event is neither a gate nobody can open nor a silent close
     name: 'a malformed payload is neither an ask nor an answer',
     events: [
       { taskId: 't1', kind: EVENT_KIND.feedback_requested, payload: { question: 'no topic' } },

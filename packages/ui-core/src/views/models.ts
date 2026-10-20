@@ -18,8 +18,7 @@ export const models = defineView({
   name: VIEW.models,
   push: false,
 
-  // [] until a discovery has been appended — an empty catalog, never a missing one: the project
-  // exists whether or not anyone has asked a provider what it serves.
+  // [] until a discovery has been appended: an empty catalog, never a missing one
   read: model => [...foldModelCatalog(model.events).entries()].flatMap(([pid, refs]) => refs.map(m => `${pid}/${m}`)).sort(),
 
   // Nothing else can change it: the catalog is exactly the discovery events.

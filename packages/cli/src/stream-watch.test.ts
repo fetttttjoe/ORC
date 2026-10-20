@@ -24,8 +24,7 @@ describe('formatStreamLine', () => {
   })
 })
 
-// An in-memory Kernel['subscribe'] stand-in — records each subscribe call's options and lets a
-// test push events straight at the registered handler, with no database behind it.
+// in-memory subscribe stand-in: records each call's options and pushes events at the handler
 function fakeFeed(): EventFeed & { calls: Array<{ fromSeq?: number }>; push: (e: EventRecord) => Promise<void> } {
   let handler: ((e: EventRecord) => void | Promise<void>) | null = null
   const calls: Array<{ fromSeq?: number }> = []

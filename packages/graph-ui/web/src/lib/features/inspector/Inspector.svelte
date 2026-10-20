@@ -15,8 +15,7 @@
   const TABS: readonly Tab[] = ['request', 'detail', 'chat', 'log']
 
   const nodeId = $derived(session.sel.node)
-  // every selection is a hash write, so the browser's own trail IS the node history — walking
-  // links then stepping back is history.back(), no bespoke stack to keep in sync
+  // every selection is a hash write, so history.back() is the node history; no bespoke stack
   const canGoBack = $derived(session.visited > 1)
   const label = $derived(nodeId === null ? '' : (graph.nodes.get(nodeId)?.label ?? nodeId))
 </script>

@@ -26,13 +26,6 @@ describe('isTransient', () => {
       expect(isTransient(Object.assign(new Error('socket'), { code }))).toBe(true)
   })
 
-  /**
-   * The bug this file exists for. Bun surfaces a request timeout as a DOMException whose `name` is
-   * 'TimeoutError' and whose `code` is the NUMBER 23 (the legacy DOMException constant) — no
-   * statusCode, no isRetryable, and no STRING code, so every check above missed it. A timed-out
-   * model call was stamped terminal and burned the step on attempt 1 of 4; the error was
-   * "Non-retryable error in step. Attempt 1 of 4. Error: The operation timed out."
-   */
   it('treats a fetch timeout as transient — the single most retryable failure there is', () => {
     expect(isTransient(new DOMException('The operation timed out.', 'TimeoutError'))).toBe(true)
   })
@@ -88,11 +81,6 @@ describe('isTransient — wrapper shapes that hide the real fault', () => {
 })
 
 describe('a cyclic error chain terminates', () => {
-  /**
-   * `lastError` and `cause` are followed blind. The guards catch a DIRECT self-reference
-   * (`x.cause === x`) but not a two-step cycle, which recursed until the stack gave out — and a
-   * classifier that throws turns a retryable model failure into a crashed step.
-   */
   it('does not recurse forever on a.cause = b, b.cause = a', () => {
     const a: Record<string, unknown> = {}
     const b: Record<string, unknown> = { cause: a }

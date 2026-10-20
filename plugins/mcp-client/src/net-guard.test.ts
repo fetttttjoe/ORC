@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { assertPublicUrl, isPrivateIp } from './net-guard'
 
-// Was a `--selftest` block CI never ran — the one security boundary here, unverified on every push.
 describe('isPrivateIp', () => {
   it('refuses every range a research fetch must never reach', () => {
     for (const ip of [

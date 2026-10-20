@@ -16,8 +16,7 @@ export class KernelError extends Error {
   }
 }
 
-// Lives here (not in the CLI) because it decodes shapes owned by the kernel's storage deps:
-// drizzle wraps driver errors in DrizzleQueryError (unwrap .cause), pg reports ECONNREFUSED.
+// decodes drizzle's DrizzleQueryError (unwrap .cause) and pg's ECONNREFUSED
 export function isConnectionRefused(err: unknown): boolean {
   if (err instanceof AggregateError) return err.errors.some(isConnectionRefused)
   if (typeof err !== 'object' || err === null) return false

@@ -1,9 +1,10 @@
 import { errorMessage, EVENT_KIND } from '@orc/contracts'
 import { fold, type EventLog } from '@orc/kernel'
-import { renderRootIndex, renderTaskFiles } from './render'
+import { renderRootIndex, renderTaskFiles, VAULT_TASKS_DIR } from './render'
 import { writeVaultFiles } from './write'
 
 export { parsePlanFile } from './plan-md'
+export { VAULT_TASKS_DIR }
 
 export interface VaultProjector {
   renderTask(taskId: string): Promise<void>
@@ -12,8 +13,6 @@ export interface VaultProjector {
   close(): Promise<void>
 }
 
-// Only vaultDir is consumed; a structural type keeps the projector decoupled from
-// full OrcConfig (runtime passes the whole config; tests pass just { vaultDir }).
 export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: string } }): VaultProjector {
   const { log } = opts
   const vaultDir = opts.config.vaultDir
@@ -40,14 +39,12 @@ export function createVaultProjector(opts: { log: EventLog; config: { vaultDir: 
   return {
     renderTask, renderAll,
     start: async () => {
-      // subscribe BEFORE the initial render: an event landing between renderAll's reads and a
-      // later subscribe would fall below the subscription's start cursor and never arrive
+      // subscribe before the initial render: an event between renderAll's reads and subscribe is lost
       unsub = await log.subscribe({}, e => {
         if (!e.taskId) return // project-scoped events (knowledge, identity) belong to no task
         const taskId = e.taskId
         const prev = timers.get(taskId)
         if (prev) clearTimeout(prev)
-        // coalesce a burst into one render per task — not a poll
         timers.set(taskId, setTimeout(() => {
           timers.delete(taskId)
           renderTask(taskId).catch(err => console.warn(`vault render failed: ${errorMessage(err)}`))

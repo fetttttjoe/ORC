@@ -3,8 +3,7 @@ import { isRecord } from '@orc/contracts'
 import { markCacheBreakpoints, cachingFetch } from './cache'
 import { must } from '@orc/contracts/fixtures'
 
-// Anthropic request `system`/`content` are arrays of plain JSON blocks; narrow at the read
-// boundary instead of casting, so a wrong shape fails the check rather than lying about it.
+// narrow at the read boundary instead of casting
 const blockArray = (v: unknown): Array<Record<string, unknown>> => {
   if (!Array.isArray(v) || !v.every(isRecord)) throw new Error('expected an array of JSON blocks')
   return v

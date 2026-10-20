@@ -10,7 +10,7 @@ import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
-import { memoryKnowledge } from './knowledge-fixture'
+import { inMemoryKnowledge } from './knowledge-fixture'
 
 const CLI: Origin = NO_CHAT(Door.cli)
 const CLAIM_TEXT = 'The retry budget doubles after every failed attempt'
@@ -45,7 +45,7 @@ describe('agent-side knowledge access over a durable run (integration)', () => {
       { toolCalls: [{ toolCallId: 'b4', toolName: 'signal', input: { outcome: 'success', summary: 'pulled the claim' } }] },
       { toolCalls: [{ toolCallId: 'f1', toolName: 'signal', input: { outcome: 'success', summary: 'nothing to reconcile' } }] },
     ])
-    const knowledge = memoryKnowledge(log, kernel)
+    const knowledge = inMemoryKnowledge(log, kernel)
     const port = await createDbosPort({
       storage, config, skills: fakeSkills,
       providers: new Map([['fake', { costs: {}, languageModel: () => model }]]),

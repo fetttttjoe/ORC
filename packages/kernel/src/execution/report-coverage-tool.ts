@@ -3,25 +3,15 @@ import { Confidence, CoverageReport, toolError } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
 
-// claimsWritten is a measurement, never a self-report — computed in execute(), not part of what the model sends.
+// claimsWritten is measured in execute(), never self-reported by the model.
 const ModelCoverage = CoverageReport.omit({ claimsWritten: true })
 
-// report_coverage (M5b, D3/RG7): the analyze (scout) step self-reports what it covered, just before
-// it signals success — the production emitter for analysis_completed. Mirrors finalize_plan's factory
-// shape: taskId/stepId/runToken come from the injected step context (never a model input), and the
-// role is gated so only the grounded analyze step can emit. The report body IS model-supplied — it is
-// the scout's own coverage claim (analyzed:false with a gap = the RG7 degradation path). The kernel
-// validates it (AnalysisCompletedPayload) and applies defaults.
-// ponytail: nothing consumes analysis_completed today beyond orc status; this stays a thin seam so
-// the reserved RG7 telemetry (confidence/scope) already lands as a real event when a reader arrives.
 export function reportCoverageTool(opts: {
   kernel: Pick<Kernel, 'reportCoverage' | 'listTaskKnowledgeWrites'>
   p: { taskId: string; stepId: string; runToken: string; role: string; origin: Origin }
 }): ResolvedTool[] {
   const { kernel, p } = opts
-  // Registration gate, not an execute-time rejection: a visible tool that can only ever error
-  // gets called anyway — a verify auditor burned one iteration per attempt on it.
-  // For every non-scout step the tool simply does not exist.
+  // Registration gate: a visible tool that can only error gets called anyway.
   if (p.role !== ANALYZE_STEP_ROLE) return []
   return [{
     ref: 'kernel/report_coverage', name: 'report_coverage',

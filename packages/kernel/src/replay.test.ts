@@ -8,8 +8,6 @@ import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } f
 
 const draft = (): PlanDraft => draftFixture()
 
-// Replay is about the log, not about a conversation: every call here comes through the cli door
-// with no chat, spelled at each call site rather than defaulted in by a helper.
 const CLI: Origin = NO_CHAT(Door.cli)
 
 describe('replay guarantee', () => {

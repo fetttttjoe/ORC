@@ -6,12 +6,7 @@
   import { cn } from '$lib/utils'
   import type { Snippet } from 'svelte'
 
-  /**
-   * A destructive action the operator must mean. Typing the exact name is the confirmation —
-   * a plain yes/no is too easy to click through when the outcome is "all history, gone".
-   * The action's own error renders INSIDE the dialog: a failure that closes the dialog and
-   * toasts elsewhere reads as success.
-   */
+  // Typing the exact name confirms; the action's own error renders inside the dialog
   let {
     open = $bindable(false),
     title,

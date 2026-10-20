@@ -18,8 +18,7 @@ const ev = (seq: number, kind: EventRecord['kind'], taskId: string | null, paylo
 const ran = (seq: number, kind: EventRecord['kind'], stepId: string, payload: Record<string, unknown>): EventRecord =>
   eventFixture({ seq, kind, taskId: 'C', stepId, runToken: 'r1', payload })
 
-// parent P, child C — the parentage every `touches` rule below reads out of the fold rather than
-// out of the id string
+// parent P, child C: parentage is read from the fold, not the id string
 const m = modelOf([
   ev(1, EVENT_KIND.task_created, 'P', { task: taskFixture({ id: 'P', title: 'parent' }) }),
   ev(2, EVENT_KIND.task_created, 'C', { task: taskFixture({ id: 'C', parentId: 'P', depth: 1, title: 'child' }) }),
@@ -52,10 +51,7 @@ describe('what one event makes stale', () => {
     expect(transcript.touches(e, m)).toEqual([])
   })
 
-  // agent_call is deliberately off STATE_CHANGE (task-touch.ts), so taskAndParent never fires for
-  // it — but it is the only event that moves usage/stepUsage/iterations, which the task node, its
-  // running step and the model it ran under all return. Leaving it untouched freezes a live run's
-  // spend and iteration count on every one of those three panes.
+  // agent_call is off STATE_CHANGE yet moves usage on the task, step and model panes
   it('agent_call touches the task, its running step, and the model it ran under', () => {
     const ref = stepFixture().modelRef
     const withPlan = modelOf([
@@ -78,9 +74,6 @@ describe('node view', () => {
     expect(node.read(m, { id: 'nope' })).toBeNull()
   })
 
-  // One project holding a node of every kind: the discriminant is asserted against the same
-  // vocabulary the graph emits those nodes under, so a kind that stopped naming itself — or named
-  // itself something the graph never says — fails here.
   it('every answer names the node kind it is about', () => {
     const ref = stepFixture().modelRef
     const whole = modelOf([
@@ -212,15 +205,13 @@ describe('operator state view', () => {
       .toEqual([{ taskId: 'C', topic: 'cwd', stepId: null, question: 'which cwd?', seq: 2 }])
   })
 
-  // Terminality comes from the FOLD's task status, which is what makes this the view's own logic
-  // rather than the fold's: a cancelled task's step is gone, so nothing can receive the reply.
+  // terminality comes from the fold's task status: a cancelled task's step cannot receive a reply
   it('withdraws a question whose task reached a terminal status', () => {
     const cancelled = modelOf([...asked, ev(3, EVENT_KIND.task_status_changed, 'C', { taskId: 'C', to: TASK_STATUS.cancelled })])
     expect(operatorStateView.read(cancelled, {})?.openQuestions).toEqual([])
   })
 
-  // A real run, folded: step_failed only moves a StepState the matching runToken already created,
-  // so the started event is what makes the failure visible to the retry predicate at all.
+  // a real run, folded: step_failed only moves a StepState its runToken already created
   const ranAndFailed = (cls: FailureClass, to: TaskStatus): EventRecord[] => [
     ev(1, EVENT_KIND.task_created, 'C', { task: taskFixture({ id: 'C' }) }),
     ev(2, EVENT_KIND.plan_proposed, 'C', { plan: planFixture({ taskId: 'C' }) }),
@@ -229,9 +220,7 @@ describe('operator state view', () => {
     ev(5, EVENT_KIND.task_status_changed, 'C', { taskId: 'C', to }),
   ]
 
-  // `retryable` is the kernel's own admission rule, not a parallel reading of the events. The four
-  // cases below are exactly where an event-order rule ("failed until something starts again")
-  // disagrees with the door that would have to serve the retry.
+  // retryable is the kernel's admission rule, not a parallel reading of the events
   describe('retryable', () => {
     it('offers a retry on a blocked task whose step malfunctioned', () => {
       expect(operatorStateView.read(modelOf(ranAndFailed(FailureClass.agent_error, TASK_STATUS.blocked)), {})?.retryable).toEqual(['C'])
@@ -245,8 +234,7 @@ describe('operator state view', () => {
       expect(operatorStateView.read(gone, {})?.retryable).toEqual([])
     })
 
-    // The door refuses this one with a paragraph explaining why; offering the button anyway is how
-    // an operator ends up pressing something that provably cannot succeed.
+    // the door refuses this with a paragraph; offering the button would invite a doomed press
     it('withdraws it when every failure is a verdict — a retry would reach the same verdict', () => {
       expect(operatorStateView.read(modelOf(ranAndFailed(FailureClass.rejected, TASK_STATUS.blocked)), {})?.retryable).toEqual([])
     })
@@ -262,8 +250,7 @@ describe('operator state view', () => {
       expect(operatorStateView.read(modelOf(asked), {})?.planned).toEqual([])
     })
 
-    // The difference from classifying by event KIND: a proposal nobody can read is not a plan an
-    // operator can be shown, and the fold is the side that already knows that.
+    // a proposal nobody can read is not a plan an operator can be shown
     it('leaves out a task whose plan proposal did not parse', () => {
       expect(operatorStateView.read(modelOf([...asked, ev(3, EVENT_KIND.plan_proposed, 'C', { plan: { nonsense: true } })]), {})?.planned).toEqual([])
     })

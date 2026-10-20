@@ -1,19 +1,19 @@
 import { describe, expect, it } from 'bun:test'
 import {
   AUTHOR_SOURCE, DECISION_REFUSAL, DecisionStatus, Door, EVENT_KIND, KNOWLEDGE_REFUSAL, KnowledgeToolName,
-  type EventInput, type MemoryAuthor, type ResolvedTool,
+  type EventInput, type Author, type ResolvedTool,
 } from '@orc/contracts'
 import { DECISION_STEP_TOOLS, decisionTools } from './decision-tools'
-import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
+import { createInMemoryBackend, NO_STRUCTURE } from './in-memory-backend'
 import { createKnowledgePort } from './port'
 
-const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'c-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
+const author: Author = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'c-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
 const ADR = { title: 'Use files', context: 'c', decision: 'd', consequences: 'q' }
 const setup = () => {
   const sent: EventInput[] = []
   const stored: EventInput[] = []
   const port = createKnowledgePort({
-    backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }), checkoutOf: async () => '/checkout',
+    backend: createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }), checkoutOf: async () => '/checkout',
     append: async e => {
       sent.push(e)
       if (e.idempotencyKey == null || !stored.some(s => s.idempotencyKey === e.idempotencyKey)) stored.push(e)

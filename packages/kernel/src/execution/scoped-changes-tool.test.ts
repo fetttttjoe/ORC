@@ -5,16 +5,7 @@ import { eventFixture, must, planFixture, recordOf, stepFixture } from '@orc/con
 import { taskChangedPaths } from '../projections'
 import { scopedChangesTool, SCOPED_CHANGES_TOOL_NAME } from './scoped-changes-tool'
 
-// The auditor false-positive scenario, expressed at the LOG level on purpose.
-//
-// In production the workspace tree is SHARED with sibling tasks, so `git status` in this task's
-// verify step shows the siblings' completed work too — that is the false positive this tool exists
-// to remove. The removal is BY CONSTRUCTION: the scoped set is derived from EventRecord[] attributed
-// to this task (and its descendant split tasks) and never consults the tree, so whether the sibling's
-// file also sits on disk is irrelevant to the result. Reproducing an actual dirty tree would need a
-// real git repo (and Postgres for a real Kernel) and would still exercise nothing extra, so the
-// sibling's write lives in the SAME event log here and the assertion is that it is absent from the
-// output. Tree state cannot influence a pure log derivation.
+// At the LOG level: the scoped set never consults the tree, so a sibling's write must be absent.
 const THIS_TASK = 'task-me'
 const CHILD_TASK = 'task-me.s1.c1' // a descendant split task — its writes ARE this task's changes
 const SIBLING_TASK = 'task-sibling' // NOT a descendant: a parallel task sharing the worktree
@@ -43,8 +34,7 @@ const LOG: EventRecord[] = [
   ok(8, CHILD_TASK, 'kid', 'c4'),
 ]
 
-// Mirrors Kernel.listTaskChangedPaths (subtree ids × the real taskChangedPaths projection) without
-// needing Postgres: subtreeTaskIds itself is covered in kernel.test.ts.
+// Mirrors Kernel.listTaskChangedPaths without Postgres; subtreeTaskIds is covered in kernel.test.ts
 const fakeKernel = (subtree: string[], plan: Plan | undefined, opts: { throws?: boolean } = {}) => ({
   listTaskChangedPaths: async (taskId: string) => {
     if (opts.throws) throw new Error('log unavailable')
@@ -71,9 +61,7 @@ const run = async (kernel = fakeKernel([THIS_TASK, CHILD_TASK], PLAN)) => {
   return r
 }
 
-// The heal-candidate list: citing claims ride the OUTPUT because drift flags are
-// measured against committed revisions and lag the uncommitted work verify just audited —
-// observed twice as post-commit drift (4/7 corpus) before this existed.
+// citing claims ride the OUTPUT: drift flags lag the uncommitted work verify just audited
 describe('citingClaims (heal candidates)', () => {
   const CLAIM: KnowledgeClaim = { id: 'aaaaaaaa', text: 'X', class: ClaimClass.fact, anchors: [], tags: [], sources: [], decision: null, location: 'k/x.md' }
   const CitingClaimsOutput = z.object({ citingClaims: z.array(z.unknown()).nullable(), floor: z.string(), degraded: z.array(z.string()).optional() })
@@ -97,8 +85,7 @@ describe('citingClaims (heal candidates)', () => {
   })
 
   it('deduplicates: the same path written by two steps reaches the callback once', async () => {
-    // the shared fixture has no duplicate paths, so the deduped-list test above cannot pin the
-    // dedupe itself — a stub kernel returning one path from two contributors does
+    // a stub kernel returning one path from two contributors pins the dedupe itself
     const seen: string[][] = []
     const [tool] = scopedChangesTool({
       kernel: {
@@ -173,9 +160,7 @@ describe('scoped_changes tool', () => {
   })
 
   it('the kernel-appended commit step (zone:[], readOnlySource) does not unfence the task', async () => {
-    // withCommitStep appends {zone: [], readOnlySource: true}; zonesFor's empty-zone rule would
-    // otherwise read the whole task as unfenced and an out-of-union descendant write would pass
-    // the audit as inZone
+    // withCommitStep appends {zone: [], readOnlySource: true}: it must not unfence the whole task
     const withCommit = planFixture({
       taskId: THIS_TASK,
       steps: [
@@ -192,8 +177,7 @@ describe('scoped_changes tool', () => {
     }
     const r = await run(kernel)
     const rows = (r.output as { paths: Array<{ path: string; inZone: boolean }> }).paths
-    // judged against the WRITING steps' zone union — the read-only commit step's empty zone
-    // neither unfences the task nor joins the union
+    // judged against the WRITING steps' zone union: the read-only commit step's empty zone adds nothing
     expect(must(rows[0], 'first row').inZone).toBe(false)
   })
 
@@ -218,8 +202,7 @@ describe('scoped_changes tool', () => {
     it('registers only for the verify (auditor) step', () => {
       expect(scopedChangesTool({ kernel, p: verifyP })).toHaveLength(1)
     })
-    // PLAN_STEP_ROLE === STEP_ROLE.auditor, so a bare role check would hand this tool to the
-    // grounded task's `plan` step, where a scoped change set means nothing.
+    // PLAN_STEP_ROLE === STEP_ROLE.auditor: a bare role check would hand this tool to the plan step
     it("is NOT registered for the grounded 'plan' step, which also has the auditor role", () => {
       expect(scopedChangesTool({ kernel, p: { taskId: THIS_TASK, stepId: STEP_ID.plan, role: STEP_ROLE.auditor } })).toEqual([])
     })
@@ -229,9 +212,7 @@ describe('scoped_changes tool', () => {
     it('is NOT registered for an implementer step that happens to be named verify', () => {
       expect(scopedChangesTool({ kernel, p: { taskId: THIS_TASK, stepId: VERIFY_STEP_ID, role: STEP_ROLE.implementer } })).toEqual([])
     })
-    // The finish step reads the same floor to know WHAT it is summarizing — which paths this task
-    // changed — so the gate widened to stepMayReconcile as well. Both terms there too: a worker step
-    // a planner happened to name 'finish' gets nothing.
+    // the finish step reads the floor too (stepMayReconcile); a worker named 'finish' gets nothing
     it('registers for the finish step with the finisher role', () => {
       expect(scopedChangesTool({ kernel, p: { taskId: THIS_TASK, stepId: FINISH_STEP_ID, role: STEP_ROLE.finisher } })).toHaveLength(1)
     })
@@ -241,8 +222,7 @@ describe('scoped_changes tool', () => {
   })
 
   it('falls back to the union of the task\'s declared zones when the writing step is unknown', async () => {
-    // no plan on the log (a task whose plan cannot be read) → nothing to classify against, so every
-    // path reports inZone:true rather than inventing an out-of-zone verdict the auditor would act on.
+    // no plan on the log: every path reports inZone:true instead of inventing an out-of-zone verdict
     const rows = ((await run(fakeKernel([THIS_TASK], undefined))).output as { paths: Array<{ inZone: boolean }> }).paths
     expect(rows.length).toBeGreaterThan(0)
     expect(rows.every(x => x.inZone)).toBe(true)

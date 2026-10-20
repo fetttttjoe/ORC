@@ -35,10 +35,7 @@
   <span class="min-w-0 grow truncate text-xs text-mist" title={row.line}>{row.line}</span>
 </svelte:element>
 {#if row.failure}
-  <!-- Continues the row's coloured left spine instead of indenting under the message column. The
-       old pl-33 spent 132px aligning the payload with text that is no longer on screen beside it,
-       which left tool output wrapping in a narrow ribbon and reading as clipped. The border is what
-       ties the payload to its row; the width belongs to the content. -->
+  <!-- Continues the row's coloured left spine; the border ties the payload to its row -->
   <div class="border-b border-l-2 border-b-rust/30 border-l-rust/40 bg-rust/5 px-3 py-2">
     <Payload label="{row.failure.toolName} refused" value={row.failure.error} temp="rust" />
   </div>

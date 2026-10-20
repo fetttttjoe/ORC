@@ -3,10 +3,7 @@
   import type { Temperature } from '$lib/temperature'
   import { TEMP_TEXT } from '$lib/temperature'
 
-  /**
-   * Fraction of a run that is finished. A ring rather than a bar because it reads at a glance
-   * from across the room, and the middle is free for the number that matters.
-   */
+  // Fraction of a run finished: a ring reads at a glance and frees the middle for the number
   let {
     done,
     total,

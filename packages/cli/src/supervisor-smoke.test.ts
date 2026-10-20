@@ -1,14 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-// Live end-to-end through the real CLI, one real model call. Run explicitly:
-//   ORC_SUPERVISOR_SMOKE=1 bun run test:supervisor
-// Needs `bun run db:up` + a migrated database, and working anthropic auth — either path the
-// provider accepts (ORC_ANTHROPIC_AUTH=oauth, or ANTHROPIC_API_KEY). Bun loads the repo's .env,
-// and every process below inherits it, so setting it there is enough. The opt-in flag is the whole
-// gate on purpose: which credentials count is the provider's rule, and a copy of it here would
-// drift the moment that rule changes.
-//
-// What it pins is the property unit tests cannot reach, because it only exists across processes:
-// `orc run` records an ask and exits, and the run is executed — and survives — somewhere else.
+// live end-to-end, one real model call: ORC_SUPERVISOR_SMOKE=1 bun run test:supervisor
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -21,8 +12,7 @@ const MODEL = 'anthropic/claude-haiku-4-5'
 const OUTPUT = 'notes.md'
 const SPEC = `Write a file called ${OUTPUT} in the working directory with three bullet points on what durable execution means. Under 120 words. Declare ${OUTPUT} as an output.`
 
-// The CLI as a user runs it: a separate process that exits. Driving it in-process would defeat the
-// point — auto-spawn, and a run outliving its caller, are only observable across a process boundary.
+// a separate process that exits: auto-spawn and a run outliving its caller need the boundary
 async function orc(cwd: string, ...args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
   const p = Bun.spawn(['bun', CLI, ...args], { cwd, stdout: 'pipe', stderr: 'pipe' })
   const [stdout, stderr, code] = await Promise.all([

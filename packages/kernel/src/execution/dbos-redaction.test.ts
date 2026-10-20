@@ -18,9 +18,7 @@ process.env.ORC_REDACTION_PROBE_KEY = SECRET
 
 const CLI: Origin = NO_CHAT(Door.cli)
 
-// A step's return value does NOT flow through EventLog.append — DBOS serializes it straight
-// into operation_outputs in its own system database (same cluster, same credentials). This is
-// the one test standing between that table and plaintext tool output / model turns.
+// A step's return bypasses EventLog.append: this is the test guarding operation_outputs redaction.
 const leaker: AgentExecutor<unknown> = {
   id: 'api-loop',
   async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | undefined> {
@@ -36,10 +34,7 @@ const leaker: AgentExecutor<unknown> = {
 
 describe('redaction covers what DBOS persists', () => {
   const cleanup: (() => Promise<void>)[] = []
-  // LIFO: a resource is torn down before the one it was built on (the launched DBOS runtime and
-  // the storage pool before the database they live in). Everything registers at CREATION rather
-  // than at the end of the it() body — a bare trailing shutdown is skipped when an assertion above
-  // it throws, which leaks a live DBOS runtime into every later test file AND blocks db.drop().
+  // LIFO teardown, registered at creation: a trailing shutdown is skipped when an assertion throws
   afterAll(async () => { for (const c of cleanup.reverse()) await c() })
 
   it('a secret in a step result never reaches the DBOS system database in plaintext', async () => {

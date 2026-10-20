@@ -5,8 +5,7 @@ import { join } from 'node:path'
 import { isRecord } from '@orc/contracts'
 import { CLAUDE_CODE_IDENTITY, loadOAuthToken, oauthFetch, prependClaudeCodeIdentity } from './oauth'
 
-// oauthFetch injects a `system` array (identity block first); narrow the captured body
-// at the read boundary rather than casting it.
+// narrow the captured body at the read boundary instead of casting
 const hasSystemArray = (v: unknown): v is { system: unknown[] } => isRecord(v) && Array.isArray(v.system)
 
 const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN

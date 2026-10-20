@@ -4,18 +4,7 @@
   import type { Attachment } from 'svelte/attachments'
   import FlowFit from './FlowFit.svelte'
 
-  /**
-   * A Svelte Flow canvas with this console's chrome on it, and NOTHING about what it draws. It
-   * takes nodes, edges and the components that render them; it does not know what a plan, a step
-   * or a wave is.
-   *
-   * That split is the point: the plan graph, a decomposition graph, or an editor all differ in
-   * their ADAPTER (domain → nodes/edges), not in their canvas. Every previous graph surface here
-   * fused the two and had to be rewritten whenever either half changed.
-   *
-   * Deliberately NOT a replacement for GraphIsland: sigma renders the 455-node project graph on
-   * WebGL with a force layout, which is a different problem from a dozen laid-out DOM nodes.
-   */
+  // Canvas chrome only: nodes, edges and renderers come from an adapter; not a GraphIsland rival
   interface Props {
     nodes: Node[]
     edges: Edge[]
@@ -48,15 +37,10 @@
 
   const FIT_PADDING = 0.12
 
-  // What FlowFit refits on: the node SET's identity, not its length — an equal-count swap (same
-  // number of steps, different plan) reshapes the drawing just as much as a growth does, and a
-  // count key left the old viewport framing nodes that no longer exist. NUL-joined for the
-  // same reason graph-wire's linkKey is — a printable separator can occur inside an id — and
-  // as the ESCAPE, never the raw byte, which reads as a binary file to git.
+  // Node-set identity, not length, so an equal-count swap refits; NUL via escape, not the raw byte
   const shape = $derived(nodes.map(n => n.id).join('\u0000'))
 
-  // whether the wrapper has real dimensions — FlowFit refits on the 0→measurable transition,
-  // which is the state the one-shot `fitView` prop computes garbage in (see FlowFit's header)
+  // FlowFit refits on the 0-to-measurable transition, where one-shot fitView computes garbage
   let measurable = $state(false)
   const measure: Attachment<HTMLDivElement> = (el) => {
     const ro = new ResizeObserver(() => {
@@ -105,8 +89,7 @@
 {/if}
 
 <style>
-  /* Svelte Flow ships structural CSS only; the palette is ours. Scoped to this wrapper so the
-     tokens cannot leak into any other surface that later embeds a canvas. */
+  /* Svelte Flow ships structural CSS only; the palette is ours */
   .orc-flow :global(.svelte-flow) {
     --xy-background-color: transparent;
     --xy-edge-stroke: var(--color-rule);

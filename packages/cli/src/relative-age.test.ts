@@ -14,8 +14,6 @@ describe('relativeAge', () => {
   })
 
   it('a stamp in the future reads as 0m, never a negative age', () => {
-    // clock skew between the machine that wrote the event and the one printing it. A '-3h ago'
-    // in the ws table would read as a corrupted record rather than as the two clocks disagreeing.
     expect(relativeAge('2026-09-14T15:00:00.000Z', NOW)).toBe('0m ago')
   })
 

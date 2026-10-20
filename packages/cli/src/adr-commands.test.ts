@@ -5,7 +5,7 @@ import path from 'node:path'
 import { Command } from 'commander'
 import { z } from 'zod'
 import { AdrSection, AUTHOR_SOURCE, DecisionStatus, Door, EVENT_KIND, KNOWLEDGE_REFUSAL, KnowledgeWrittenPayload, NO_CHAT } from '@orc/contracts'
-import { createMemoryBackend, NO_STRUCTURE } from '@orc/knowledge-core'
+import { createInMemoryBackend, NO_STRUCTURE } from '@orc/knowledge-core'
 import { loadConfig, requireProject } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from '@orc/kernel/test-helpers'
 import { adrCommand, renderDecisionList } from './adr-commands'
@@ -16,9 +16,9 @@ const cleanup: Array<() => Promise<void> | void> = []
 afterAll(async () => { for (const c of cleanup.reverse()) await c() }, 30_000)
 afterEach(() => mock.restore())
 
-const memoryOpening = (): KnowledgeOpening => ({ backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }) })
+const inMemoryOpening = (): KnowledgeOpening => ({ backend: createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }) })
 
-async function makeAdr(opening: KnowledgeOpening = memoryOpening()) {
+async function makeAdr(opening: KnowledgeOpening = inMemoryOpening()) {
   const db = await createTestDb()
   cleanup.push(() => db.drop())
   const dir = mkdtempSync(path.join(tmpdir(), 'orc-adr-cli-'))

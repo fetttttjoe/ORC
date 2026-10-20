@@ -36,8 +36,7 @@
 
   async function loadProject(project: string): Promise<void> {
     stream?.close()
-    // A server still coming up answers /api/graph with an error; without a retry the page stays
-    // permanently empty with no path back short of a manual reload.
+    // A server still coming up answers with an error; retry or the page stays empty
     let snap
     try {
       snap = await api.graph(project)
@@ -47,10 +46,7 @@
       snap = await api.graph(project)
     }
     graph.setSnapshot(snap)
-    // Every view query answered before this point describes a moment this fresh snapshot has
-    // already moved past (a project switch, or a purge/seq-regression resync) — the stream ships
-    // no compensating `touched` entries for either (server.ts's reset path sends `touched: []`),
-    // so nothing else invalidates them.
+    // A fresh snapshot outdates every held view; a resync ships no touched entries
     void queryClient.invalidateQueries({ queryKey: allViewsKey() })
     // seed to the snapshot seq, attach the stream there: its catch-up frame closes any gap
     const { data: rows } = await fetchView(project, VIEW.timeline, { scope: { type: ScopeType.project }, limit: 150 })
@@ -76,21 +72,13 @@
     if (session.sel.project) await loadProject(session.sel.project)
   })()
 
-  /**
-   * The graph dock's width. It stays a PIXEL width because a drag has to land exactly where the
-   * pointer left it — but a pixel width computed ONCE from innerWidth stops responding the moment
-   * the window changes, and the dock is `shrink-0`, so the ledger (which only has `grow`) is what
-   * gets crushed: at 1920px with the dock dragged wide, the ledger fell to ~470px and truncated
-   * every task title, event summary and the retry row. So the width is clamped against the CURRENT
-   * viewport on every resize, not just while dragging, and the operator's choice survives a reload.
-   */
+  // Pixel width clamped against the current viewport on every resize, so the ledger is not crushed
   const DOCK_MIN = 280
   const MAIN_MIN = 420 // the narrowest ledger that still reads without truncating its chips
   const SIDEBAR_W = 288 // w-72, the sidebar's fixed track
   const DOCK_KEY = 'orc:dockWidth'
 
-  // never let the dock take so much that the ledger drops under MAIN_MIN — but DOCK_MIN wins if
-  // the viewport is too small for both, because a dock thinner than that renders nothing useful
+  // DOCK_MIN wins when the viewport cannot hold both the dock and MAIN_MIN
   const clampDock = (w: number): number =>
     Math.max(DOCK_MIN, Math.min(w, Math.max(DOCK_MIN, window.innerWidth - SIDEBAR_W - MAIN_MIN)))
 
@@ -107,14 +95,13 @@
     try {
       localStorage.setItem(DOCK_KEY, String(w))
     } catch {
-      /* the dock still works this session; only the memory of it is lost */
+      /* the dock still works this session; it is just not remembered */
     }
   }
 
   let dockWidth = $state(clampDock(readStored() ?? Math.round(window.innerWidth * 0.38)))
 
-  // Re-clamp on viewport change. The handler is registered once — `dockWidth` is read inside the
-  // closure, never during tracking, so this effect does not re-subscribe on every drag frame.
+  // Registered once: dockWidth is read in the closure, so drags do not re-subscribe
   $effect(() => {
     const onResize = (): void => {
       dockWidth = clampDock(dockWidth)

@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'bun:test'
 import type { KnowledgeHost, KnowledgePlugin } from '@orc/contracts'
-import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
+import { createInMemoryBackend, NO_STRUCTURE } from './in-memory-backend'
 import { REGISTRY_REFUSAL, resolveKnowledgeBackend } from './registry'
 
 const seen: Array<{ options: Record<string, unknown>; host: KnowledgeHost }> = []
 const host: KnowledgeHost = { structure: NO_STRUCTURE }
 const plugin: KnowledgePlugin = {
   id: 'mem',
-  create: (options, given) => { seen.push({ options, host: given }); return createMemoryBackend({ exists: () => true, structure: given.structure, read: () => null }) },
+  create: (options, given) => { seen.push({ options, host: given }); return createInMemoryBackend({ exists: () => true, structure: given.structure, read: () => null }) },
 }
 
 describe('resolveKnowledgeBackend', () => {

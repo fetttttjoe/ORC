@@ -1,7 +1,7 @@
 import { decisionSummaryOf, DecisionStatus, errorMessage, type Brief, type DecisionSummary } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
 import { buildBrief } from './brief'
-import { findCwdWorkspace, knowledgeAuthor, type WorkspaceFold } from './cwd-workspace'
+import { findCwdWorkspace, cliAuthor, type WorkspaceFold } from './cwd-workspace'
 import { knowledgeHealthOf } from './knowledge-health-of'
 import { knowledgeAccess, openKnowledge, type KnowledgeOpening } from './knowledge-open'
 import { projectHealth } from './workspace-health'
@@ -26,10 +26,10 @@ export async function gatherBrief(given: BriefOptions): Promise<Brief> {
 
 const readCall = async (opts: OpenedBrief, fold: WorkspaceFold) => ({
   access: knowledgeAccess(opts.opening, opts.log, opts.config.dir),
-  author: await knowledgeAuthor(fold, opts.config.dir),
+  author: await cliAuthor(fold, opts.config.dir),
 })
 
-/** Accepted decisions, or null when they could not be read — never an empty list, which would say the project has decided nothing. */
+/** Accepted decisions, or null when unreadable: never [], which would say nothing was decided. */
 async function decisionsInForce(opts: OpenedBrief, fold: WorkspaceFold): Promise<DecisionSummary[] | null> {
   try {
     const { access, author } = await readCall(opts, fold)

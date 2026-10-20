@@ -9,9 +9,7 @@ import { AskHumanInput, JoinSplitsInput, SignalInput, TOOL_NAME, executeTool, re
 import { isTransient } from './transient'
 import { isRateLimited, rateLimitWaitMs } from './rate-limit'
 
-// Pre-flight for declared outputs, so the model can fix a bad declaration instead of the
-// step failing at the runtime's trusted verification. Same rule set as the runtime
-// (validateOutputPaths) — the two can never drift. Returns an error string or null.
+// Pre-flight with the runtime's validateOutputPaths rules, so the model can fix a bad declaration
 function invalidOutputs(workspaceDir: string, outputs: string[]): string | null {
   try {
     validateOutputPaths(workspaceDir, outputs)
@@ -31,8 +29,7 @@ interface TurnResult {
 type ToolCall = { toolCallId: string; toolName: string; input: unknown }
 type ToolOutcome = Awaited<ReturnType<typeof executeTool>>
 
-// tool outputs are JSON-shaped by construction; the round-trip proves it to the type system
-// (and normalizes undefined/Date exactly as the wire format would)
+// the JSON round-trip proves the shape to the type system and normalizes undefined/Date
 const toJson = (v: unknown): JSONValue => JSON.parse(JSON.stringify(v ?? null))
 
 export function normalizeUsage(
@@ -53,16 +50,7 @@ export function normalizeUsage(
   }
 }
 
-// A turn's call ids are the provider's, and a repeat is malformed: the API forbids answering one
-// tool_use twice, so the second entry cannot be honoured under any reading. Dropping it HERE — the
-// one boundary where provider output enters — is what keeps the four consumers below (signal
-// lookup, invalid-signal replay, the executed-tool filter, the operationId) reading one turn the
-// same way.
-//
-// It failed silently before: `${runToken}:tool:${iteration}:${callId}` made the repeat share an
-// operationId, so the journal memoised it to ONE row while messages.push emitted TWO tool_result
-// blocks for that id — a clean event log and a 400 that killed the step. Warn rather than swallow;
-// idempotency already hid this once.
+// a repeated call id cannot be honoured: the API forbids answering one tool_use twice
 function uniqueByCallId<T extends { toolCallId: string; toolName: string }>(calls: T[]): T[] {
   const seen = new Set<string>()
   return calls.filter(c => {
@@ -72,19 +60,7 @@ function uniqueByCallId<T extends { toolCallId: string; toolName: string }>(call
   })
 }
 
-// The OTHER half of that dedupe, and the half whose absence killed a real step. Filtering our
-// `toolCalls` view stops the double execution, but the assistant message we replay to the provider
-// is its own raw output — so a repeated id stayed in the history as two tool_use blocks answered by
-// the ONE tool_result we produced, and the next request died on
-// `each tool_use must have a single result. Found multiple tool_result blocks with id …`.
-// Observed live at iteration 11 of a real run: one tool_call and one tool_result in the event log,
-// a clean journal, and a terminal provider_error that blocked the step.
-//
-// Both views must be deduped at the SAME boundary or they disagree about what the turn contained.
-// One place that rebuilds a message with some of its parts removed. The ai SDK's ModelMessage is a
-// union whose `content` element type differs per role, so the role switch is what keeps the variant:
-// TS cannot reassemble `{ ...m, content }` from a widened array without a cast. Returns `m` itself
-// when nothing was removed, so a caller can tell an untouched message from a rebuilt one.
+// the role switch keeps the variant; returns m itself when nothing was removed
 type PartFilter = (part: { type: string; toolCallId?: string }) => boolean
 function withParts(m: ModelMessage, keep: PartFilter): ModelMessage {
   switch (m.role) {
@@ -117,18 +93,7 @@ function dedupeToolUseParts(messages: ModelMessage[]): ModelMessage[] {
   return messages.map(m => withParts(m, notRepeated))
 }
 
-// The THIRD way one tool_use ends up with two results, and the mirror of the dedupe above. A tool
-// whose input fails its own declared zod inputSchema never reaches our loop: ai@7's parseToolCall
-// catches InvalidToolInputError and puts an error tool-result straight into responseMessages. We
-// then pushed our own result for the same id, and the provider rejected the next request with the
-// same 400 a duplicate tool_use causes — "each tool_use must have a single result".
-//
-// OURS REPLACES THEIRS rather than yielding to it. Both are valid answers, but the SDK's is a
-// generic parse error while ours names the tool's contract ("Call signal again with {outcome:
-// 'success'|'failure', summary: string}") — and this message is the only thing the model gets to
-// act on. Dropping ours would trade a 400 for a recovery the model cannot follow.
-// A tool message left with no parts is removed entirely: an empty content array is not a message a
-// provider accepts.
+// ours replaces the SDK's error result: it names the tool's contract, the model's only guide
 function withoutToolResults(messages: readonly ModelMessage[], ids: ReadonlySet<string>): ModelMessage[] {
   const notRemoved: PartFilter = part =>
     !(part.type === 'tool-result' && typeof part.toolCallId === 'string' && ids.has(part.toolCallId))
@@ -147,8 +112,7 @@ async function callModel(model: LanguageModel, messages: ModelMessage[], tools: 
   try {
     result = await generateText({ model, messages, tools })
   } catch (err) {
-    // transient → rethrow as-is so the port's checkpoint retries with backoff;
-    // terminal (4xx bad key, context overflow, …) → marked so it is NOT retried
+    // transient rethrows for the checkpoint's backoff retry; terminal is marked so it is not retried
     if (isTransient(err)) throw err
     throw terminalError(errorMessage(err))
   }
@@ -156,9 +120,6 @@ async function callModel(model: LanguageModel, messages: ModelMessage[], tools: 
     text: result.text,
     toolCalls: uniqueByCallId(result.toolCalls.map(c => ({ toolCallId: c.toolCallId, toolName: c.toolName, input: c.input }))),
     usage: normalizeUsage(result.usage),
-    // ai@7's GenerateTextResult exposes the generated messages directly as `responseMessages`
-    // (non-deprecated); the brief's `result.response.messages` is the same data but deprecated
-    // in favor of `finalStep.response` — see API-drift notes in the task report.
     responseMessages: dedupeToolUseParts(result.responseMessages),
   }
 }
@@ -216,20 +177,14 @@ async function callModelWaitingOutRateLimits(
   }
 }
 
-// The file tools that CHANGE a file — contracts' FS_WRITE_TOOL_NAMES, so this claim-tracking set
-// and kernel's audit projection (taskChangedPaths) can never drift apart. fs_read/fs_list are
-// absent by design: reading a file cannot falsify a claim about it, and a claim block after every
-// read would bury the one that matters.
+// the same set as kernel's audit projection; reads cannot falsify a claim, so they are absent
 const WRITING_FILE_TOOLS = FS_WRITE_TOOL_NAMES
 
-// The path a write tool acted on. Both tools take it as `path`; anything else is a tool whose
-// shape changed, and guessing at an unknown shape would surface claims about the wrong file.
+// both write tools take `path`; guessing at another shape would claim about the wrong file
 const editedPath = (input: unknown): string | null =>
   isRecord(input) && typeof input.path === 'string' && input.path.length > 0 ? input.path : null
 
-// A tool batched alongside the turn's suspension point (join_splits / ask_human) is deferred,
-// not executed — the suspension wins the turn (spec: one suspension point per turn). Every
-// call id in the turn still needs a tool_result, or the next generateText request 400s.
+// a tool batched with a suspension is deferred, yet every call id still needs a tool_result
 function notExecutedResult(call: { toolCallId: string; toolName: string }, reason: string) {
   return {
     type: 'tool-result' as const,
@@ -274,8 +229,7 @@ const atRiskMessage = (edited: readonly string[], claims: readonly KnowledgeClai
   `Retire the ones your edit made FALSE and change the ones it made incomplete, in one ${KnowledgeToolName.write} that says why. Adding a claim about the new behaviour does not retire the old one. Leave the ones still true alone.`,
 ].join('\n')
 
-// preload block arg, default '' — kept minimal and named rather than folded into
-// ExecutorContext, since it is a per-call render input, not step/run state.
+// a per-call render input, not step/run state, so it is not folded into ExecutorContext
 function buildPrompt(ctx: ExecutorContext<LanguageModel>, knownContextBlock = ''): string {
   const skills = ctx.skills
     .map(s => `# Skill: ${s.name}\n${s.body}`)
@@ -291,9 +245,7 @@ function buildPrompt(ctx: ExecutorContext<LanguageModel>, knownContextBlock = ''
     ctx.priorFailure
       ? `# Your previous attempt failed (attempt ${ctx.priorFailure.attempt}, ${ctx.priorFailure.class})\n${ctx.priorFailure.message}\nFind what made it fail before you repeat its approach.`
       : '',
-    // The continuation handoff: the previous round's signal summary is the ONLY context that
-    // survives a round boundary (the conversation does not), so it renders as its own block —
-    // after the upstream outputs it complements, before the protocol.
+    // the previous round's signal summary is the only context that survives a round boundary
     ctx.continuation
       ? `# Continuing your own previous work (round ${ctx.continuation.round + 1})\nA previous round of THIS step ended with outcome 'partial' and reported:\n${ctx.continuation.summary}\nTrust that report: work it says is done IS done — do not re-read or re-verify it (measured: a continuation that re-verified spent every call re-proving old work and never advanced). Spend every call on what the report says REMAINS.`
       : '',
@@ -304,9 +256,7 @@ function buildPrompt(ctx: ExecutorContext<LanguageModel>, knownContextBlock = ''
   ].filter(Boolean).join('\n\n')
 }
 
-// Endgame budget note, durable + append-only: a transient per-call suffix at the prompt tail
-// would invalidate the provider's cached prefix every iteration. Warn only in the final 3
-// calls, loudly on the last.
+// durable and append-only: a per-call suffix would invalidate the provider's cached prefix
 function budgetNote(iteration: number, max: number): string | null {
   const remaining = max - iteration + 1
   if (remaining > 3) return null
@@ -346,21 +296,18 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
         const knownContext = await preloadKnownContext(ctx)
         const messages: ModelMessage[] = [{ role: 'user', content: buildPrompt(ctx, knownContext) }]
         const tools = toolSet(ctx.extraTools, { role: ctx.step.role, readOnlySource: ctx.step.readOnlySource })
-        // toolSet always registers signal (tools.ts) — resolved once here so the final-iteration
-        // narrowing below needs no non-null assertion
+        // toolSet always registers signal; resolved once so the narrowing below needs no `!`
         const signalTool = tools[TOOL_NAME.signal]
         const base = { stepId: ctx.step.id, runToken: ctx.runToken }
         let persistedThrough = 0 // messages[0..persistedThrough) are already in an agent_call event
-        // Paths this step has WRITTEN, and the ones already put to the model as at-risk. A path is
-        // surfaced once: re-listing the same claims every turn after every edit is noise the model
-        // learns to skip, and the obligation only needs stating once per file.
+        // paths this step WROTE and those already put to the model as at-risk; each is surfaced once
         const editedPaths = new Set<string>()
         const riskChecked = new Set<string>()
 
         for (let iteration = 1; iteration <= ctx.step.maxIterations; iteration++) {
           const note = budgetNote(iteration, ctx.step.maxIterations)
           if (note) messages.push({ role: 'user', content: note })
-          // Knowledge-protocol rule 4's mechanical half: keyed by iteration so a crash-recovery replay reuses the list.
+          // keyed by iteration so a crash-recovery replay reuses the list
           const fresh = [...editedPaths].filter(p => !riskChecked.has(p))
           if (fresh.length > 0 && ctx.knowledge) {
             const knowledge = ctx.knowledge
@@ -374,14 +321,7 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
             return
           }
 
-          // The FINAL iteration offers ONLY the signal tool. Telling the model "call signal THIS
-          // turn" while offering fs_read hands it a trap it walked into live (measured, both
-          // attempts of the continuation smoke): it spent the last call finishing work, the loop
-          // fed the result back, and no turn remained to signal from — exhaustion, with a partial
-          // summary it was never structurally able to send. Withholding the work tools makes the
-          // report the only legal move; `partial` is what makes that honest (unfinished work goes
-          // to a continuation round instead of dying in a summary field). One cache miss on the
-          // last call is the cost — the prompt prefix survives, the tool block does not.
+          // the FINAL iteration offers ONLY signal: withholding work tools makes the report the only move
           const finalIteration = iteration === ctx.step.maxIterations
           let turn: TurnResult
           try {
@@ -398,17 +338,14 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
               ),
               (r): EventDraft[] => [{
                 kind: EVENT_KIND.agent_call,
-                // persist only the DELTA since the previous agent_call — the full cumulative
-                // history would be O(iterations²) bytes; slice() also snapshots, so the draft
-                // never aliases the live array that keeps growing via push() (R9 traceability).
+                // persist only the delta since the last agent_call; slice() snapshots, so the draft cannot alias
                 payload: { ...base, iteration, request: { messages: messages.slice(persistedThrough) }, response: { text: r.text, toolCalls: r.toolCalls } },
                 usage: r.usage,
               }],
             )
             persistedThrough = messages.length
           } catch (err) {
-            // transient errors retry inside the checkpoint (DBOS); reaching here means retries
-            // are exhausted or the error is terminal → terminal provider failure.
+            // transient errors are retried inside the checkpoint; reaching here is terminal
             yield { type: UnifiedEventType.error, class: FailureClass.provider_error, message: errorMessage(err) }
             return
           }
@@ -420,9 +357,7 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
           const signalCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.signal)
           const parsedSignal = signalCall ? SignalInput.safeParse(signalCall.input) : undefined
           if (signalCall && parsedSignal && !parsedSignal.success) {
-            // The assistant turn's tool_use (signal, plus any siblings) must be answered by a
-            // matching tool result for EVERY call id, or a real provider rejects the next request
-            // with a 400 (terminal) — a bare user-message push leaves the signal call unresolved.
+            // every tool call id needs a matching tool result, or the next provider request 400s
             const ids = new Set(turn.toolCalls.map(c => c.toolCallId))
             messages.splice(0, messages.length, ...withoutToolResults(messages, ids))
             messages.push({
@@ -452,13 +387,10 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
           const askCall = turn.toolCalls.find(c => c.toolName === TOOL_NAME.ask_human)
           const parsedAsk = askCall ? AskHumanInput.safeParse(askCall.input) : undefined
 
-          // sibling tool calls batched with a valid signal still execute — a turn like
-          // [fs_write, signal(success)] must not silently drop the write. signal/join/ask are
-          // handled below (they have no execute), so they never reach executeTool.
+          // sibling tool calls batched with a valid signal still execute; signal/join/ask are handled below
           const toolCalls = turn.toolCalls.filter(c => c !== signalCall && c !== joinCall && c !== askCall)
           if (toolCalls.length > 0) {
-            // one operation per external tool effect: a crash retry re-runs only the interrupted
-            // call, never already-completed siblings; result order stays the model's call order
+            // one operation per external tool effect: a crash retry re-runs only the interrupted call
             const executed: Array<{ call: ToolCall; result: ToolOutcome }> = []
             for (const call of toolCalls)
               executed.push({
@@ -481,8 +413,7 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
             for (const { call, result } of executed) {
               yield { type: UnifiedEventType.tool_call, toolCallId: call.toolCallId, toolName: call.toolName, input: call.input }
               yield { type: UnifiedEventType.tool_result, toolCallId: call.toolCallId, toolName: call.toolName, output: result.output, isError: result.isError }
-              // A SUCCESSFUL write is what puts a claim at risk — a rejected edit changed nothing,
-              // and prompting about it would train the model to ignore the block.
+              // only a SUCCESSFUL write puts a claim at risk; a rejected edit changed nothing
               if (WRITING_FILE_TOOLS.has(call.toolName) && !result.isError) {
                 const p = editedPath(call.input)
                 if (p) editedPaths.add(p)
@@ -503,15 +434,7 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
           }
 
           if (joinCall && parsedJoin?.success) {
-            // suspension point (spec D9): the port recv's in workflow context and resumes us.
-            // resume is typed SplitResult[] | string | undefined (feedback shares the channel) —
-            // a gate only ever resumes with SplitResult[], so narrow defensively.
-            // Claims are released BEFORE parking. They are held for the duration of the turn, but a
-            // suspended turn writes nothing — and this suspension in particular waits on the very
-            // steps that are refused by the claims: a parent that wrote a file and then joins its
-            // splits fenced its own children out of that path for as long as it waited on them.
-            // GATE_POLL_SECONDS is 3600, so "as long as it waited" is hours, and the child's refusal
-            // reads as a concurrency error nobody caused.
+            // claims are released BEFORE parking: this wait is on the very steps the claims would fence out
             releaseWriteClaims(ctx.runToken)
             const resumed = yield {
               type: UnifiedEventType.gate,
@@ -532,9 +455,7 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
               role: 'tool',
               content: [
                 { type: 'tool-result', toolCallId: joinCall.toolCallId, toolName: TOOL_NAME.join_splits, output: { type: 'json', value: { splits: results } } },
-                // a batched signal/ask in the SAME turn as join_splits must still be answered here —
-                // its tool_use was already pushed via responseMessages above, and an unresolved
-                // tool_use makes the next generateText request rejected (missing tool result)
+                // a batched signal/ask in the SAME turn as join_splits must still be answered here
                 ...(signalCall ? [notExecutedResult(signalCall, signalDeferred)] : []),
                 ...(askCall ? [notExecutedResult(askCall, askDeferred)] : []),
               ],
@@ -553,21 +474,15 @@ export function apiLoopExecutor(sleep: Sleep = timerSleep): AgentExecutor<Langua
             continue
           }
 
-          // ask_human suspension (D4): mirrors join_splits but yields a feedback event instead of a
-          // gate. The port appends feedback_requested and DBOS.recv's on `feedback:<topic>`,
-          // resuming this turn with the human's reply string. topic defaults to a deterministic,
-          // replay-safe `${runToken}:${toolCallId}`.
+          // ask_human suspension: mirrors join_splits but yields feedback_requested instead of a gate
           if (askCall && parsedAsk?.success) {
             const topic = parsedAsk.data.topic ?? `${ctx.runToken}:${askCall.toolCallId}`
-            // same rule as the join gate above: a turn waiting on a human is not writing, and this
-            // one waits unbounded — holding a path across it fences siblings out indefinitely
+            // same rule as the join gate: a turn waiting unbounded on a human is not writing
             releaseWriteClaims(ctx.runToken)
             const resumed = yield { type: UnifiedEventType.feedback, question: parsedAsk.data.question, topic, toolCallId: askCall.toolCallId }
             const answer = typeof resumed === 'string' ? resumed : ''
             yield { type: UnifiedEventType.tool_result, toolCallId: askCall.toolCallId, toolName: TOOL_NAME.ask_human, output: { answer }, isError: false }
-            // the reply flows back as the ask_human tool result; the next iteration's agent_call
-            // persists it (part of messages.slice(persistedThrough)) — no separate checkpoint,
-            // feedback_requested (port) + that agent_call reconstruct the full Q&A on replay.
+            // the reply flows back as the tool result; the next agent_call persists it, no extra checkpoint
             messages.push({
               role: 'tool',
               content: [

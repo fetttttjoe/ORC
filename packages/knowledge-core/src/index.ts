@@ -1,7 +1,7 @@
 export { cardOf, CARD_REFUSAL } from './card'
 export { mergeChange, refuseUnknownDecision, sameContent } from './patch'
 export { planDecisionRecord, type DecisionPlan } from './decision-record'
-export { createMemoryBackend, NO_STRUCTURE, type MemoryBackendOptions } from './memory-backend'
+export { createInMemoryBackend, NO_STRUCTURE, type InMemoryBackendOptions } from './in-memory-backend'
 export { createKnowledgePort, ASSERTION_NOT_READ, EVIDENCE_NOT_READ, EVIDENCE_NOT_RECORDED, type KnowledgePortDeps } from './port'
 export { resolveKnowledgeBackend, REGISTRY_REFUSAL } from './registry'
 export {

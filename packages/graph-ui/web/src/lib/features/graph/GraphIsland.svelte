@@ -1,6 +1,5 @@
 <script lang="ts">
-  // The sigma island: mounts a WebGL graph over graph.nodes/graph.links and keeps it in sync by
-  // diffing deltas — never rebuild-the-world, which is what made the legacy page churn.
+  // Sigma island: WebGL graph kept in sync by diffing deltas, never rebuilding the world
   import { MultiGraph } from 'graphology'
   import forceAtlas2 from 'graphology-layout-forceatlas2'
   import FA2Layout from 'graphology-layout-forceatlas2/worker'
@@ -30,13 +29,10 @@
   let hovered = $state<string | null>(null)
   // the mounted renderer, for the reset control — imperative-only, so not $state
   let sigmaRef: Sigma | null = null
-  // whether the operator has taken the camera — set by mount()'s listeners, cleared by the
-  // reset control (resetting IS opting back into auto-framing). imperative-only, not $state.
+  // set by mount()'s listeners, cleared by reset; imperative-only, not $state
   let cameraTouched = false
 
-  // Nodes touched by the newest ledger event, lit briefly so the operator SEES where work is
-  // happening. Kept out of graphology attributes: this is presentation, and the reducer applies
-  // it per frame without mutating the graph the store owns.
+  // Nodes touched by the newest event, lit briefly; kept out of graphology attributes
   const flashing = new SvelteSet<string>()
   let flashTimer: ReturnType<typeof setTimeout> | null = null
   $effect(() => {
@@ -54,10 +50,7 @@
     flashTimer = setTimeout(() => flashing.clear(), FLASH_MS)
   })
 
-  // Focus mode: the selected task's own subtree stays lit, everything else dims — the graph
-  // answers "what does this request touch?" instead of showing the whole project at once.
-  // The walk lives in focus.ts (directed, outward-only); rooted at the OWNING task so focusing
-  // while a step or artifact is selected still lights the whole request.
+  // Focus: the owning task's subtree stays lit, the rest dims (focus.ts walks outward only)
   const focusSet = $derived.by(() => {
     const sel = session.sel.node
     if (sel === null || !session.focus) return null
@@ -86,8 +79,7 @@
         labelDensity: 0.5, // sigma drops labels that would collide rather than stacking them
         labelGridCellSize: 140,
         renderLabels: true,
-        // the container can be mid-flex-settle (0px) at attach time; the ResizeObserver below
-        // picks up the real dimensions, so a zero-size mount must not throw
+        // the container can be 0px at attach; the ResizeObserver picks up the real size
         allowInvalidContainer: true,
       })
     } catch {
@@ -97,8 +89,7 @@
     }
     sigmaRef = sigma
 
-    // Reducers paint selection/focus/flash per frame. Sigma re-runs them on every render, so
-    // these read reactive state without writing a single graph attribute.
+    // Reducers paint selection, focus and flash per frame without writing graph attributes
     sigma.setSetting('nodeReducer', (id, data) => {
       const selected = id === session.sel.node
       const dimmed = focusSet !== null && !focusSet.has(id)
@@ -140,20 +131,14 @@
       hovered = null
     })
 
-    // sigma only tracks WINDOW resizes; the container resizes without one (flex settling on
-    // initial load, panels opening, dock drags) and sigma keeps rendering into stale dimensions.
-    // resize() alone never draws — assigning canvas dimensions clears it — so schedule a render.
+    // sigma tracks only WINDOW resizes; resize() clears the canvas, so schedule a render
     const resizeObserver = new ResizeObserver(() => {
       sigma.resize()
       sigma.scheduleRender()
     })
     resizeObserver.observe(container)
 
-    // The operator takes the camera with wheel-zoom, drag-pan, or a node click while
-    // inspecting. While they have it, a growing graph must never yank the view; while they do
-    // NOT, the view must keep framing the whole picture — observed 2026-08-03: a heal sweep
-    // grew and re-lit the graph under a zoomed camera until nodes overflowed the pane and
-    // buried the legend, with only the manual reset control as the way back.
+    // Once the operator takes the camera, a growing graph must not yank the view
     const touch = (): void => { cameraTouched = true }
     container.addEventListener('wheel', touch, { capture: true, passive: true })
     container.addEventListener('pointerdown', touch, { capture: true })
@@ -163,9 +148,7 @@
     let settleTimer: ReturnType<typeof setTimeout> | null = null
     const runLayout = (): void => {
       if (g.order === 0) return
-      // A run already counting down keeps its deadline. Resetting the timer on every patch is
-      // the legacy bug: under sustained load the layout never settled. Bound the TOTAL run;
-      // the next change AFTER it stops starts a fresh bounded run.
+      // A running countdown keeps its deadline: resetting it per patch never settled under load
       if (settleTimer !== null) return
       if (typeof Worker === 'function') {
         layout ??= new FA2Layout(g, { settings: forceAtlas2.inferSettings(g) })
@@ -187,9 +170,7 @@
     const knownNodes = new Set<string>()
     const knownLinks = new Set<string>()
 
-    // A NESTED effect, deliberately: reads of graph.nodes/graph.links are tracked here, not in
-    // the attachment itself — tracked in the attachment they would tear sigma down and rebuild
-    // it on every patch.
+    // NESTED effect: graph reads tracked in the attachment would rebuild sigma on every patch
     $effect(() => {
       let changed = false
 
@@ -235,8 +216,7 @@
           droppedNode = true
           changed = true
         }
-      // dropNode silently removed incident edges — forget them so a surviving store link
-      // (should not happen, but the store is the truth) could be re-added rather than orphaned
+      // dropNode removes incident edges: forget them so a surviving store link can be re-added
       if (droppedNode) for (const key of knownLinks) if (!g.hasEdge(key)) knownLinks.delete(key)
 
       // links
@@ -285,8 +265,7 @@
     >
       <ScanIcon class="size-3.5" />
     </button>
-    <!-- the colour vocabulary, spelled from the same table the renderer paints with — a dot per kind
-         beat a hunt through colors.ts, and an unlabeled purple cloud reads as decoration -->
+    <!-- colour legend from the table the renderer paints with, so the dots cannot drift -->
     <dl class="pointer-events-none absolute bottom-2 left-2 z-10 flex flex-wrap items-center gap-x-2.5 gap-y-1 font-mono text-label text-fog select-none">
       {#each Object.entries(TYPE_COLORS) as [type, color] (type)}
         <div class="flex items-center gap-1">

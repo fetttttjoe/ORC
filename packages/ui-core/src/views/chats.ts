@@ -3,13 +3,12 @@ import { VIEW } from '../wire'
 import { scopeIndexOf, scopePatternsOf } from './scope-index'
 import { defineView } from './view'
 
-// The chats of one scope, newest-opened first — every field derived from the log by chatDigests.
+// newest-opened first; every field derived from the log by chatDigests
 export const chats = defineView({
   name: VIEW.chats,
   push: false,
 
-  // IN SCOPE = any of the chat's events is. Digesting the FILTERED events instead would sum a
-  // partial cost and drop the end of a run whose status change fell outside the scope.
+  // in scope = any of the chat's events is: filtered digests would sum a partial cost
   read(model, { scope }) {
     const index = scopeIndexOf(model)
     const ids = new Set<string>()
@@ -17,11 +16,7 @@ export const chats = defineView({
     return chatDigests(model.events).filter(d => ids.has(d.chatId))
   },
 
-  // Every event carrying a chatId moves that chat's digest — its lastSeq and usage at the least —
-  // so the rule is the event's scopes, not a list of the kinds the fold reads: three kinds the fold
-  // read were missing from such a list in review, and each served a stale digest forever. A child's
-  // open is the one event that also moves a digest it does NOT belong to: the parent's caused.runs
-  // is read off it.
+  // the rule is the event's scopes, not a kind list: a list missed kinds and served stale digests
   touches(event, model) {
     if (event.chatId === null) return []
     const patterns = scopePatternsOf(event, model)

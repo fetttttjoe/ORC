@@ -10,14 +10,10 @@ const Manifest = z.record(z.string(), z.string())
 
 const isPlanFile = (rel: string): boolean => /\/plan-v\d+\.md$/.test(rel)
 
-// Single writer for the trace subtree (spec D5). Atomic per file, skip-unchanged,
-// write-once for plan versions, warn-then-overwrite for hand-edited projection files.
+// Atomic per file; plan versions are write-once; hand-edited files warn, then are overwritten
 export function writeVaultFiles(vaultDir: string, files: VaultFiles): void {
   const manifestPath = path.join(vaultDir, '.orc-manifest.json')
-  // Missing file, broken JSON, or the right JSON shaped wrong (someone's own edit, a half-written
-  // manifest from a crashed run) all fold to the SAME fallback: an empty manifest reads every file
-  // below as never-before-tracked, so the warn-then-overwrite path is skipped and the write proceeds
-  // silently — the safe choice when there's no trustworthy prior hash to compare against.
+  // A missing or malformed manifest reads as empty: every file is untracked and written silently
   let manifest: Record<string, string> = {}
   try { manifest = Manifest.parse(JSON.parse(readFileSync(manifestPath, 'utf8'))) } catch { manifest = {} }
 

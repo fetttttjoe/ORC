@@ -34,9 +34,7 @@ async function seed(log: EventLog): Promise<{ taskId: string }> {
   return { taskId: t.id }
 }
 
-// state.artifacts is append-only and artifactNodeId keys on (taskId, path), so a path written twice
-// — every retried or re-run step — produced two nodes with the same id. diffGraphs then re-emitted
-// an updateNodes entry on EVERY event forever, and the stream never agreed with the snapshot again.
+// a path written twice (a retried step) must yield one node, or diffGraphs updates it forever
 describe('artifact node identity', () => {
   it('emits one node per path, and diffing a graph against itself is empty', () => {
     const st = emptyFold().state
@@ -62,8 +60,7 @@ describe('buildGraph', () => {
 
     const byId = new Map(g.nodes.map(n => [n.id, n]))
     expect(byId.get(taskId)?.detail).toBe('approved')
-    // the task's checkout rides on the node: the copilot's project_status groups the task list it
-    // already holds by this field, so dropping it here would silently empty every workspace group
+    // the task's checkout rides on the node: project_status groups the task list by it
     expect(byId.get(taskId)?.workspaceId).toBe(TEST_WORKSPACE_ID)
     expect(byId.get(stepNodeId(taskId, 's1'))?.workspaceId).toBeUndefined() // tasks only
     expect(byId.get(stepNodeId(taskId, 's1'))?.detail).toBe('completed')

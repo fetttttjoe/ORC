@@ -13,20 +13,15 @@ export interface CopilotConfig {
   resolveModel: (ref: string) => LanguageModel // throws for unknown provider/model
   defaultModelRef: string
   listModels?: () => Promise<string[]> // live provider/model refs for pickers + the copilot
-  // the project's workspaces WITH their health for the copilot's project_status — the same
-  // door-neutral dep mcp-serve wires, so both doors answer "which checkout is this task in, and is
-  // it still going anywhere?" the same way
   listWorkspaces?: Parameters<typeof buildCopilotTools>[0]['listWorkspaces']
-  // Which checkout an exchange is ABOUT when the client names none: the task's own workspace, else
-  // the one this server was started in. This door holds no task index — the composition root does.
+  // The task's own workspace, else the one this server started in; this door holds no task index
   resolveWorkspace?: (taskId: string | null) => Promise<string | null>
   price?: (ref: string, usage: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number } }) => number | null
 }
 
 const CopilotBody = z.object({
   projectId: z.string().min(1),
-  // Required, nullable: the client STATES whether it is continuing a chat (echo the id) or opening
-  // one (null). An optional key made a dropped id look like a new conversation every exchange.
+  // Required, nullable: an optional key made a dropped id look like a new conversation
   chatId: z.string().min(1).nullable(),
   taskId: z.string().min(1).nullable(),
   workspaceId: z.string().min(1).nullable(),
@@ -34,11 +29,7 @@ const CopilotBody = z.object({
   messages: z.array(z.object({ role: z.enum(MessageRole), content: z.string() })).min(1).max(60),
 })
 
-// Every mutating route: its body schema and its dispatch, tied together in one closure so the
-// parsed type flows into the handler with no casts — zod IS the validation and the typing.
-// The web boundary is a trust boundary even on localhost.
-// `project` is the chat the request came from (the x-orc-project header, defaulting to this
-// server's own). Routes that act on ONE named project read it; the rest ignore it.
+// project is the chat the request came from (x-orc-project, default this server's own)
 type ActionHandler = (a: OrcActions, body: unknown, project: string | undefined, origin: Origin) => Promise<Response>
 
 const route = <S extends z.ZodType>(schema: S, run: (a: OrcActions, input: z.output<S>, project: string | undefined, origin: Origin) => Promise<unknown>): ActionHandler =>
@@ -53,8 +44,7 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
   newTask: route(
     z.object({
       title: z.string().min(1), spec: z.string().optional(), parentId: id.optional(),
-      // required key, nullable value — the same shape OrcActions.newTask states: a caller that
-      // forgot a ceiling must be refused here, not silently given none
+      // required key, nullable value: a caller that forgot a ceiling is refused, not given none
       budgetUSD: z.number().positive().nullable(),
       grounded: z.object({ modelRef: id, cwd: id, analyzerRef: id.optional() }).optional(),
     }),
@@ -71,8 +61,7 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
     (a, d, _p, o) => a.approve(d.taskId, { version: d.version }, o),
   ),
   run: route(z.object({ taskId: id, cwd: id }), (a, d, _p, o) => a.run(d.taskId, d.cwd, o)),
-  // answers the chat the user is LOOKING at, not this server's own project — a reply is a pure
-  // append, so it belongs to whichever project asked the question (see CROSS_PROJECT_ACTIONS)
+  // answers the chat the user is looking at: a reply is a pure append (see CROSS_PROJECT_ACTIONS)
   reply: route(z.object({ taskId: id, text: z.string().min(1) }), (a, d, project, o) => a.reply(d.taskId, d.text, project, o)),
   // no cwd: the retried run belongs in the task's own workspace, and this door has no terminal
   retry: route(z.object({ taskId: id }), (a, d, _p, o) => a.retry(d.taskId, null, o)),
@@ -91,22 +80,9 @@ const ACTION_ROUTES: Record<string, ActionHandler> = {
   deleteProject: route(z.object({ projectId: id }), (a, d, _p, o) => a.deleteProject(d.projectId, o)),
 }
 
-// Actions that EXECUTE run against the ONE project this server was started in — they need the
-// runtime that lives there (ensureRuntime's spawn, the DBOS port, the in-process zone write-fence),
-// so from a foreign chat they would be a silent cross-project write and must die loudly here.
-// ponytail: fence, not feature — per-project kernels/DBOS runtimes would lift it.
-//
-// These three name their own target project instead, and none of them executes anything:
-// newProject touches no existing state, deleteProject targets an explicit FOREIGN project by design
-// (the action refuses home), and `reply` is a pure append — the answer unblocks a parked step and
-// the supervisor's router carries it in off feedback_provided. Fencing reply was a UX defect with no
-// safety behind it: the sidebar lists and streams every project, so the pane showed a question and
-// then refused to let the user answer it, sending them to a terminal for a row this server already
-// had that project's log to write.
+// fence, not feature: executing actions need the runtime that lives in the server's project
 const CROSS_PROJECT_ACTIONS = new Set(['newProject', 'deleteProject', 'reply'])
 
-// Thin web adapter: JSON + SSE over ProjectSessions. Nothing here knows how graphs are
-// computed; a TUI adapter imports @orc/ui-core directly and never touches this file.
 export interface GraphUiServer {
   port: number
   sessions: ProjectSessions
@@ -123,19 +99,14 @@ export function startGraphUi(opts: {
   defaultCwd?: string
   // absent = health unknown; supervisor absent = the composition has no storage to ask
   health?: () => Promise<{ knowledge: KnowledgeHealth; supervisor?: SupervisorHealth }>
-  // P6 interaction journaling: append one copilot_exchange event per completed exchange — the
-  // conversation that caused an action is part of the record. Absent = exchanges unrecorded.
-  // `opened` rides along so the chat and its first exchange land in ONE append: a chat_opened that
-  // committed without its exchange would leave an empty conversation in every chats list.
+  // One copilot_exchange event per completed exchange; absent means exchanges go unrecorded
   appendExchange?: (x: CopilotExchangeRecord) => Promise<void>
 }): GraphUiServer {
   const sessions = createProjectSessions({ url: opts.url, cwdProject: opts.cwdProject })
-  // chats-list push: one sessions-level watch for the whole server, fanned out to every open
-  // stream — a project born anywhere (CLI init, a bench run) reaches every sidebar live
+  // One sessions-level watch fans the chats list out to every open stream
   const projectFeeds = new Set<(ps: ProjectEntry[]) => void>()
   const projectsPush = sessions.subscribeProjects(ps => { for (const feed of projectFeeds) feed(ps) })
-  // CSRF guard: minted per boot, readable only same-origin (GET /api/session), required as a
-  // custom header on every mutation — cross-origin pages can neither read nor send it.
+  // CSRF guard: minted per boot, readable only same-origin, required as a header on mutations
   const token = crypto.randomUUID()
   // shown in the page footer — makes a stale server process (old bundle, old routes) visible
   const bootedAt = new Date().toISOString()
@@ -145,8 +116,6 @@ export function startGraphUi(opts: {
     [VIEW.models]: async () => await opts.copilot?.listModels?.() ?? [],
   }
 
-  // the copilot loop: same tools as the UI, streamed to the client part by part — every tool
-  // call is visible, usage is priced through the same table as agent runs
   const copilot = async (req: Request): Promise<Response> => {
     const cfg = opts.copilot
     if (!cfg) return Response.json({ error: 'copilot unavailable: start orc graph inside a project' }, { status: 501 })
@@ -174,11 +143,7 @@ export function startGraphUi(opts: {
       tools: buildCopilotTools({
         sessions, actions: mode === 'act' ? opts.actions ?? null : null, projectId, origin, listModels: cfg.listModels,
         ...(opts.health && { health: opts.health }),
-        // HOME project only. The dep reads the kernel this server was started with, while
-        // `projectId` is whichever chat the user is looking at — wiring it unconditionally would
-        // list this checkout's workspaces under a FOREIGN project's tasks, which is a wrong answer
-        // rather than a missing one. listModels above needs no such fence: a provider catalog is
-        // not project-scoped.
+        // Home project only: the dep reads this server's kernel, not the viewed project's
         ...(home && cfg.listWorkspaces && { listWorkspaces: cfg.listWorkspaces }),
       }),
       stopWhen: stepCountIs(8),
@@ -221,8 +186,7 @@ export function startGraphUi(opts: {
         } catch (err) {
           send({ type: CopilotFrameType.error, message: errorMessage(err) })
         } finally {
-          // journal only the project this server can act in — a foreign-project chat is
-          // read-only and its record belongs to that project's own server
+          // journal only home: a foreign chat's record belongs to that project's own server
           if (opts.appendExchange && home && (assistant !== '' || toolCalls.length > 0)) {
             const journaled = await opts.appendExchange({
               chatId: chat.chatId, opened: chat.opened,
@@ -252,12 +216,8 @@ export function startGraphUi(opts: {
       }, { status: 409 })
     try {
       const body: unknown = await req.json().catch(() => null)
-      // An operator's click belongs to no copilot conversation: this door's only chat-stamped
-      // calls are the copilot's own tool calls, which carry their origin from the stream.
       const res = await handler(opts.actions, body, claimed ?? opts.cwdProject?.id, NO_CHAT(Door.web))
-      // purge/delete rewrote history behind a cached session — drop it so reads refold; both
-      // change the chats list without an append NOTIFY (deletion removes rows outright), so
-      // the push must be told explicitly
+      // purge and delete rewrite history without a NOTIFY: drop the session, push the list
       if (res.ok && (name === 'purgeProject' || name === 'deleteProject')) {
         if (name === 'purgeProject' && opts.cwdProject) await sessions.reset(opts.cwdProject.id)
         if (name === 'deleteProject' && isRecord(body) && typeof body.projectId === 'string') await sessions.reset(body.projectId)
@@ -271,10 +231,7 @@ export function startGraphUi(opts: {
   }
 
   const api = async (req: Request): Promise<Response> => {
-    // Host-header allowlist: a DNS-rebinding page reaches this loopback server carrying its OWN
-    // hostname in Host (attacker.com rebound to 127.0.0.1), so the browser treats it as same-origin
-    // and BOTH the localhost bind and the CSRF token are defeated — it can read /api/session and
-    // then drive run/deleteProject/copilot. Only a genuinely-loopback Host is the real UI.
+    // Only a loopback Host is the real UI: a DNS-rebinding page defeats the bind and the CSRF token
     const hostname = (req.headers.get('host') ?? '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '')
     if (hostname !== '127.0.0.1' && hostname !== 'localhost' && hostname !== '::1')
       return new Response('forbidden host', { status: 403 })
@@ -282,21 +239,9 @@ export function startGraphUi(opts: {
     if (req.method === 'POST' && u.pathname === '/api/copilot') return copilot(req)
     if (req.method === 'POST' && u.pathname.startsWith('/api/actions/'))
       return act(req, u.pathname.slice('/api/actions/'.length))
-    // `project` is an UNTRUSTED query param on unauthenticated GETs (/api/graph, /api/stream carry
-    // no x-orc-token, and the Host allowlist checks Host, not Origin). It reaches sessionFor(),
-    // which caches a session PERMANENTLY — a Postgres pool plus a dedicated LISTEN client — keyed by
-    // whatever string arrived. So every distinct value leaked one of each, unbounded, from a request
-    // anyone on the machine could make in a loop.
-    //
-    // Resolved against the projects that actually exist rather than pattern-matched: a well-formed
-    // uuid for a project that was never created would allocate just as happily. One indexed query
-    // against a set the UI already fetches, and an unknown id is treated as "no project" — every
-    // consumer below already handles the empty string.
+    // Untrusted ?project=: resolve against existing projects so no session is allocated per value
     const requested = u.searchParams.get(PROJECT_PARAM) ?? ''
     const project = requested !== '' && (await sessions.projects()).some(p => p.id === requested) ? requested : ''
-    // Every read the browser can ask for, answered from the registry: the name is a path segment
-    // and the params one url-encoded JSON value, both resolved by readView. A new question costs a
-    // view and nothing here.
     if (u.pathname.startsWith(VIEW_ROUTE.prefix))
       return viewResponse(
         await sessions.model(project),
@@ -340,21 +285,14 @@ export function startGraphUi(opts: {
             const enc = new TextEncoder()
             const send = (seq: number, data: StreamFrame): void =>
               controller.enqueue(enc.encode(`id: ${seq}\ndata: ${JSON.stringify(data)}\n\n`))
-            // State sync rides the same stream WITHOUT an `id:` line: it describes no event, so it
-            // must never advance the client's Last-Event-ID resume cursor.
+            // No id: state sync describes no event, so it must not advance the resume cursor
             const sync = (data: StreamFrame): void => controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`))
             controller.enqueue(enc.encode(': connected\n\n')) // flush headers + first byte immediately
-            // keepalive: quiet projects emit nothing — periodic comments keep the connection
-            // alive through idle timeouts and proxies, and detect dead clients (enqueue throws)
+            // keepalive comments hold idle connections open and detect dead clients
             ping = setInterval(() => {
               try { controller.enqueue(enc.encode(': ping\n\n')) } catch { clearInterval(ping); unsub?.(); dropFeed() }
             }, 25_000)
-            // The operator value THIS connection last carried, serialized. Per connection, not per
-            // server: a reconnecting tab holds none, and would otherwise wait for an event that
-            // happened to change it before learning a task is parked on a question. Compared by
-            // serialization because each fold builds the value afresh — no two share an identity,
-            // and resending an unchanged one puts a full operator payload on the agent loop's
-            // cadence.
+            // Per connection, not per server: a reconnecting tab holds none; compared by serialization
             let lastOperator: string | null = null
             const operatorIfChanged = (model: ReadModel): OperatorState | null => {
               const value = VIEWS.operatorState.read(model, {})
@@ -363,22 +301,13 @@ export function startGraphUi(opts: {
               lastOperator = key
               return value
             }
-            // Subscribe FIRST (buffering), catch up second, flush third: an event landing
-            // during the catch-up await is buffered, never lost. The old order (since → then
-            // subscribe) left a gap the width of the awaits in between — luck-sized before,
-            // structural zero now.
+            // Subscribe first (buffering), catch up second, flush third: no event is lost mid-catch-up
             let liveNow = false
             const buffered: SessionUpdate[] = []
-            // Synchronous, and it takes no model of its own: `up.model` is the state as of
-            // `up.seq`, handed over by the session inside the tick it notified in. Fetching one
-            // back here would answer for whenever this happened to run — a frame describing a later
-            // world than the seq it carries, with nothing failing to say so.
+            // deliver takes no model of its own: up.model is the state as of up.seq
             const deliver = (up: SessionUpdate): void => {
               const patch = emptyPatch(up.patch) ? null : up.patch
-              // A failed tool call rides ALONG the summary row rather than in a channel of its
-              // own: the row already reaches every feed consumer, and the pane's question cards
-              // are rendered from the same row — the reason an answer did not take has to land
-              // next to the question that was re-asked, not somewhere else.
+              // A failed tool call rides along the summary row, next to the question that was re-asked
               const failure = toolFailure(up.event)
               const summary = up.summary && failure ? { ...up.summary, failure } : up.summary
               const touched = up.event ? touchesOf(up.event, up.model) : []
@@ -390,13 +319,7 @@ export function startGraphUi(opts: {
             })
             const fromSafe = Number.isFinite(fromSeq) ? fromSeq : 0
             const missed = await sessions.since(project, fromSafe)
-            // The first frame after connect always carries this connection's operator state: a tab
-            // attaching to a quiet project must still know which tasks are waiting on a human, and
-            // no event is owed for it. WHICH frame carries it is load-bearing — an id-less frame is
-            // read against whatever Last-Event-ID the client still holds, and a client whose graph
-            // has run ahead of that id reads it as a seq regression, drops the payload and resyncs,
-            // on exactly the reconnect this value exists to serve. So it rides the catch-up frame,
-            // which has an id, whenever there is one.
+            // Operator state rides the catch-up frame (has an id): an id-less frame can force a resync
             if (missed) send(missed.seq, { patch: missed.patch, summary: null, operator: operatorIfChanged(missed.model) })
             else sync({ operator: operatorIfChanged(await sessions.model(project)) })
             const cutoff = missed?.seq ?? fromSafe
@@ -425,8 +348,7 @@ export function startGraphUi(opts: {
     port: opts.port,
     idleTimeout: 0, // SSE connections are idle by design — the default 10s would sever them
     development: process.env.ORC_GRAPH_DEV === '1',
-    // the UI is the Vite-built SPA in web/dist (content-hashed assets); non-API paths fall back
-    // to index.html so hash-router deep links survive a reload. `bun run build` in web/ rebuilds.
+    // Non-API paths fall back to index.html so hash-router deep links survive a reload
     fetch: async req => {
       const u = new URL(req.url)
       if (u.pathname.startsWith('/api')) return api(req)

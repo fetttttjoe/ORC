@@ -13,14 +13,13 @@ import { openStorage } from '../storage'
 import { Kernel } from '../kernel'
 import { createTestDb, fakeProvider, fakeSkills, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, testConfig, waitFor } from '../test-helpers'
 import { createDbosPort } from './dbos-port'
-import { memoryKnowledge } from './knowledge-fixture'
+import { inMemoryKnowledge } from './knowledge-fixture'
 import { splitTool } from './split-tool'
 
 // task_split's tool output (contract-`unknown`): the child's address and whether it gated.
 const SplitOutput = z.object({ splitId: z.string(), childTaskId: z.string(), gated: z.boolean() })
 
-// The 1-step child plan the parent proposes via task_split (dependsOn/skillRefs are required
-// on ChildPlanStep — no zod default — so they are spelled out here).
+// The 1-step child plan the parent proposes via task_split (dependsOn/skillRefs have no default).
 const CHILD_PLAN = { steps: [{ id: 'w1', role: 'worker', title: 'w', instructions: 'do', dependsOn: [], skillRefs: [] }] }
 const CHILD_CLAIM_TEXT = 'The child recorded this finding'
 const CHILD_WRITE = { add: [{ text: CHILD_CLAIM_TEXT, class: ClaimClass.fact, anchors: [{ path: 'src/child.ts' }] }], why: 'the child found it' }
@@ -30,14 +29,7 @@ const WriteOutput = z.object({ added: z.array(KnowledgeRef) })
 const CLI: Origin = NO_CHAT(Door.cli)
 
 
-// ONE scripted executor drives BOTH the parent step (s1) and the split child step (w1),
-// branching on ctx.step.id — the child inherits executorRef='split-fake' at expansion.
-// cfg.expectGated is what the parent asserts task_split returned; cfg.child selects the
-// child's behavior. Assertions are encoded into the parent's success/failure signal
-// ('done' at the run level PROVES the encoded checks held).
-// cfg.beforeGate is a mutable box the test fills AFTER bringUp (the log does not exist when the
-// executor is constructed). It lets the parent block until the child's split is genuinely
-// resolved, which is the only way to reproduce a child outrunning its parent's join.
+// One executor drives parent and child by ctx.step.id; run-level 'done' proves the checks held
 function splitFake(cfg: {
   expectGated: boolean; child: 'write' | 'signal' | 'sleep'; foreignSplit?: boolean
   expectedWorkspace?: string; defaultTargets?: boolean; beforeGate?: { wait?: (splitId: string) => Promise<void> }
@@ -51,11 +43,7 @@ function splitFake(cfg: {
         if (!t) throw new Error(`no '${name}' tool injected`)
         return t
       }
-      // ---- the kernel's appended FINISH step ----
-      // It runs this same fake (it inherits the parent step's executorRef), and everything below
-      // the child branch is the PARENT choreography — so without this it would propose a SECOND
-      // split of its own and gate on it, which is how (b) went from done to a 20s timeout. The
-      // finish step has no part in the split choreography: it signals success and ends the run.
+      // the finish step runs this fake too and must not split again: it signals success and ends the run
       if (ctx.step.id === FINISH_STEP_ID) {
         const signal = { ...base, outcome: SignalOutcome.success, summary: 'finished' }
         await ctx.checkpoint('signal:1', async () => signal, (): EventDraft[] => [
@@ -70,8 +58,7 @@ function splitFake(cfg: {
       if (ctx.step.id === 'w1') {
         const workspaceOk = cfg.expectedWorkspace === undefined || ctx.workspaceDir === cfg.expectedWorkspace
         if (cfg.child === 'sleep') {
-          // genuinely running until DBOS cancels the workflow (the next checkpoint throws).
-          // ponytail: bounded at ~20s so a missed cancel can't wedge the suite; cancel lands <1s.
+          // runs until DBOS cancels the workflow; bounded at ~20s so a missed cancel cannot wedge the suite
           for (let i = 0; i < 200; i++) await ctx.checkpoint(`wait:${i}`, async () => { await Bun.sleep(100); return null })
           const signal = { ...base, outcome: SignalOutcome.success, summary: 'child was never cancelled' }
           yield { type: 'signal', signal }
@@ -119,9 +106,7 @@ function splitFake(cfg: {
       const out = SplitOutput.parse(res.output)
       const gatedOk = res.isError === false && out.gated === cfg.expectGated
 
-      // yield the gate; the port resumes the generator with SplitResult[] once the child resolves.
-      // a foreign id (not one of THIS attempt's splits) must be dropped, not recv-waited forever.
-      // let the child fully resolve first, so the gate is reached AFTER split_resolved committed
+      // yield the gate after the child resolved; a foreign id must be dropped, not recv-waited forever
       if (cfg.beforeGate?.wait) await cfg.beforeGate.wait(out.splitId)
       // defaultTargets exercises the [] path loop.ts actually uses (join_splits with no ids)
       const splitIds = cfg.defaultTargets ? []
@@ -150,7 +135,7 @@ async function bringUp(policy: 'auto' | 'manual', executor: AgentExecutor<unknow
   const config = testConfig(pg.url, {
     approvalPolicy: ApprovalPolicy.parse({ default: policy }), maxDepth: 3, concurrency: over.concurrency ?? 3,
   })
-  const knowledge = memoryKnowledge(log, kernel)
+  const knowledge = inMemoryKnowledge(log, kernel)
   const port = await createDbosPort({
     storage, config, skills: fakeSkills,
     providers: new Map([['fake', fakeProvider]]),
@@ -223,8 +208,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
   }, 20_000)
 
   it('(c) queue partition: a depth-0 parent gating on a depth-1 child completes at concurrency 1', async () => {
-    // on a flat queue the gate-waiting parent holds the only slot and deadlocks its child;
-    // depth-partitioned agents:0/agents:1 let both hold a slot, so it finishes.
+    // on a flat queue the gate-waiting parent deadlocks its child; agents:0/agents:1 avoid it
     const { kernel, port, cleanup } = await bringUp('auto', splitFake({ expectGated: false, child: 'signal' }), { concurrency: 1 })
     try {
       const parentId = await parentTask(kernel)
@@ -259,10 +243,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
   }, 40_000)
 
   it('(f) a child that resolves BEFORE the parent joins still delivers its summary', async () => {
-    // split_resolved is appended by the router at RESOLUTION time, then the payload is sent. So a
-    // split already resolved when the parent reaches its gate is exactly the one with a message
-    // waiting — filtering it out as "already resolved" dropped the child's summary and
-    // handed the agent an empty join. Uses the default [] target path, which is what loop.ts passes.
+    // a split already resolved at the gate still has a message waiting: it must not be filtered out
     const gate: { wait?: (splitId: string) => Promise<void> } = {}
     const { kernel, log, port, cleanup } = await bringUp('auto', splitFake({
       expectGated: false, child: 'write', defaultTargets: true, beforeGate: gate,
@@ -279,8 +260,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
       }
       const parentId = await parentTask(kernel)
       const handle = await port.startRun(parentId)
-      // the parent encodes its own assertions into the signal: 'done' proves r0 arrived with
-      // outcome=done and gatedOk held
+      // 'done' proves r0 arrived with outcome=done and gatedOk held
       expect(await handle.wait()).toBe(RunOutcome.done)
     } finally {
       await cleanup()
@@ -288,8 +268,7 @@ describe('recursion e2e: split, gate, join, manual approve, queue partition', ()
   }, 60_000)
 
   it('(e) gate drops a foreign splitId: run joins the real child, never wedges recv on the bogus id', async () => {
-    // without the intersection guard the port recv-waits on split:split:foreign:nope forever and
-    // this run never settles (timeout); with it, the foreign id is dropped and only the real split awaited.
+    // without the intersection guard the run recv-waits on the foreign id forever and never settles
     const { kernel, port, cleanup } = await bringUp('auto', splitFake({ expectGated: false, child: 'signal', foreignSplit: true }))
     try {
       const parentId = await parentTask(kernel)

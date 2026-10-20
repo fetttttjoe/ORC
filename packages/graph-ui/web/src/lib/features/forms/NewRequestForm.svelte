@@ -13,11 +13,7 @@
   import { VIEW } from '@orc/ui-core/wire'
   import { session } from '$lib/stores/session.svelte'
 
-  /**
-   * Grounded analyses the repo and decomposes before asking for approval; draft is one step
-   * running the spec verbatim. The distinction is the presence of the `grounded` block on the
-   * wire — the server's newTask schema has no `mode` field, and this form sets no budget.
-   */
+  // Grounded analyses then asks approval; draft is one step; the wire tells them by `grounded`
   const MODES = [
     { value: 'grounded', label: 'grounded — analyse, decompose, review' },
     { value: 'draft', label: 'draft — one step, your spec verbatim' },

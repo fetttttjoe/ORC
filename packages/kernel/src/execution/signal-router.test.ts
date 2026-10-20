@@ -7,8 +7,7 @@ import { createTestDb, seedTestWorkspace, TEST_PROJECT_ID, TEST_WORKSPACE_ID, wa
 import { composeSplitResult, createSignalRouter } from './signal-router'
 import { authorFixture, eventFixture, must } from '@orc/contracts/fixtures'
 
-// these arrangements are a client acting through no chat; the split below is asked for from a real
-// one, because that chat is what a supervisor reaction has to answer to
+// arrangements act through no chat; the split comes from a real one, which a reaction answers to
 const CLI: Origin = NO_CHAT(Door.cli)
 const SPLIT_CHAT: Origin = { chatId: 'chat-split', door: Door.web }
 
@@ -34,8 +33,7 @@ describe('composeSplitResult', () => {
       evt({ seq: 6, kind: EVENT_KIND.step_completed, stepId: 'w2', runToken: 'rt-w2', payload: { stepId: 'w2', runToken: 'rt-w2', summary: 'second' } }),
       evt({ seq: 7, kind: EVENT_KIND.task_status_changed, payload: { taskId: 'c1', from: 'running', to: 'done' } }),
     ]
-    // knowledge events arrive separately: they are NOT router kinds, so the router fetches them
-    // only when it actually composes a result rather than on every routed event
+    // knowledge events are not router kinds: fetched only when a result is composed
     const knowledge: EventRecord[] = [
       evt({ seq: 8, taskId: 'c1', kind: EVENT_KIND.knowledge_written, payload: { added: [{ id: 'aaaaaaaa', location: 'knowledge/a.md' }, { id: 'bbbbbbbb', location: 'knowledge/b.md' }], changed: [], retired: [], files: ['knowledge/a.md', 'knowledge/b.md'], why: 'w', decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author: authorFixture({ taskId: 'c1' }) } }),
       evt({ seq: 9, taskId: 'c1', kind: EVENT_KIND.knowledge_written, payload: { added: [], changed: [], retired: [{ id: 'bbbbbbbb', location: 'knowledge/b.md' }], files: ['knowledge/b.md'], why: 'w', decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author: authorFixture({ taskId: 'c1' }) } }),
@@ -182,7 +180,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(sends).toHaveLength(1)
     expect(sends[0]).toMatchObject({ dest: 'rt', topic: 'split:sp1', key: 'sp1' })
     expect(must(sends[0], 'first send').result).toMatchObject({ splitId: 'sp1', childTaskId: 'c', outcome: 'done' })
-    // the reaction answers to the chat that ASKED for the split, stamped with the supervisor's door
+    // the reaction answers to the chat that ASKED for the split, carrying the supervisor's door
     const resolved = must((await log.all()).find(e => e.kind === EVENT_KIND.split_resolved), 'split resolved event')
     expect({ chatId: resolved.chatId, door: resolved.door }).toEqual({ chatId: SPLIT_CHAT.chatId, door: Door.supervisor })
   })
@@ -277,10 +275,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(started).toEqual(['t1'])
   })
 
-  // A request nothing can ever serve must not be retried forever. startRunAt admits only
-  // approved/running/blocked, so a run_requested left over from before a task settled was
-  // re-attempted and re-refused on EVERY boot — three done tasks did exactly that on all 18
-  // supervisor starts.
+  // A request nothing can serve is skipped, not re-refused on every boot.
   it('sweep: a run_requested for a task that has since settled is NOT re-served', async () => {
     const started: string[] = []
     await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
@@ -296,9 +291,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(started).toEqual([])
   })
 
-  // The other half of the same rule, and the reason the skip uses TERMINAL_TASK_STATUS rather than
-  // this file's local TERMINAL (which also holds `blocked`): blocked is the state a retry resumes
-  // FROM, so an unserved retry MUST still be redelivered by the sweep.
+  // The other half: the skip uses TERMINAL_TASK_STATUS, as blocked is where a retry resumes.
   it('sweep: a run_requested for a BLOCKED task is still served — that is what retry resumes from', async () => {
     const started: string[] = []
     await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
@@ -327,9 +320,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(cancelled).toEqual(['t1'])
   })
 
-  // A reaction that throws is the runtime failing at its own job. It used to leave nothing but a
-  // console.warn on the supervisor's stdout: the client had been told its ask was recorded, and
-  // `orc status` showed a task that simply never moved — at the terminal, a hang.
+  // A throwing reaction must be recorded as data, not left as a console.warn and a hanging task.
   it('a reaction that throws is recorded as data, naming the cause, once per cause', async () => {
     router = createSignalRouter({
       log, onChildApproved: async () => {}, onCancelled: async () => {},
@@ -347,13 +338,11 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(recorded).toEqual({
       reaction: REACTION.runRequested, taskId: 't1', message: 'nothing can serve this', causeSeq: asked.seq,
     })
-    // the diagnosis belongs to the chat whose ask failed — otherwise the client that asked never
-    // sees why its task did not move
+    // the diagnosis belongs to the chat whose ask failed, so the asking client sees why
     const diagnosis = must((await failures())[0], 'reaction failed event')
     expect({ chatId: diagnosis.chatId, door: diagnosis.door }).toEqual({ chatId: 'chat-ask', door: Door.supervisor })
 
-    // a fresh supervisor sweeps the same unserved request on every boot — the diagnosis is keyed by
-    // the CAUSE, so a permanently broken reaction cannot grow the log without bound
+    // keyed by the CAUSE, so a permanently broken reaction cannot grow the log on every boot
     const second = createSignalRouter({
       log, onChildApproved: async () => {}, onCancelled: async () => {},
       onRunRequested: async () => { throw new Error('nothing can serve this') },
@@ -364,9 +353,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     expect(await failures()).toHaveLength(1)
   })
 
-  // The reactor route (knowledge provenance plan T2): a hand-made commit's hook event reaches an
-  // injected handler, so the composition root can run the free restamp/heal reaction the operator
-  // ran by hand twice on 2026-08-03 (commit → restamp → drift 0, ~1 min, zero LLM cost each time).
+  // The reactor route: a hand-made commit's hook event reaches an injected handler
   describe('commit_recorded routing', () => {
     const commit = (sha: string, paths: string[]) =>
       log.append({ ...CLI, taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.commit_recorded, payload: { sha, paths, workspaceId: TEST_WORKSPACE_ID } })
@@ -385,8 +372,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
     })
 
     it('sweep: only the LATEST commit that landed while down is served on start()', async () => {
-      // the reaction is idempotent corpus-wide (restamp covers everything behind), so serving
-      // every historical commit on every boot would be pure duplicate work
+      // the reaction is idempotent corpus-wide, so serving every historical commit is duplicate work
       await commit('b'.repeat(40), ['a.ts'])
       await commit('c'.repeat(40), ['b.ts'])
       const seen: string[] = []
@@ -441,8 +427,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
   it('sweep: a retry request that landed after an earlier run still starts it', async () => {
     const started: Array<{ taskId: string; retry: boolean }> = []
     await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
-    // an earlier run already happened — the OLD "does this task have any run" gate would have
-    // wrongly treated the request below as already served
+    // an earlier run already happened: the old any-run gate would treat the request below as served
     await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_started, payload: { taskId: 't1', planVersion: 1, retryIndex: 0, workflowId: 'run:t1:v1', cwd: null } })
     // the retry request lands AFTER that run, with no router subscribed
     await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.run_requested, payload: { taskId: 't1', cwd: null, retry: true } })
@@ -458,8 +443,7 @@ describe('createSignalRouter (integration, real EventLog)', () => {
   it('sweep: a cancelled task that landed before start still cancels its workflows', async () => {
     const cancelled: string[] = []
     await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: taskNode('t1', null) } })
-    // lands with NO router subscribed — DBOS recovery on THIS boot would otherwise resume the
-    // workflow with nobody ever telling it to stop
+    // lands with NO router subscribed: DBOS recovery on this boot would resume the workflow unstopped
     await log.append({ ...CLI, taskId: 't1', stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId: 't1', from: TASK_STATUS.running, to: TASK_STATUS.cancelled } })
     router = createSignalRouter({
       log, onChildApproved: async () => {}, onRunRequested: async () => {},

@@ -16,8 +16,7 @@
 
   const taskId = $derived(taskIdOf(nodeId))
 
-  // subtree false: this tab is ONE task's slice, and the header chip above it names that task —
-  // admitting a child's rows here would attribute them to the task the operator selected
+  // subtree false: this tab is ONE task's slice; a child's rows would be misattributed
   const log = createQuery(
     viewQuery(VIEW.timeline, () => (taskId !== null ? { scope: { type: ScopeType.task, id: taskId, subtree: false }, limit: LOG_LIMIT } : null)),
   )
@@ -40,8 +39,7 @@
   <p class="px-4 py-6 text-xs text-fog">no events for this task yet</p>
 {:else}
   {#each log.data ?? [] as row (row.seq)}
-    <!-- showTask=false: this slice is already ONE task, so the chip repeated the same id on
-         every row and spent width the line needs in a narrow panel -->
+    <!-- showTask=false: the slice is one task, so a chip would repeat the id on every row -->
     <LedgerRow {row} showTask={false} />
   {/each}
 {/if}

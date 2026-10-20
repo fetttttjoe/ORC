@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, authorSourceOf, composeAuthor } from './author'
+import { AUTHOR_SOURCE, AuthorSource, authorSourceOf, composeAuthor, stepAuthor } from './author'
 import { authorFixture } from './fixtures'
 import { Door } from './origin'
 
@@ -18,10 +18,24 @@ describe('composeAuthor', () => {
     expect(composeAuthor(authorFixture({ source: AUTHOR_SOURCE.human }))).toBe('human')
     expect(composeAuthor(authorFixture({ source: AUTHOR_SOURCE.cli }))).toBe('cli')
   })
-  // A door with nothing to compose from renders as ITSELF, never as 'agent'.
   it('a bare door composes to its own source, never to agent; a pipeline still composes', () => {
     expect(composeAuthor(authorFixture({ source: AUTHOR_SOURCE.mcp }))).toBe('mcp')
     expect(composeAuthor(authorFixture({ source: AUTHOR_SOURCE.agent }))).toBe('agent')
     expect(composeAuthor(authorFixture({ source: AUTHOR_SOURCE.mcp, executor: 'mcp-serve' }))).toBe('mcp-serve')
+  })
+})
+
+describe('stepAuthor', () => {
+  it("stepAuthor takes exactly the author fields from a step's params", () => {
+    const author = authorFixture()
+    const params = {
+      origin: author.origin, workspaceId: 'ws-1', taskId: 't-1', stepId: 's-1', runToken: 'rt-1',
+      executor: 'api-loop', model: 'm-1', role: 'builder',
+      modelRef: 'anthropic/m-1', workspaceDir: '/w', step: { id: 's-1' }, ancestorTaskIds: ['t-0'],
+    }
+    expect(stepAuthor(params)).toEqual({
+      source: AuthorSource.agent, origin: params.origin, workspaceId: 'ws-1', taskId: 't-1', stepId: 's-1',
+      runToken: 'rt-1', executor: 'api-loop', model: 'm-1', role: 'builder',
+    })
   })
 })

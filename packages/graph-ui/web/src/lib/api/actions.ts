@@ -1,14 +1,7 @@
 import { api } from './client'
 import * as S from './schemas'
 
-/**
- * Every mutation the UI can perform, in one typed seam. Components call these — never `api.act`
- * with a hand-built object — so a payload shape lives in exactly one place and the server's zod
- * route either accepts all of our callers or none of them.
- *
- * The result schemas are parsed, not asserted: an action's answer drives what the operator is
- * told, and a silently-reshaped response would make the UI lie about what happened.
- */
+// Every mutation the UI performs, in one typed seam; result schemas are parsed, not asserted
 
 /** what `reply` reports back — the three outcomes read differently because they ARE different */
 export type ReplyResult = { answered: boolean; supervised: boolean }
@@ -23,17 +16,11 @@ export interface GroundedSpec {
 }
 
 export const actions = {
-  // budgetUSD is stated, never omitted: the route requires the key, and the console offers no
-  // budget field — so every request it creates runs with no ceiling, and says so.
+  // budgetUSD is stated, never omitted: the route requires the key and the console sets no ceiling
   newTask: async (input: { title: string; spec?: string; parentId?: string; grounded?: GroundedSpec }): Promise<string> =>
     (await api.act<{ taskId: string }>('newTask', { ...input, budgetUSD: null }, S.TaskCreated)).taskId,
 
-  /**
-   * Reopen a plan as a NEW editable version. The server's `edit` accepts a `blocked` task and
-   * stamps it blocked → awaiting_approval, which is the documented repair path (kernel.editPlan):
-   * edit → approve → run, with completed steps skipped. Costs no model call — the draft is the one
-   * already on screen — so reopening a rejected plan wastes nothing.
-   */
+  // edit reopens a blocked plan as a new editable version; no model call
   edit: (taskId: string, draft: { strategyRef: string; costEstimateUSD: number | null; steps: unknown[] }): Promise<{ version: number }> =>
     api.act<{ version: number }>('edit', { taskId, draft }, S.ApprovedVersion),
 
@@ -64,12 +51,7 @@ export const actions = {
   deleteProject: (projectId: string): Promise<PurgeReport> => api.act<PurgeReport>('deleteProject', { projectId }, S.PurgeReport),
 } as const
 
-/**
- * What the operator is told once an answer lands. A foreign project's question can be answered
- * from here, and that project may have nothing running behind it: the append is durable and the
- * next supervisor picks it up, but a bare "step resuming" would claim a resumption that is not
- * happening.
- */
+// A foreign project's append is durable but may have no supervisor: never claim a resumption
 export const replyReceipt = (r: ReplyResult): { text: string; tone: 'ok' | 'warn' } =>
   !r.answered
     ? { text: 'no open question left to answer — it was answered elsewhere', tone: 'warn' }

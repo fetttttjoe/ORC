@@ -6,33 +6,11 @@ import { treeFingerprint } from './tree-fingerprint'
 import { commandArgv } from './command-argv'
 import { COMMAND_TIMEOUT_MS, killedAtCeiling, runCommand } from './run-command'
 
-// exec: the acceptance-gate tool. Plans routinely demand "typecheck clean,
-// tests green", but no step could RUN anything — implementers shipped unexecuted (red) suites
-// and the honest auditor's only move was to refuse certification, which is exactly how
-// a verify step burned four times. Mirrors report_coverage's factory shape.
-//
-// Trust model: the COMMANDS come from the operator (config execAllowlist), never the model —
-// the model only picks an entry and may extend it with arguments at a token boundary
-// ('bun test' allows 'bun test src/x.test.ts', never 'bun testx'). No shell is involved: the
-// command splits on whitespace and spawns directly, so shell metacharacters (;, &&, |, $())
-// are inert argv tokens the target program rejects, not chaining.
-//
-// The allowlisted command still RUNS model-authored code (a `bun test` executes the tests the
-// step just wrote), so it is not a security sandbox: it inherits neither the orchestrator's
-// secrets (env is scrubbed to a minimal surface, see child-env.ts)
-// nor a write fence (cwd is the workspace, but the command can write anywhere). ponytail: the
-// real containment is the deferred M5c per-step isolation (worktree/container); until it lands,
-// enabling execAllowlist grants the model host code execution, and exec is off unless configured.
 const ExecInput = z.object({ command: z.string().min(1) })
 
-// ponytail: fixed caps — promote to config when a real suite outgrows them
-
-// Where the FULL streams land, workspace-relative so fs_read can reach them. `.orc/*` is
-// gitignored, so a gate log never rides along in a commit.
+// Workspace-relative so fs_read reaches the full streams; .orc/* is gitignored, never committed.
 const LOG_DIR = path.join('.orc', 'exec')
-// How long a recorded result may stand in for a re-run of the identical command on an identical
-// tree. Bounded because the fingerprint covers the TREE and nothing else: a suite also depends on
-// Postgres/network, and those can move without any file changing.
+// Bounded: the fingerprint covers the tree only; a suite also depends on Postgres and network.
 const REUSE_TTL_MS = 15 * 60_000
 
 export const EXEC_TOOL_NAME = 'exec'
@@ -41,9 +19,9 @@ interface Recorded { exitCode: number; stdout: string; stderr: string; logPath: 
 // Per (workspace, command, tree) — module-level so sibling steps in one wave share it.
 const recorded = new Map<string, Recorded>()
 
-// tree identity — see tree-fingerprint.ts
 const gitFingerprint = (dir: string) => (): Promise<string | null> => treeFingerprint(dir)
 
+// Not a sandbox: allowlisted commands run model-written code; exec is off unless configured.
 export function execTool(opts: {
   workspaceDir: string
   allowlist: string[]
@@ -71,17 +49,14 @@ export function execTool(opts: {
         return { output: { error: `invalid exec input: ${errorMessage(parsed.error)}` }, isError: true }
       const { command } = parsed.data
       if (!allowlist.some(a => command === a || command.startsWith(`${a} `))) {
-        // a compound refusal teaches the rule, not just the list: agents raised in shells try
-        // `cd X && bun test … | tail` (observed live) and should learn in ONE iteration that
-        // exec spawns argv directly from the workspace root
+        // A compound refusal teaches the rule: shell-raised agents try `cd X && … | tail`.
         const compound = /(^|\s)cd\s|&&|\|\|?|;|>|</.test(command)
         const hint = compound
           ? ' — this tool has no shell: one command, run from the workspace root; no cd, no pipes, no chaining; pass paths as arguments'
           : ''
         return { output: { error: `command not allowlisted: '${command}'${hint} — allowed: ${allowlist.join(', ')} (operator-set: execAllowlist in .orc/config.json)` }, isError: true }
       }
-      // The BRACKET: sibling steps in one wave each ran the same gate against the same unchanged
-      // tree, paying the full suite every time. Reuse is reported, never silent.
+      // Sibling steps in one wave ran the same gate on the same tree; reuse is reported, never silent.
       const tree = await fingerprint()
       const key = tree === null ? null : `${workspaceDir}\u0000${command}\u0000${tree}`
       const hit = key === null ? undefined : recorded.get(key)

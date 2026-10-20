@@ -11,15 +11,10 @@ import { knowledgeWritesIn } from '../task-knowledge'
 
 const TERMINAL: Set<TaskStatus> = new Set([TASK_STATUS.done, TASK_STATUS.blocked, TASK_STATUS.cancelled, TASK_STATUS.failed])
 
-// ponytail: bounds the cancel catch-up sweep to the most-recently-cancelled tasks rather than a
-// project's entire cancellation history — see the sweep below for why unbounded is wasteful
-// (not unsafe). Raise it, or persist a per-project sweep watermark, if it ever proves too small.
+// Bounds the cancel catch-up sweep to the most recently cancelled tasks, not the whole history.
 const CANCEL_SWEEP_LIMIT = 200
 
-// Everything split routing/composition needs — excludes the high-volume trace kinds
-// (agent/tool calls, operations, artifacts) so the router never scans the whole log.
-// Exhaustive over EventKind: adding a kind forces a decision here, so a new
-// routing-relevant kind can never be silently missing from the router's fold input.
+// Excludes the high-volume trace kinds; exhaustive over EventKind so a new kind forces a decision.
 const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   task_created: true, task_status_changed: true,
   plan_proposed: true, plan_edited: true, plan_approved: true,
@@ -29,19 +24,17 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
   signal_received: false, operation_started: false, operation_completed: false,
   operation_failed: false, artifact_produced: false,
   knowledge_delivered: false,
-  // composeSplitResult fetches these separately (resolveSplit), once per split resolution — kept out of ROUTER_KINDS so routing does not pay for them on every event.
+  // fetched separately by composeSplitResult (resolveSplit), not on every routed event
   knowledge_written: false,
   knowledge_checked: false,
   feedback_requested: false, feedback_provided: true, plan_annotated: false, analysis_completed: false,
-  plan_note_written: false, // the plan step's own authoring — nothing routes until finalize_plan splits
+  plan_note_written: false, // the plan step's own authoring; nothing routes until finalize_plan
   models_discovered: false, // catalog metadata — nothing to route
   copilot_exchange: false, // conversation record — nothing to route
   reaction_failed: false, // the router's OWN diagnosis — routing it would react to itself
   // the auto-heal trigger: a commit moves the tree under the claims' anchors (onCommitRecorded)
   commit_recorded: true,
-  // workspace lifecycle facts: vocabulary only so far, same as models_discovered — no reactor
-  // reads these yet, unlike commit_recorded's onCommitRecorded. Flip to true once a later
-  // change wires a reaction to one of them.
+  // workspace lifecycle facts: no reactor reads these
   workspace_created: false, workspace_retitled: false, workspace_archived: false, workspace_merged: false,
   // a chat's opening is a correlation fact — nothing routes off it
   chat_opened: false,
@@ -49,9 +42,7 @@ const ROUTER_RELEVANT: Record<EventKind, boolean> = {
 }
 const ROUTER_KINDS = Object.values(EventKind).filter(k => ROUTER_RELEVANT[k])
 
-// Pure composition of the thin join payload from the log (spec D5). Deterministic for a
-// fixed event set — but the set can differ between racing routers (late knowledge_written),
-// so the append is idempotency-keyed and conflicts recover by sending the STORED result.
+// Racing routers may see different sets (late knowledge_written); conflicts send the STORED result.
 export function composeSplitResult(events: EventRecord[], knowledgeEvents: EventRecord[], split: SplitState): SplitResult {
   const state = fold(events)
   const outcome = runOutcomeFor(state.tasks.get(split.childTaskId)?.status)
@@ -87,31 +78,21 @@ function storedResolution(events: EventRecord[], splitId: string): SplitResult |
 export function createSignalRouter(opts: {
   log: EventLog
   onChildApproved: (childTaskId: string) => Promise<void>
-  // The explicit ask, turned into a workflow. The router is a dumb relay here — cwd and
-  // retry come straight off the recorded payload, no policy decisions made in this file.
+  // The explicit ask, turned into a workflow; cwd and retry come straight off the recorded payload.
   onRunRequested: (taskId: string, opts: { cwd: string | null; retry: boolean }) => Promise<void>
-  // The DBOS half of a cancel, which a client with no execution port cannot do itself —
-  // kernel.cancelSubtree only appends the status; the running supervisor finishes the job.
+  // The DBOS half of a cancel: kernel.cancelSubtree only appends the status.
   onCancelled: (taskId: string) => Promise<void>
-  // The auto-heal reactor, injected by the composition root; absent, commits stay traceability records.
+  // The auto-heal reactor; absent, commits stay traceability records.
   onCommitRecorded?: (payload: CommitRecordedPayload) => Promise<void>
   send: (destinationId: string, result: SplitResult, topic: string, idempotencyKey: string) => Promise<void>
   sendFeedback: (destinationId: string, message: string, topic: string, idempotencyKey: string) => Promise<void>
 }): { start(): Promise<void>; close(): Promise<void> } {
   let unsub: (() => Promise<void>) | null = null
 
-  // A reaction that throws is the runtime failing at its whole job, and it used to leave nothing but
-  // a line on the supervisor's stdout — the client had already been told its ask was recorded, and
-  // `orc status` showed a task that simply never moved. Recorded here so the failure is DATA.
-  // Keyed by the CAUSE's seq, so a catch-up sweep that retries the same event on every boot
-  // diagnoses it once rather than growing the log. The append is itself contained: a diagnosis that
-  // throws must never replace the failure it describes.
-  // `cause.id` is the idempotency discriminator: an event's seq where one triggered the reaction, a
-  // splitId where the trigger is a split's state rather than a single event.
+  // A throwing reaction is recorded as data, keyed by cause so a retried sweep logs it once.
   const reactionFailed = async (
     reaction: Reaction,
-    // chatId is the REACTED-TO event's: a supervisor reaction belongs to the interaction that
-    // caused it, so a diagnosis lands in the transcript of the run that failed to move.
+    // chatId is the reacted-to event's: the diagnosis lands in that run's transcript
     cause: { taskId: string | null; seq: number | null; id: string; chatId: string | null },
     err: unknown,
   ): Promise<void> => {
@@ -142,9 +123,6 @@ export function createSignalRouter(opts: {
   }
 
   // append split_resolved + send, CONTAINED: a poisoned event must not kill the pump mid-batch.
-  // The append is idempotency-keyed (${splitId}:resolved); a racing router that composed a
-  // different snapshot hits the conflict path and recovers by sending the FIRST committed
-  // resolution — the parent always receives exactly the stored payload, never nothing.
   const resolveSplit = async (all: EventRecord[], split: SplitState): Promise<void> => {
     try {
       const result = composeSplitResult(all, await opts.log.after(0, [EVENT_KIND.knowledge_written]), split)
@@ -168,9 +146,7 @@ export function createSignalRouter(opts: {
 
   return {
     async start() {
-      // catch-up sweep BEFORE subscribing: every unresolved split whose child is already terminal
-      // gets resolved now — heals a handler throw AND a terminal event that landed while the router
-      // was down (never redelivered, since the pump pre-advances its cursor).
+      // sweep BEFORE subscribing: a terminal event that landed while down is never redelivered
       const seed = await opts.log.after(0, ROUTER_KINDS)
       const state = fold(seed)
       for (const event of seed) {
@@ -178,10 +154,7 @@ export function createSignalRouter(opts: {
           || state.tasks.get(event.taskId)?.status !== TASK_STATUS.running) continue
         await sendFeedback(event).catch(err => reactionFailed(REACTION.feedback, ofEvent(event), err))
       }
-      // catch-up mirrors route 2's shape below: serve the LATEST run_requested per task that has
-      // not yet been served — "served" means a run_started with a LATER seq exists. Comparing by
-      // seq (not "does this task have any run at all") is what a plain retry needs: a task that
-      // already ran once and is asking again must not be mistaken for one that was already served.
+      // serve the LATEST run_requested with no later run_started (by seq, so retries are served)
       const lastRequested = new Map<string, EventRecord>()
       const lastStartedSeq = new Map<string, number>()
       for (const event of seed) {
@@ -190,14 +163,7 @@ export function createSignalRouter(opts: {
       }
       for (const [taskId, event] of lastRequested) {
         if ((lastStartedSeq.get(taskId) ?? -1) > event.seq) continue // a run already answered this request
-        // A SETTLED task can never serve one. startRunAt admits approved/running/blocked only, so a
-        // request left in the log from before the task finished is re-attempted and re-refused on
-        // every single boot, forever — measured: three done tasks logging "task is 'done' — approve
-        // a plan first" on all 18 supervisor starts.
-        //
-        // TERMINAL_TASK_STATUS (done/failed/cancelled), NOT this file's local TERMINAL, which also
-        // holds `blocked` for split resolution. Blocked is the state a retry resumes FROM, so
-        // skipping it here would break the catch-up that redelivers an unserved retry.
+        // TERMINAL_TASK_STATUS, not the local TERMINAL: blocked is where a retry resumes from
         const status = state.tasks.get(taskId)?.status
         if (status !== undefined && TERMINAL_TASK_STATUS.has(status)) continue
         const p = RunRequestedPayload.safeParse(event.payload)
@@ -205,11 +171,7 @@ export function createSignalRouter(opts: {
           await opts.onRunRequested(taskId, { cwd: p.data.cwd, retry: p.data.retry })
             .catch(err => reactionFailed(REACTION.runRequested, ofEvent(event), err))
       }
-      // catch-up: a cancel that landed while no supervisor was up never got its DBOS half done —
-      // left alone, DBOS's OWN recovery (running as part of this very boot) resumes that workflow
-      // and runs it to completion, burning model calls, no matter what our event log says.
-      // Idempotent per task (cancelWorkflowsFor is a no-op once DBOS has already terminated the
-      // workflow), but capped (see CANCEL_SWEEP_LIMIT) to bound the cost of walking history.
+      // a cancel landed while down: DBOS recovery would resume that workflow and burn model calls
       const recentlyCancelled: string[] = []
       const seenCancelled = new Set<string>()
       for (const event of [...seed].reverse()) {
@@ -221,9 +183,7 @@ export function createSignalRouter(opts: {
       for (const taskId of recentlyCancelled)
         await opts.onCancelled(taskId).catch(err =>
           reactionFailed(REACTION.cancelled, { taskId, seq: null, id: `sweep:${taskId}`, chatId: null }, err))
-      // catch-up: a commit that landed while no supervisor was up still deserves its heal
-      // reaction. The LATEST one only: the reaction is corpus-wide and idempotent (a restamp
-      // covers every commit behind it), so serving history would be pure duplicate work.
+      // a commit landed while down: serve only the LATEST; the heal is corpus-wide and idempotent
       if (opts.onCommitRecorded) {
         const latest = [...seed].reverse().find(e => e.kind === EVENT_KIND.commit_recorded)
         if (latest) {
@@ -235,8 +195,7 @@ export function createSignalRouter(opts: {
       }
       for (const split of state.splits.values()) {
         if (split.resolved) {
-          // a crash between append and send leaves the parent waiting on a committed
-          // resolution — re-send it (idempotent: keyed by splitId) while the parent still runs
+          // crash between append and send: re-send the committed resolution (keyed by splitId)
           if (state.tasks.get(split.taskId)?.status === TASK_STATUS.running) {
             const committed = storedResolution(seed, split.splitId)
             if (committed) await sendResult(split, committed).catch(err =>
@@ -246,23 +205,18 @@ export function createSignalRouter(opts: {
         }
         const status = state.tasks.get(split.childTaskId)?.status
         if (status && TERMINAL.has(status)) { await resolveSplit(seed, split); continue }
-        // route 2 catch-up: an approved child whose run never started (plan_approved landed while
-        // the router was down) still needs its run — same idempotent startChildRun as the live route.
+        // approved child whose run never started: same idempotent startChildRun as the live route
         if (status === TASK_STATUS.approved && !state.runs.get(split.childTaskId)?.length)
           await opts.onChildApproved(split.childTaskId).catch(err =>
             reactionFailed(REACTION.childApproved, ofSplit(split, seed), err))
       }
-      // resume the pump exactly where the sweep's seed ended (seq-exclusive), closing the gap for
-      // events that landed between the sweep read and subscribe. Both routes are idempotent under replay.
-      // ponytail: each routed event refetches+refolds router-kind history (O(tasks) per event) —
-      // keep an incremental in-memory fold if task volume ever makes this hurt
+      // resume the pump where the seed ended (seq-exclusive); both routes are idempotent under replay
       unsub = await opts.log.subscribe({ fromSeq: seed.at(-1)?.seq ?? 0 }, async e => {
         if (e.kind === EVENT_KIND.feedback_provided) {
           await sendFeedback(e).catch(err => reactionFailed(REACTION.feedback, ofEvent(e), err))
           return
         }
-        // The explicit ask. Deterministic workflow ids make a redelivered request an
-        // attach, not a second run, so at-least-once delivery is safe here.
+        // The explicit ask: deterministic workflow ids make a redelivery an attach, not a second run.
         if (e.kind === EVENT_KIND.run_requested && e.taskId) {
           const p = RunRequestedPayload.safeParse(e.payload)
           if (p.success)
@@ -270,8 +224,7 @@ export function createSignalRouter(opts: {
               .catch(err => reactionFailed(REACTION.runRequested, ofEvent(e), err))
           return
         }
-        // the auto-heal reactor: an out-of-task commit's hook event, relayed to the composition
-        // root's debounced restamp/heal — the router stays a dumb relay, exactly like run_requested
+        // the auto-heal reactor: a relay to the composition root, like run_requested
         if (e.kind === EVENT_KIND.commit_recorded) {
           if (opts.onCommitRecorded) {
             const p = CommitRecordedPayload.safeParse(e.payload)
@@ -283,19 +236,17 @@ export function createSignalRouter(opts: {
         }
         // route 2: an approved child with a pending split gets its run started (policy OR human)
         if (e.kind === EVENT_KIND.plan_approved && e.taskId) {
+          // each child approval refolds all router-kind history: O(tasks)
           if (pendingSplitForChild(fold(await opts.log.after(0, ROUTER_KINDS)), e.taskId))
             await opts.onChildApproved(e.taskId).catch(err =>
               reactionFailed(REACTION.childApproved, ofEvent(e), err))
           return
         }
-        // route 1: a terminal child resolves its split (guarded by pendingSplitForChild — a
-        // redelivered terminal status finds the split already resolved and no-ops)
+        // route 1: a terminal child resolves its split (a redelivery finds it resolved and no-ops)
         if (e.kind !== EVENT_KIND.task_status_changed) return
         const p = PAYLOAD_SCHEMAS.task_status_changed.safeParse(e.payload)
         if (!p.success || !TERMINAL.has(p.data.to) || !e.taskId) return
-        // Cancelling the DBOS workflows is the half a client cannot do. kernel.cancelSubtree
-        // appended the status; this is the runtime completing it. Idempotent: cancelling an
-        // already-cancelled workflow is a no-op.
+        // the runtime half of cancel (kernel.cancelSubtree appended the status); idempotent
         if (p.data.to === TASK_STATUS.cancelled)
           await opts.onCancelled(e.taskId)
             .catch(err => reactionFailed(REACTION.cancelled, ofEvent(e), err))

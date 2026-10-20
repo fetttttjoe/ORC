@@ -1,15 +1,3 @@
-// Claude subscription (OAuth) auth — the same credential Claude Code uses.
-//
-// Anthropic accepts a Claude Pro/Max OAuth access token in place of an API key when the
-// request carries `Authorization: Bearer <token>`, the `anthropic-beta: oauth-2025-04-20`
-// flag, and the Claude Code identity as its first system block. The executor sends no system
-// prompt, so all three are injected here via a custom fetch — the change never leaves this
-// plugin.
-//
-// Opt-in only (see index.ts): the default provider still uses ANTHROPIC_API_KEY, so existing
-// setups are unaffected. Note: driving the orchestrator's automated calls off a Claude
-// *subscription* token may fall outside its terms vs. metered API billing — that is a usage
-// decision, not a technical limit.
 
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -22,19 +10,10 @@ export const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official C
 const OAUTH_BETA = 'oauth-2025-04-20'
 const CRED_PATH = join(homedir(), '.claude', '.credentials.json')
 
-// A usable bearer token: the CLAUDE_CODE_OAUTH_TOKEN env override wins (headless/CI, same var
-// Claude Code honours), else Claude Code's on-disk credential store.
-// ponytail: no token refresh — an expired token throws with the fix. Add refresh when the
-// re-login prompt gets annoying (POST https://console.anthropic.com/v1/oauth/token with the
-// stored refreshToken + Claude Code's public client_id, then persist the result).
-// TOCTOU guard: a token that expires between this check and the request lands as a mid-request
-// 401 — treat anything expiring within the buffer as already expired.
+// anything expiring within the buffer counts as expired: a token lapsing mid-request 401s
 const EXPIRY_BUFFER_MS = 60_000
 
-// the slice of ~/.claude/.credentials.json's claudeAiOauth that gates a request. `.catch(undefined)`
-// per field, not a plain `.optional()`: the old typeof narrowing dropped a wrong-typed field to
-// undefined without rejecting the other one, and a strict schema would fail the WHOLE parse on one
-// bad field — losing a perfectly good accessToken next to a corrupt expiresAt.
+// .catch(undefined) per field: one corrupt field must not discard a good accessToken beside it
 const OAuthCred = z.object({
   accessToken: z.string().optional().catch(undefined),
   expiresAt: z.number().optional().catch(undefined),
@@ -72,15 +51,9 @@ export async function loadOAuthToken(now: number = Date.now(), credPath: string 
 
 type SystemBlock = { type: 'text'; text: string }
 
-// an Anthropic system block, recognised by shape at the boundary — no cast (repo rule: parse, don't assert)
 const isSystemBlock = (v: unknown): v is SystemBlock => isRecord(v) && v.type === 'text' && typeof v.text === 'string'
 
-// The OAuth beta rejects requests whose first system block is not the Claude Code identity.
-// Normalise whatever the caller sent (nothing / string / block array) so that block leads.
-// Returns unknown[], not SystemBlock[]: elements are never filtered or dereferenced by shape here
-// — the sole caller (oauthFetch, below) assigns the result straight to json.system and
-// JSON.stringifies it into the request body, so a SystemBlock[] return type would be an unchecked
-// lie for any API-shaped-but-non-SystemBlock element the caller originally passed through.
+// Returns unknown[]: elements pass through to the request body unfiltered
 export function prependClaudeCodeIdentity(system: unknown): unknown[] {
   const identity: SystemBlock = { type: 'text', text: CLAUDE_CODE_IDENTITY }
   if (system == null || system === '') return [identity]
@@ -93,8 +66,6 @@ export function prependClaudeCodeIdentity(system: unknown): unknown[] {
   return [identity]
 }
 
-// Wraps the model's fetch: swap key auth for the OAuth bearer + beta flag, inject the identity
-// system block. baseFetch is injectable for tests.
 export function oauthFetch(getToken: () => Promise<string>, baseFetch: MinimalFetch = fetch): typeof fetch {
   const wrapped: MinimalFetch = async (input, init) => {
     const token = await getToken()

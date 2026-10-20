@@ -4,8 +4,7 @@ import { authorFixture, eventFixture, draftFixture, must, planFixture, stepFixtu
 import { TEST_WORKSPACE_ID } from './test-helpers'
 import { blockingVerdicts, canRetry, retryIsFutile, startedAttempts, type State, type StepState, emptyFold, estimateCostUSD, fold, foldInto, subtreeOutcome, completedStepIds, nextAttempts, crashDedupKey, stepUsage, subtreeTaskIds, subtreeUsage, pendingSplitForChild, remainingBudget, inheritedCwd, runCwd, taskChangedPaths } from './projections'
 
-// An agent authors inside its run's chat; MemoryAuthor.origin is required, and a payload author
-// missing it fails zod at runtime (payload is untyped, so nothing flags it at compile time).
+// Author.origin is required: a payload author missing it fails zod at runtime only
 const RUN: Origin = { chatId: 'run:t1:v1', door: Door.supervisor }
 
 const task: TaskNode = taskFixture()
@@ -15,10 +14,6 @@ const planV = (version: number): Plan => planFixture({ version })
 const evt = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord =>
   eventFixture({ seq, ts: '2026-07-16T00:00:00.000Z', kind, payload })
 
-// A step folded `running` is a LIVE attempt only while the run is live. Once the task settles, the
-// fold says `running` only because the step died between its last checkpoint and step_failed — so
-// reusing the attempt re-attached to a DEAD workflow, which replays its stored error and makes
-// every `orc retry` fail identically, forever.
 describe('nextAttempts and an orphaned running step', () => {
   const plan: Pick<Plan, 'steps'> = { steps: [stepFixture({ id: 'a' }), stepFixture({ id: 'b' })] }
   const stateWith = (status: TaskStatus, stepStatus: StepRunStatus) => {
@@ -121,8 +116,7 @@ describe('crashDedupKey', () => {
       ts: '2026-07-17T00:00:00.000Z', runToken: 'step:t1:s1:a1', kind: EVENT_KIND.rate_limit_wait,
       payload: { stepId: 's1', runToken: 'step:t1:s1:a1', waitMs: 5000, waitsSoFar, errorMessage: 'rate limited' },
     })
-    // every wait in a run shares (runToken, kind) and none of iteration/toolCallId/name/splitId/path —
-    // without this exclusion both collapse to the same key and the second is dropped as a duplicate
+    // every wait in a run shares (runToken, kind): without the exclusion the second is dropped
     expect(crashDedupKey(mk(0))).toBeNull()
     expect(crashDedupKey(mk(1))).toBeNull()
   })
@@ -136,8 +130,7 @@ const exEvt = (
   payload: Record<string, unknown>,
   usage: EventRecord['usage'] = null,
 ): EventRecord =>
-  // envelope runToken mirrors payload.runToken (as in real events); falls back for
-  // envelope-only kinds like run_started whose payload carries no runToken.
+  // envelope runToken mirrors payload.runToken; run_started has none, so it falls back
   eventFixture({ seq, ts: '2026-07-17T00:00:00.000Z', stepId: 's1',
     runToken: typeof payload.runToken === 'string' ? payload.runToken : rt('s1'), kind, payload, usage })
 
@@ -234,7 +227,7 @@ describe('fold — execution kinds', () => {
       exEvt(2, EVENT_KIND.step_failed, { stepId: 's1', runToken: rt('s1', 1), class: 'agent_error', message: 'boom' }),
       exEvt(3, EVENT_KIND.step_started, { stepId: 's1', runToken: rt('s1', 2), attempt: 2 }),
       exEvt(4, EVENT_KIND.step_completed, { stepId: 's1', runToken: rt('s1', 2), summary: 'fresh' }),
-      // late/stale events from the superseded attempt 1 — envelope and payload both carry the old runToken
+      // stale events from superseded attempt 1: envelope and payload both carry the old runToken
       exEvt(5, EVENT_KIND.step_completed, { stepId: 's1', runToken: rt('s1', 1), summary: 'stale' }),
       exEvt(6, EVENT_KIND.agent_call, { stepId: 's1', runToken: rt('s1', 1), iteration: 9, request: {}, response: {} },
         { inputTokens: 5, outputTokens: 5, costUSD: 0, estimated: false }),
@@ -245,8 +238,7 @@ describe('fold — execution kinds', () => {
     expect(step?.attempt).toBe(2)
     // stale agent_call's runToken doesn't match the current attempt, so it can't bump iterations
     expect(step?.iterations).toBe(0)
-    // note: usage from the stale agent_call IS accumulated regardless — that update is deliberately
-    // unguarded (spec asymmetry), so it is intentionally not asserted to stay zero here.
+    // usage from the stale agent_call IS accumulated: that update is deliberately unguarded
   })
 
   it('folds splits: proposed pending, resolved marks; dedups replayed proposals by splitId', () => {
@@ -301,8 +293,7 @@ describe('fold — execution kinds', () => {
       payload: { stepId: 's1', runToken: `rt-${taskId}`, iteration: 1, request: {}, response: {} },
       usage: { inputTokens: 1, outputTokens: 1, costUSD: cost, estimated: false }, ts: 'T',
     })
-    // parent budget 10, already spent 9 (its own usage) → parent has $1 left. Child budget is 99
-    // with zero usage of its own: consulting only the child's row would wrongly report ~99.
+    // parent has $1 left; consulting only the child's row (budget 99, no usage) would report ~99
     const state = fold([t('p', null, 10), t('c', 'p', 99), usage('p', 9)].map((e, i) => ({ ...e, seq: i + 1 })))
     expect(remainingBudget(state, 'c')).toBe(1)  // capped by the ancestor, not its own huge budget
     expect(remainingBudget(state, 'p')).toBe(1)
@@ -379,8 +370,7 @@ describe('fold — execution kinds', () => {
     const op = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord => eventFixture({
       seq, stepId: 's1', runToken: rt('s1'), kind, payload, ts: `T${seq}`,
     })
-    // an orphaned completion (no started node) and a malformed artifact payload would previously
-    // throw out of fold and wedge status/vault/ui/replay for the whole project on one bad event.
+    // an orphaned completion or malformed artifact payload must not throw out of fold
     let state!: ReturnType<typeof fold>
     expect(() => {
       state = fold([
@@ -396,11 +386,7 @@ describe('fold — execution kinds', () => {
   })
 })
 
-// The incremental fold. `fold` is the truth function every replay and audit path uses, so an
-// incremental applier is only safe if it is the SAME function driven one event at a time — the
-// equivalence below is the whole contract, and it is what lets a long-lived process (the DBOS port's
-// budget check, the supervisor's idle probe, the signal router) answer from a live accumulator
-// instead of re-reading and re-folding the entire project log per question.
+// the incremental fold must equal `fold` driven one event at a time: that is the contract
 describe('foldInto / emptyFold', () => {
   const lifecycle: EventRecord[] = [
     evt(1, EVENT_KIND.task_created, { task }),
@@ -423,8 +409,7 @@ describe('foldInto / emptyFold', () => {
   })
 
   it('carries crash-boundary dedup ACROSS applications, not just within one batch', () => {
-    // the same tool_result delivered twice — the dedup key lives on the accumulator, so a
-    // duplicate arriving in a later application is still suppressed
+    // a duplicate in a later application is still suppressed: the dedup key lives on the accumulator
     const dup = eventFixture({ seq: 10, taskId: 't1', stepId: 's1', runToken: 'r1', kind: EVENT_KIND.agent_call, usage: { inputTokens: 10, outputTokens: 5, costUSD: 0.5, estimated: false }, payload: { stepId: 's1', runToken: 'r1', iteration: 1, request: {}, response: {} } })
     const acc = [...lifecycle, dup].reduce(foldInto, emptyFold())
     expect(acc.state.usage.get('t1')?.costUSD).toBe(0.5) // not 1.0 — the replay folded once
@@ -436,8 +421,7 @@ describe('foldInto / emptyFold', () => {
   })
 })
 
-// Observed live: a grounded run's plan step finished, its split child blocked, and the CLI printed
-// "run finished: done" and exited 0. The root's own status is not the run's outcome.
+// the root's own status is not the run's outcome: a split child may still be blocked
 describe('subtreeOutcome', () => {
   const t = (id: string, status: TaskNode['status'], parentId: string | null = null): EventRecord =>
     evt(1, EVENT_KIND.task_created, { task: { ...task, id, status, parentId, depth: parentId ? 1 : 0 } })
@@ -458,11 +442,7 @@ describe('subtreeOutcome', () => {
   })
 })
 
-// The scoped change set (audit): the paths a task's steps WROTE, derived purely from the log so the
-// auditor never has to trust git. It pairs each fs_write/fs_edit/fs_delete tool_call with the SAME
-// toolCallId's tool_result, keeps only isError===false, and folds artifact_produced receipts in as a
-// floor. It is a MEMBERSHIP projection — never a diff, never a substitute for the full test/typecheck
-// gate. See the role-auditor skill contract: any defect in an in-zone file still fails the signal.
+// a membership projection, never a diff and never a substitute for the full test gate
 describe('taskChangedPaths', () => {
   // one tool_call event
   const call = (seq: number, toolCallId: string, toolName: string, input: unknown, stepId = 's1'): EventRecord =>
@@ -565,8 +545,7 @@ describe('taskChangedPaths', () => {
   })
 })
 
-// The plan-approval door's estimate: measured history only. A fabricated zero would be worse than
-// no number at all — the human would approve against a figure nothing measured.
+// measured history only: a fabricated zero would be approved against
 describe('estimateCostUSD', () => {
   let seq = 0
   const ev = (over: Partial<EventRecord>): EventRecord => eventFixture({ seq: ++seq, ts: '2026-08-01T00:00:00.000Z', ...over })
@@ -657,10 +636,6 @@ describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', 
     expect(retryIsFutile(stateWith(failedStep('verify', FailureClass.rejected)), 't1')).toBe(true)
   })
 
-  /**
-   * The case that must stay retryable. Clearing the provider error may change what the verdict
-   * sees on the next pass, so refusing here would withhold a recovery that could genuinely work.
-   */
   it('keeps a MIXED failure retryable — the error may be what the verdict is reacting to', () => {
     const state = stateWith(failedStep('verify', FailureClass.rejected), failedStep('build', FailureClass.provider_error))
     expect(retryIsFutile(state, 't1')).toBe(false)
@@ -671,12 +646,6 @@ describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', 
     expect(blockingVerdicts(fold([]), 'nobody')).toEqual([])
   })
 
-  /**
-   * The whole admission rule for a retry, in one place. Three sites need the same verdict and only
-   * two of them can raise an error: the actions door and the port each refuse with their own
-   * message, and a read model has to decide whether to OFFER the retry at all. Spelled once, an
-   * offer cannot disagree with the refusal that would follow it.
-   */
   describe('canRetry', () => {
     const atStatus = (status: TaskStatus, ...steps: ReturnType<typeof failedStep>[]): State => {
       const s = stateWith(...steps)
@@ -703,15 +672,7 @@ describe('blockingVerdicts / retryIsFutile — a verdict is not a malfunction', 
   })
 })
 
-/**
- * The distinction that decides whether retry is offered, pinned because getting it wrong is
- * expensive in BOTH directions and the first attempt got it wrong one way.
- *
- * A worker signalling failure has done its own work badly — a fresh attempt re-does that work and
- * may well succeed, which is exactly what retry is for. An auditor signalling failure has JUDGED
- * work other steps produced; retry re-runs only what did not complete, so it meets the same
- * completed siblings and reaches the same verdict forever.
- */
+// a worker's failure is retryable; an auditor's verdict repeats forever on the same siblings
 describe('rejected is an AUDITOR verdict, not any signalled failure', () => {
   const failed = (id: string, cls: FailureClass) => ({
     stepId: id, runToken: `rt-${id}`, attempt: 1, status: StepRunStatus.failed,
@@ -733,16 +694,7 @@ describe('rejected is an AUDITOR verdict, not any signalled failure', () => {
   })
 })
 
-/**
- * The two attempt derivations answer OPPOSITE questions, and conflating them broke cancel.
- *
- * nextAttempts: "which attempt should the next run start?" — deliberately attempt+1 once the task
- * is settled, so a retry gets a fresh workflow id instead of re-attaching to a dead one.
- * startedAttempts: "which attempt is running right now?" — what a cancel must target.
- *
- * cancelSubtree stamps `cancelled` BEFORE cancelWorkflowsFor runs, so `settled` is always true by
- * then: cancel asked nextAttempts and got an id one ahead of the live workflow, every time.
- */
+// nextAttempts asks the next run's attempt, startedAttempts the live one: cancel needs the latter
 describe('startedAttempts vs nextAttempts — cancel targets the running attempt', () => {
   const plan = planFixture({ steps: [stepFixture({ id: 'a' }), stepFixture({ id: 'b' })] })
   const running = (attempt: number) => ({

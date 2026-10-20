@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import type { PlanStep } from './plan'
-import { MemoryAuthor } from './author'
-import { MEMORY_ID_RE, SHA256_HEX_RE } from './ids'
+import { Author } from './author'
+import { SLUG_ID_RE, SHA256_HEX_RE } from './ids'
 
 export enum Confidence {
   high = 'high',
@@ -10,8 +10,7 @@ export enum Confidence {
   none = 'none',
 }
 
-// analyzed+gaps are load-bearing (RG7 degradation, RG3 uncertainty). scope/confidence/claimsWritten
-// are reserved forward-looking (cbm epistemics ideas #2/#7 + future hot-paths/churn telemetry).
+// analyzed and gaps are load-bearing; the other fields are reserved
 export const CoverageReport = z.object({
   analyzed: z.boolean(),
   scope: z.array(z.string()).default([]),
@@ -23,9 +22,9 @@ export type CoverageReport = z.infer<typeof CoverageReport>
 export const AnalysisCompletedPayload = CoverageReport
 export type AnalysisCompletedPayload = z.infer<typeof AnalysisCompletedPayload>
 
-// D4 conversational gate. topic is deterministically derived by the caller (replay-safe).
+// topic is derived deterministically by the caller (replay-safe)
 export const FeedbackRequestedPayload = z.object({
-  noteId: z.string().regex(MEMORY_ID_RE).optional(),
+  noteId: z.string().regex(SLUG_ID_RE).optional(),
   question: z.string().min(1),
   topic: z.string().min(1),
 })
@@ -33,20 +32,19 @@ export type FeedbackRequestedPayload = z.infer<typeof FeedbackRequestedPayload>
 export const FeedbackProvidedPayload = z.object({
   topic: z.string().min(1),
   text: z.string(),
-  author: MemoryAuthor,
+  author: Author,
   planHash: z.string().regex(SHA256_HEX_RE).optional(),
 })
 export type FeedbackProvidedPayload = z.infer<typeof FeedbackProvidedPayload>
 
-// D5 human annotation on a plan-note — an input event; the plan re-renders from it.
+// a human annotation is an input event; the plan re-renders from it
 export const PlanAnnotatedPayload = z.object({
   planVersion: z.number().int().positive(),
-  targetNote: z.string().regex(MEMORY_ID_RE),
-  refs: z.array(z.string().regex(MEMORY_ID_RE)).default([]),
+  targetNote: z.string().regex(SLUG_ID_RE),
+  refs: z.array(z.string().regex(SLUG_ID_RE)).default([]),
   text: z.string().min(1),
 })
 export type PlanAnnotatedPayload = z.infer<typeof PlanAnnotatedPayload>
 
-// D2 analyzer seam (Amendment A): analysisStep() returns the analyze-phase step config.
-// agent-analyzer returns a codebase-analysis scout step; ast-analyzer returns its own later.
+// analysisStep() returns the analyze-phase step config
 export interface Analyzer { id: string; analysisStep(opts: { modelRef: string; taskSpec: string }): PlanStep }

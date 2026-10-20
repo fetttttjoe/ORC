@@ -17,8 +17,6 @@ const FIXTURE = fileURLToPath(new URL('../../../plugins/mcp-client/src/fixture-s
 // these tests drive the CLI door, so arrangement names the origin that door names
 const CLI = NO_CHAT(Door.cli)
 
-// The shared action validates model refs at the boundary now, so a project that names a model must
-// PRICE it — cost-table keys ARE the valid universe, and the old unpriced 'fake/m' is refused.
 const PRICED = { costOverrides: { ollama: { m: { inPerMTok: 0, outPerMTok: 0 }, edited: { inPerMTok: 0, outPerMTok: 0 } } } }
 const MODEL = 'ollama/m'
 const EDITED_MODEL = 'ollama/edited'
@@ -40,13 +38,10 @@ async function makeCli(dir: string) {
   const db = await createTestDb()
   dbs.push(db)
   const config = requireProject({ ...loadConfig(dir), databaseUrl: db.url, projectId: TEST_PROJECT_ID, projectName: 'test' })
-  // seeded the way `orc init` seeds a real project (ONE seeder): the kernel appends a finish step
-  // declaring ROLE_SKILL.finisher to every root plan, and refValidator refuses the plan outright
-  // when this temp project's skills dir holds nothing
+  // seeded like `orc init`: refValidator refuses a root plan whose finisher skill is missing
   seedShippedSkills(config.skillsDir)
   const host = await createPluginHost(config, {
-    // registered under the id the CONFIG prices: refValidator reads this host, assertKnownModel
-    // reads the config's seeded registry, and a plan must satisfy both
+    // registered under the id the config prices: a plan must satisfy refValidator and assertKnownModel
     providers: new Map([['ollama', { costs: {}, languageModel: () => ({}) }]]),
     executors: new Map([['api-loop', { id: 'api-loop', startTurn: async function* () {} }]]),
   })
@@ -153,8 +148,6 @@ describe('plugin commands', () => {
   })
 
   it('orc edit rejects --file together with --from-vault instead of silently preferring one', async () => {
-    // The vault arm returned before --file was ever read, so an operator who passed both watched
-    // their authored draft be ignored and the vault markdown applied under its name.
     const dir = project({})
     const { run, lines } = await makeCli(dir)
     await run('new', 'both sources task', '--workspace', TEST_WORKSPACE_ID)

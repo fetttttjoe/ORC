@@ -5,8 +5,7 @@ import { RuntimeBusyError, acquireRuntimeLock } from './runtime-lock'
 const dbs: Array<{ drop: () => Promise<void> }> = []
 afterAll(async () => { for (const d of dbs) await d.drop() })
 
-// A second runtime is not a queue — DBOS recovery re-executes the same step as a new attempt and
-// the journal fences the loser into a step_failed, which blocks a healthy task. Observed live.
+// a second runtime is not a queue: it re-executes the step and the journal fences the loser
 describe('acquireRuntimeLock', () => {
   it('refuses a second runtime for the same project, naming what to do', async () => {
     const db = await createTestDb()

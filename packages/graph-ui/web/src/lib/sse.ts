@@ -1,6 +1,4 @@
-// EventSource plumbing only: parse the frame, ask frame-plan.ts what it means against what's
-// already held, then apply that plan to the stores. The DECISION (what a frame means, including
-// the seq-regression and id-less-frame rules) lives in frame-plan.ts, tested without a connection.
+// EventSource plumbing only: parse the frame, ask frame-plan.ts what it means, apply the plan
 import { QueryClient } from '@tanstack/svelte-query'
 import { fetchView, invalidateTouch } from '$lib/api/view-client'
 import type { ProjectEntry } from '$lib/api/types'
@@ -43,16 +41,14 @@ export function connectStream(opts: {
   es.onmessage = ev => {
     const frame = EnvelopeSchema.safeParse(JSON.parse(ev.data))
     if (!frame.success) {
-      // never apply a half-understood frame to the graph store: drop it and say so. The next
-      // envelope carries a cumulative patch, so one rejected frame self-heals.
+      // drop a half-understood frame and say so; the next cumulative patch self-heals it
       console.error('stream: envelope did not match its schema —', frame.error.issues[0]?.message)
       return
     }
     const envSeq = Number(ev.lastEventId) || ID_LESS_SEQ
     const plan = planFrame(graph.seq, envSeq, frame.data)
     if (plan.projects) opts.onProjects(plan.projects)
-    // operator/touched are applied before the regression check can return early — planFrame never
-    // withholds them for a regression, so neither must this call site.
+    // operator/touched apply before the regression return: planFrame never withholds them
     if (plan.operator) operator.state = plan.operator
     for (const t of plan.touched) invalidateTouch(queryClient, project, t)
     if (plan.regression) {

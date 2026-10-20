@@ -1,12 +1,6 @@
 // One spelling of each plan-field rule, shared by the authoring write and the freeze.
 
-// Control characters, rendered so a message can NAME the bad entry without the entry breaking the
-// message it appears in: `a/**\nb.ts` has to read as backslash-n, or the report reproduces the very
-// defect it is describing. C0 (0x00-0x1F) and DEL (0x7F) are the rejected set — the FULL range, not
-// just the four escapes anyone thinks of. Nothing in glob syntax is a control character (`*`, `?`,
-// `[]`, `{}`, `!`, `/` and ordinary path characters are all printable), so a wider net costs no
-// legitimate zone and catches the shell-mangled variants (\v, \f, ESC from a pasted terminal line)
-// that the named four would wave through.
+// rejects all of C0 and DEL: the named four would wave through \v, \f and ESC
 const NAMED_ESCAPE: Record<string, string> = {
   '\0': '\\0', '\b': '\\b', '\t': '\\t', '\n': '\\n', '\v': '\\v', '\f': '\\f', '\r': '\\r',
 }
@@ -18,23 +12,7 @@ const renderEntry = (entry: string): string =>
   `"${[...entry].map(c => NAMED_ESCAPE[c]
     ?? (isControlChar(c) ? `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}` : c)).join('')}"`
 
-// Whether each `zone` entry is ONE glob.
-//
-// A planner authored a zone whose single entry was several globs joined with newlines — one string
-// holding `a/**`, a line break, then `b.ts`. Nothing objected: the schema takes any non-empty
-// string, and the freeze only checked entries against each OTHER (overlap between concurrent steps),
-// never whether an entry could match anything at all. So the fence was frozen into the steps, and a
-// glob containing a line break matches no real path: two steps were refused every write to their own
-// files, could not fix the fence that was refusing them, and had no repair path. The slice's whole
-// pipeline was cancelled. The same hole swallows a whitespace-only entry, which fences a step out of
-// every file just as completely while looking like a declaration.
-//
-// Pure and IO-free, and `shape` in the table below: a fence that can match no
-// path is refused at both boundaries, so a broken one never reaches a frozen step in the first
-// place — the incident above needed no repair path, it needed the write refused. Returns the FIRST
-// offending entry's message
-// only: the author fixes one entry, rewrites, and hears about the next — a list of five would be
-// read as one wall of text and repaired no faster.
+// one glob per entry, refused at both boundaries; reports only the first offender
 export function zoneEntryMisuse(zone: readonly string[]): string | null {
   for (const entry of zone) {
     const control = [...entry].find(isControlChar)

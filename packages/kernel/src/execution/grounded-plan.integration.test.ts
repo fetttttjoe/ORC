@@ -25,9 +25,7 @@ const CLI: Origin = NO_CHAT(Door.cli)
 // Tool outputs are contract-`unknown`; this names the shape this suite reads back at the boundary.
 const AnnotationsOutput = z.object({ annotations: z.array(z.object({ targetNote: z.string() })) })
 
-// The analyzer seam: the kernel consumes ANY Analyzer; this test provides one whose
-// analysisStep mirrors the real agent-analyzer's scout step verbatim (id 'analyze', role 'scout',
-// executorRef 'api-loop', codebase-analysis skill) — the seam IS the interface, not a stub of it.
+// The analyzer seam: this analysisStep mirrors the real agent-analyzer's scout step verbatim.
 const testAnalyzer: Analyzer = {
   id: 'agent-analyzer',
   analysisStep: ({ modelRef }): PlanStep => ({
@@ -38,20 +36,14 @@ const testAnalyzer: Analyzer = {
   }),
 }
 
-// The taskId is not on ExecutorContext, but the runToken is the step workflow id
-// `step:<taskId>:<stepId>:aN` — the deterministic id the port builds. Parse it.
+// taskId is parsed from the runToken, the step workflow id `step:<taskId>:<stepId>:aN`.
 const taskIdOf = (runToken: string): string => must(runToken.split(':')[1], 'task id in runToken')
 const mutateAfterApprovalTasks = new Set<string>()
 
 const DB_RATIONALE = 'data model first'
 const DB_UNCERTAINTY = 'schema shape unverified — no analysis of existing tables'
 
-// ONE scripted executor registered as 'api-loop' drives every step of the grounded loop — the
-// analyze scout, the plan auditor, and the db/api children the split expands (all inherit
-// executorRef 'api-loop'). It branches on ctx.step.id: it emits REAL feedback gates, authors REAL
-// plan notes through the injected plan_note_write, reads the human's annotations through the REAL
-// read_annotations, and calls the REAL finalize_plan — so the assertions read committed events,
-// never the fake.
+// One scripted executor drives every step, branching on ctx.step.id; assertions read the log.
 function groundedFake(): AgentExecutor<unknown> {
   return {
     id: 'api-loop',
@@ -80,8 +72,7 @@ function groundedFake(): AgentExecutor<unknown> {
       if (ctx.step.id === 'analyze') {
         const answer = yield { type: 'feedback', question: 'May I analyze the codebase to ground the plan? (yes/no)', topic: 'consent', toolCallId: 'consent-1' }
         const analyzed = answer === 'yes'
-        // The production report_coverage tool emits analysis_completed through Kernel.reportCoverage;
-        // this scripted executor checkpoints the equivalent event directly.
+        // this executor checkpoints analysis_completed directly instead of via report_coverage
         const report: CoverageReport = analyzed
           ? { analyzed: true, scope: ['project'], gaps: ['auth flow not exercised'], confidence: Confidence.medium, claimsWritten: 1 }
           : { analyzed: false, scope: [], gaps: [], confidence: Confidence.none, claimsWritten: 0 }
@@ -111,8 +102,7 @@ function groundedFake(): AgentExecutor<unknown> {
         const premature = await finalize('finalize:premature', 'finalize-premature')
         if (!premature.isError) { yield* signalDone('premature finalize unexpectedly succeeded', false); return }
 
-        // ask_human loop: revise on any non-'approve' reply, re-writing ONLY the annotated notes, and
-        // only the field that changes — the merge keeps the rest.
+        // ask_human loop: revise on any non-'approve' reply, re-writing ONLY annotated notes
         let cycle = 0
         for (;;) {
           cycle++
@@ -149,7 +139,7 @@ function groundedFake(): AgentExecutor<unknown> {
   }
 }
 
-// the shared loop with this file's own ceiling: full drive-generator runs need more than the 3s default
+// full drive-generator runs need more than the 3s default timeout
 const waitFor = (pred: () => Promise<boolean>, ms = 20_000): Promise<boolean> => poll(pred, ms)
 
 async function bringUp() {
@@ -158,8 +148,7 @@ async function bringUp() {
   const storage = await openStorage(pg.url, { projectId: TEST_PROJECT_ID })
   const log = storage.events
   const config = testConfig(pg.url, { vaultDir })
-  // send=dbosSend so replyFeedback both appends feedback_provided AND resumes the parked step
-  // workflow (the real CLI wiring: new Kernel(log, refValidator, analyzers, dbosSend)).
+  // send=dbosSend so replyFeedback appends feedback_provided AND resumes the parked step workflow
   const kernel = new Kernel(log, undefined, new Map<string, Analyzer>([['agent-analyzer', testAnalyzer]]), dbosSend)
   await seedTestWorkspace(log, CLI)
   const port = await createDbosPort({
@@ -168,8 +157,7 @@ async function bringUp() {
     executors: new Map([['api-loop', groundedFake()]]),
     // the analyze/plan steps declare skillRefs; a minimal loader satisfies the force-load
     skills: { load: async (name: string) => ({ name, body: `body of ${name}`, hash: `hash-${name}` }) },
-    // the plan step's tool surface as runtime.ts registers it: task_split + read_annotations +
-    // plan_note_write/plan_note_read + finalize_plan
+    // the plan step's tool surface as runtime.ts registers it
     stepTools: p => [
       ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
       readAnnotationsTool({ kernel, p }),
@@ -248,7 +236,7 @@ describe('grounded-plan e2e: consent → analyze → plan notes → annotate →
       const apiStart = childEvents.find(e => e.kind === EVENT_KIND.step_started && PAYLOAD_SCHEMAS.step_started.parse(e.payload).stepId === 'api')
       expect(must(dbDone, 'db done event').seq).toBeLessThan(must(apiStart, 'api start event').seq)
 
-      // the frozen db step leads with its rationale on a Why: line, then the approved body, then its uncertainty
+      // the frozen db step leads with its rationale on a Why: line, then the body, then its uncertainty
       const dbStep = must(must(await kernel.getPlan(childId), 'child plan').steps.find(s => s.id === 'db'), 'db step')
       expect(dbStep.instructions).toStartWith(`Why: ${DB_RATIONALE}\n\ncreate the schema [mutated after approval]`)
       expect(dbStep.instructions).toContain(DB_UNCERTAINTY)

@@ -17,26 +17,14 @@ const ADMIN_URL = process.env.ORC_DATABASE_URL ?? 'postgresql://postgres:orc@loc
 // shared by the port integration test and the kill-9 resume fixture — one shape to drift
 export const fakeProvider: ModelProvider<unknown> = { costs: {}, languageModel: () => ({}) }
 
-// Every plan now ends with the kernel-appended finish step, which declares ROLE_SKILL.finisher the
-// way the commit step declares ROLE_SKILL.committer — and a port with NO skill index fails that
-// step's init with "step declares skill 'role-finisher' but no skill index is configured". So a
-// harness that drives a real run needs an index, exactly like the production runtime (which resolves
-// the vault's shipped skills). Loads anything under its own name: these tests are about the run, not
-// about which prose a skill carries — a file testing skill RESOLUTION passes its own index instead.
+// a port with no skill index fails the finish step's init; loads any name
 export const fakeSkills: { load(name: string): Promise<LoadedSkill> } = {
   load: async (name: string) => ({ name, body: `body of ${name}`, hash: `hash-${name}` }),
 }
 
 export const TEST_PROJECT_ID = '00000000-0000-4000-8000-000000000001'
 
-// TaskNode.workspaceId is REQUIRED, and createTask refuses an id the fold has never seen — so every
-// kernel-backed test needs one workspace on the log before it can create a task. A fixed id (not a
-// randomUUID) so a hand-built TaskNode literal in a fixture can name the same workspace without
-// plumbing a value through. Workspace.id is z.uuid(), which is why this is a uuid and not 'test-ws'.
-//
-// Defined in @orc/contracts/fixtures and re-exported here rather than spelled twice: contracts is
-// the bottom of the dependency graph and its own tests need the id too (MemoryAuthor.workspaceId is
-// required on every author), and two copies of one uuid is the literal-drift this repo keeps out.
+// a fixed uuid so hand-built TaskNode fixtures can name the seeded workspace
 export { TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 export const TEST_WORKSPACE: Workspace = {
   id: TEST_WORKSPACE_ID, title: 'test', cwd: '/test/workspace', branch: 'main', baseBranch: null,
@@ -44,20 +32,7 @@ export const TEST_WORKSPACE: Workspace = {
   createdAt: '2026-01-01T00:00:00.000Z', archivedAt: null,
 }
 
-// Appends the one workspace_created every kernel-backed test needs before createTask can succeed.
-// Through the LOG, not kernel.ensureWorkspace: a test that seeds through the kernel would get a
-// random id its fixtures cannot name, and several helpers here hold a log before a kernel exists.
-//
-// `cwd` overrides where that workspace lives, and a test driving a CLI/MCP/reactor door has to pass
-// it. Those doors answer "which workspace am I writing from?" by matching their config.dir against
-// this cwd EXACTLY (cwd-workspace.ts realpaths first), and a MemoryAuthor that cannot name a
-// workspace is refused rather than defaulted — so a harness whose config.dir is a throwaway tmp
-// directory gets "no workspace for this directory" from every knowledge write until it seeds here.
-// CALLERS MUST PASS A REALPATH: a tmp dir is commonly a symlink, the doors resolve theirs before
-// asking, and the fold matches the resolved string exactly — an unresolved spelling seeds a
-// workspace nothing will ever find.
-// `origin` is a required parameter, never a default here: a helper that invented one would put the
-// forbidden envelope default back into every test that seeds through it.
+// callers must pass a REALPATH: doors resolve theirs, and the fold matches the string exactly
 export async function seedTestWorkspace(log: Pick<EventLogOps, 'append'>, origin: Origin, cwd: string = TEST_WORKSPACE.cwd): Promise<void> {
   await log.append({
     ...origin, taskId: null, stepId: null, runToken: null,
@@ -65,8 +40,6 @@ export async function seedTestWorkspace(log: Pick<EventLogOps, 'append'>, origin
   })
 }
 
-// the ONE test config builder — every integration test binds the same project identity
-// and gets the correctly derived DBOS system url for its throwaway database
 export function testConfig(databaseUrl: string, overrides: Partial<ProjectConfig> = {}): ProjectConfig {
   return requireProject({
     ...loadConfig(),
@@ -83,7 +56,7 @@ export function testOrcConfig(overrides: Partial<OrcConfig> = {}): OrcConfig {
   return { ...loadConfig(dir), ...overrides }
 }
 
-// the ONE polling loop for "the router/port will get there soon" assertions, hoisted from five test files
+// the ONE polling loop for router and port assertions
 export const waitFor = async (pred: () => Promise<boolean>, ms = 3000): Promise<boolean> => {
   const start = Date.now()
   while (Date.now() - start < ms) { if (await pred()) return true; await Bun.sleep(50) }
@@ -92,23 +65,12 @@ export const waitFor = async (pred: () => Promise<boolean>, ms = 3000): Promise<
 
 export interface TestDb {
   url: string
-  /**
-   * Register a resource to close BEFORE the database is dropped. Runs LIFO, and a throwing
-   * closer never masks the test's own failure.
-   */
+  // closes BEFORE the database is dropped, LIFO; a throwing closer never masks the test failure
   onClose(fn: () => Promise<void> | void): void
   drop(): Promise<void>
 }
 
-// ponytail: test-only helper; ephemeral DB per test file, dropped after.
-// migrate defaults on; the migration test opts out to stage a partial schema itself.
-//
-// The handle owns teardown ORDER, because it is the only thing that knows when the database is
-// about to disappear. A caller that opens a pool/LISTEN client against `url` and does not
-// register it leaves live backends at drop time, and `DROP DATABASE ... WITH (FORCE)` then
-// terminates them — which is where "terminating connection due to administrator command" and
-// "event stream reconnect failed: database does not exist" come from. FORCE is the backstop for
-// a genuinely wedged backend, not the mechanism for routine teardown.
+// the handle owns teardown ORDER: FORCE is a backstop for a wedged backend, not routine teardown
 async function withAdmin<T>(fn: (admin: Client) => Promise<T>): Promise<T> {
   const admin = new Client({ connectionString: ADMIN_URL })
   await admin.connect()
@@ -150,8 +112,7 @@ export async function createTestDb(opts: { migrate?: boolean } = {}): Promise<Te
     url: url.toString(),
     onClose: fn => { closers.push(fn) },
     drop: async () => {
-      // LIFO: a port shuts down before the storage it appends through, which closes before the
-      // database goes away. Swallowed because teardown must not overwrite a real failure.
+      // LIFO teardown, errors swallowed: it must not overwrite a real failure
       for (const close of closers.reverse()) {
         try { await close() } catch { /* already-closed or mid-failure teardown */ }
       }
@@ -168,20 +129,14 @@ export async function createTestDb(opts: { migrate?: boolean } = {}): Promise<Te
   }
 }
 
-// git.test.ts's whole job is the shape of git's own output, so this runs real git rather than
-// mocking it. Exported alongside tmpGitRepo because the tests that ARRANGE a merge (a commit on the
-// worktree branch, a merge made by hand outside orc) need to drive the same repo the fixture built,
-// and a second copy per test file would let the two disagree about how a failed git call surfaces —
-// here it throws with git's stderr, so an arrangement that silently did nothing is impossible.
+// runs real git: this suite tests the shape of git's output; a failed call throws with stderr
 export const sh = (cwd: string, ...args: string[]): string => {
   const r = Bun.spawnSync(['git', '-C', cwd, ...args], { stdout: 'pipe', stderr: 'pipe' })
   if (r.exitCode !== 0) throw new Error(new TextDecoder().decode(r.stderr))
   return new TextDecoder().decode(r.stdout).trim()
 }
 
-// A throwaway main checkout plus one linked worktree, for tests of anything that reads git's
-// `--git-dir` / `--git-common-dir` output. Shared here (not duplicated in git.test.ts) because
-// config.test.ts's loadConfig/initializeProject tests need the same fixture.
+// a main checkout plus one linked worktree for tests of --git-dir / --git-common-dir
 export function tmpGitRepo(): { main: string; worktree: string } {
   const root = mkdtempSync(path.join(tmpdir(), 'orc-git-'))
   const main = path.join(root, 'main')

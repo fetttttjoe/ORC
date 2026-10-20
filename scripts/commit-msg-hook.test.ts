@@ -3,15 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-/**
- * The commit-msg hook, pinned as behaviour rather than prose.
- *
- * It exists as a test because the hook it replaced was WRONG in a way nobody could see: it
- * rewrote the message instead of refusing it, so a body longer than the rule was silently cut
- * mid-sentence and a subject naming `provider-anthropic` was deleted outright. Twenty commits
- * shipped that way. The one assertion that would have caught it is "the file is unchanged" —
- * a rule about what the hook must NOT do, which no amount of reading the awk made obvious.
- */
+/** The hook must never edit the message: the key assertion is that the file is unchanged */
 const HOOK = path.join(import.meta.dir, 'hooks', 'commit-msg')
 
 interface Run {
@@ -37,8 +29,6 @@ async function runHook(message: string): Promise<Run> {
 const SUBJECT = 'fix(memory): report degraded rebuild when notes silently drop'
 
 describe('the commit-msg hook never edits the message', () => {
-  // The defect, stated as a test: this exact message is what 5e837cb was written as, and what
-  // landed was its first body line ending at "the log's expected".
   it('leaves an over-long message byte-identical while refusing it', async () => {
     const message = `${SUBJECT}\n\nrebuild() now performs per-id accounting: it diffs the log's expected\nnote ids against what landed and returns degraded=true.\n`
     const run = await runHook(message)
@@ -64,8 +54,6 @@ describe('what the hook accepts', () => {
     expect((await runHook(`${SUBJECT}\n\none body line explaining the why.\n`)).code).toBe(0)
   })
 
-  // The old hook deleted these lines, and with them the conventional subject — promoting a body
-  // line to subject and producing a commit with no type, no scope and half a sentence.
   it('takes a subject naming provider-anthropic', async () => {
     const run = await runHook('fix(provider-anthropic): pin the model catalog\n')
     expect(run.code).toBe(0)

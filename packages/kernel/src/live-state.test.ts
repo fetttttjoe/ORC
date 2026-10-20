@@ -20,15 +20,12 @@ async function freshStorage(): Promise<Storage> {
 
 const task = (id: string, over: Partial<TaskNode> = {}): TaskNode => taskFixture({ id, title: id, ...over })
 
-// This file folds synthetic history that no conversation ever produced, so every append here names
-// the cli door and no chat — spelled at each call site, never defaulted in.
 const CLI: Origin = NO_CHAT(Door.cli)
 
 const createTask = (log: EventLog, t: TaskNode) =>
   log.append({ ...CLI, taskId: t.id, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: t } })
 
-// `settled` waits for the subscription to have applied everything committed so far. The stream is
-// push-based and the handler is async, so a test that asserts immediately after an append races it.
+// the stream is push-based and async: asserting right after an append races it
 const settled = async (until: () => boolean): Promise<void> => {
   if (!(await waitFor(async () => until(), 2000))) throw new Error('live state did not catch up within 2s')
 }
@@ -63,8 +60,6 @@ describe('openLiveState', () => {
     }
   })
 
-  // The equivalence that makes the cache safe to substitute for a refold anywhere: what it holds
-  // must be what fold() would have produced from the same log, event for event.
   it('matches a from-scratch fold of the same log', async () => {
     const storage = await freshStorage()
     const live = await openLiveState(storage.events)
@@ -85,9 +80,7 @@ describe('openLiveState', () => {
     }
   })
 
-  // A purge truncates the log out of band and no event announces it. Left alone the cache keeps
-  // serving tasks that no longer exist — and cannot recover, because every new seq is BELOW the
-  // cursor it is waiting past, so the stream goes permanently quiet.
+  // a purge truncates out of band and no event says so: new seqs sit BELOW the waiting cursor
   it('re-seeds when the log underneath it was truncated', async () => {
     const storage = await freshStorage()
     await createTask(storage.events, task('ghost'))

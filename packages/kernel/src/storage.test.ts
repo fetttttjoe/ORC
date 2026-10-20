@@ -15,8 +15,6 @@ import { isMissingMigrationTable, migrateDatabase } from './storage/migrate'
 import { events } from './schema'
 import { createTestDb, TEST_PROJECT_ID, TEST_WORKSPACE_ID } from './test-helpers'
 
-// one spelling of a chatless CLI envelope — every append names both keys, so a per-literal copy
-// would be a dozen places to edit the next time provenance gains one
 const ORIGIN = NO_CHAT(Door.cli)
 // the project the backfilling migration parks pre-existing rows in — no log ever opens it
 const LEGACY_PROJECT_ID = 'legacy'
@@ -30,8 +28,7 @@ async function freshStorage(): Promise<Storage> {
   const db = await createTestDb()
   dbs.push(db)
   const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
-  // registered, not left to the test body: a bare close after assertions dies with the first
-  // failing expect and leaks the pool into every later file
+  // registered, not closed after assertions: a failing expect would leak the pool into later files
   db.onClose(() => storage.close())
   return storage
 }
@@ -83,15 +80,12 @@ describe('schema migration', () => {
     const err = await openStorage(db.url, { projectId: TEST_PROJECT_ID }).then(() => null, (e: unknown) => e)
     if (!(err instanceof Error)) throw new Error('expected openStorage to reject on a behind schema')
     expect(err.message).toMatch(/database schema is behind \(0\/\d+ migrations applied\)/)
-    // the "(checked host/db)" suffix says WHICH database (a wrong cwd hits a different one) —
-    // but only host+path, never credentials, so a regression that interpolates the raw url is caught
+    // host+path only, never credentials: a regression interpolating the raw url is caught
     expect(err.message).toContain('(checked ')
     expect(err.message).toContain(new URL(db.url).host) // host:port is shown
     expect(err.message).not.toContain('@')              // no user/password ever reaches the message
   })
 
-  // error-wrapping libraries can hand back a chain that loops on itself; an unguarded cause walk
-  // recurses to stack overflow instead of classifying the error
   it('classifies a self-referential cause chain without recursing forever', () => {
     const looped: { code: string; cause?: unknown } = { code: 'XX000' }
     looped.cause = looped
@@ -196,8 +190,7 @@ describe('EventLog (postgres)', () => {
     dbs.push(db)
     const migrations = fileURLToPath(new URL('../drizzle', import.meta.url))
 
-    // a database frozen after the first `count` migrations, so a row can be written against the
-    // shape that existed then
+    // a database frozen after the first `count` migrations
     const stageThrough = (count: number): string => {
       const stage = mkdtempSync(path.join(tmpdir(), 'orc-mig-'))
       mkdirSync(path.join(stage, 'meta'))
@@ -230,8 +223,7 @@ describe('EventLog (postgres)', () => {
     const row = must((await raw.select().from(backfilledEvents))[0], 'first row from events table')
     expect(row.projectId).toBe(LEGACY_PROJECT_ID)
 
-    // the door column is NOT NULL with no default — it can only be added to an empty table, so the
-    // legacy row is re-created once the chain is complete
+    // `door` is NOT NULL with no default: it can only be added to an empty table
     await raw.delete(legacyEvents)
     await migrateDatabase(db.url)
     await raw.insert(events).values({
@@ -299,8 +291,7 @@ describe('EventLog (postgres)', () => {
       ts: inChat.ts,
     }))
     await log.append(statusEvent())
-    // read back from the rows: a column the insert never filled still round-trips through the
-    // record the append returned
+    // read back from the rows, not the record the append returned
     expect((await log.byTask('t1')).map(e => [e.chatId, e.door])).toEqual([['c1', Door.web], [null, Door.cli]])
   })
 
@@ -387,8 +378,7 @@ describe('EventLog (postgres)', () => {
               x_api_key: 'raw-prefixed-api-key',
               servicePassword: 'raw-service-password',
               credentials: 'raw-credentials',
-              // minted-during-a-run secrets: never in process.env, so key matching is the ONLY
-              // thing that catches them
+              // minted during a run: never in process.env, so key matching is the ONLY catch
               authToken: 'raw-auth-token', bearer_token: 'raw-bearer-token',
               sessionToken: 'raw-session-token', apiToken: 'raw-api-token',
               publicKey: 'safe-public-key',
@@ -405,8 +395,7 @@ describe('EventLog (postgres)', () => {
         'raw-auth-token', 'raw-bearer-token', 'raw-session-token', 'raw-api-token',
       ]) expect(stored).not.toContain(secret)
       expect(stored).toContain('safe-public-key')
-      // the trap: runToken normalizes to 'runtoken'. Redacting it would fail PAYLOAD_SCHEMAS
-      // validation, which runs after redaction — so it must survive intact.
+      // the trap: runToken normalizes to 'runtoken'; redacting it would fail validation after redaction
       expect(stored).toContain('"runToken":"r1"')
       expect(stored).toContain('[REDACTED]')
       expect(stored).toContain('[REDACTED:ORC_TEST_FAKE_SECRET]')

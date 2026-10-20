@@ -4,13 +4,7 @@
   import { cn } from '$lib/utils'
   import type { WaveNodeData } from './plan-flow'
 
-  /**
-   * A wave, drawn as the container its steps live in. This is the whole reason the graph uses
-   * subflows: "these run together" is a fact about the plan, and a band says it outright where
-   * three nodes sharing a column only imply it.
-   *
-   * Scenery, not a control — pointer-events are off so clicks fall through to the steps inside.
-   */
+  // A wave drawn as the container its steps live in; pointer-events off so clicks reach the steps
   let { data }: NodeProps = $props()
   const wave = $derived(data as WaveNodeData)
   const temp = $derived(statusTemperature(wave.state))

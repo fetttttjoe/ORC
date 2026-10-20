@@ -2,8 +2,7 @@
   import { cn } from '$lib/utils'
   import type { Snippet } from 'svelte'
 
-  // one label/value row. Values WRAP rather than overflow — a revision hash or a path is exactly
-  // the kind of unbroken token that used to push a pane sideways.
+  // Values WRAP rather than overflow: an unbroken hash or path pushed panes sideways
   let { label, mono = false, children }: { label: string; mono?: boolean; children: Snippet } = $props()
 </script>
 

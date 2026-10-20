@@ -57,8 +57,7 @@ describe('chats view read', () => {
   })
 })
 
-// A kind chatDigests reads but touches ignores serves a stale digest forever: three such gaps were
-// found in review. Every kind the fold reads gets a row here.
+// every kind the fold reads gets a row: an unread kind serves a stale digest forever
 describe('chats view touches', () => {
   const m = modelOf(tree)
   const KINDS: Array<[EventRecord['kind'], Record<string, unknown>]> = [
@@ -88,8 +87,7 @@ describe('chats view touches', () => {
       .not.toContainEqual({ scope: { type: ScopeType.chat, id: 'c2' } })
   })
 
-  // The one event that moves a digest it does not belong to: a child's open is what the PARENT's
-  // caused.runs is read off, so a parent chat pane holding its own scope must refetch.
+  // a child's open moves the parent's caused.runs, so a parent chat pane must refetch
   it('names the parent chat too when a child chat opens under it', () => {
     const child = opened(9, 'c2', { parent: { chatId: 'c1', seq: 4 } })
     expect(chats.touches(child, m)).toContainEqual({ scope: { type: ScopeType.chat, id: 'c1' } })

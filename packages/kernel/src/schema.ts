@@ -9,8 +9,7 @@ export const events = pgTable(
     projectId: text('project_id').notNull(),
     idempotencyKey: text('idempotency_key'),
     chatId: text('chat_id'),
-    // never null: an event that lost its door is anonymous forever — a CLI call, an MCP call and
-    // a hook's commit become indistinguishable
+    // never null: an anonymous event cannot be traced to a CLI, MCP or hook door
     door: text('door').$type<Door>().notNull(),
     taskId: text('task_id'),
     stepId: text('step_id'),
@@ -31,8 +30,6 @@ export const events = pgTable(
   ],
 )
 
-// the durable current execution graph: one row per logical model/tool operation,
-// rebuildable from operation_* transition events (the append-only truth)
 export const operations = pgTable(
   'operations',
   {
@@ -60,9 +57,6 @@ export const operations = pgTable(
   ],
 )
 
-// Which supervisors are alive, and since when. Presence is a heartbeat rather than an exclusive
-// lock because more than one supervisor is a design goal: an exclusive lock cannot express "two
-// are up and both healthy". Rows are per (project, executor); a supervisor refreshes its own.
 export const supervisors = pgTable(
   'supervisors',
   {

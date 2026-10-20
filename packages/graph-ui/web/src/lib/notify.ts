@@ -1,9 +1,6 @@
 import { toast } from 'svelte-sonner'
 
-/**
- * The one notification surface. Tone is the vocabulary the rest of the app already speaks
- * (ok / warn / error), mapped onto sonner here so no caller reaches for a raw toast variant.
- */
+// The one notification surface; tone maps onto sonner here so no caller uses a raw variant
 export type Tone = 'ok' | 'warn' | 'error'
 
 export function notify(message: string, tone: Tone = 'ok'): void {

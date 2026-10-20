@@ -11,10 +11,7 @@ import type { TranscriptItem } from './transcript'
 import { asResolvedTools, buildCopilotTools, copilotSystemPrompt } from './copilot'
 import type { CopilotFocus } from './copilot-focus'
 
-// Honest stubs for the ui-core ports this suite drives: every member throws unless overridden,
-// so an unexercised call surfaces loudly instead of a cast pretending the object is complete.
-// ponytail: mirrors the e2e fixture's unsupported() helper; promote to a shared test-helper if a
-// third suite needs it.
+// honest stubs: every member throws unless overridden, so unexercised calls surface loudly
 const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not available in this test`) }
 const sessionsStub = (over: Partial<ProjectSessions> = {}): ProjectSessions => ({
   projects: unsupported('projects'), model: unsupported('model'), snapshot: unsupported('snapshot'), subscribe: unsupported('subscribe'),
@@ -22,8 +19,7 @@ const sessionsStub = (over: Partial<ProjectSessions> = {}): ProjectSessions => (
   since: unsupported('since'), reset: unsupported('reset'), close: unsupported('close'), ...over,
 })
 
-// A stub feeds the read tools EVENTS, never a canned answer per tool: a tool can then only be
-// handed a shape the fold itself can produce.
+// events, never a canned answer per tool: tools only see shapes the fold produces
 const sessionsOf = (events: EventRecord[], over: Partial<ProjectSessions> = {}): ProjectSessions =>
   sessionsStub({ model: async () => modelOf(events), ...over })
 const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
@@ -37,15 +33,13 @@ const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({
   cancel: unsupported('cancel'), purgeProject: unsupported('purgeProject'), deleteProject: unsupported('deleteProject'), ...over,
 })
 
-// A full Workspace record, not a partial: the two workspace tools hand the record straight through,
-// so a fixture missing a field would let the tools ship one too.
+// a full Workspace record: the tools pass it through, so a partial would ship partial
 const wsFixture: Workspace = {
   id: '11111111-1111-4111-8111-111111111111', title: 'Req', cwd: '/repo/.orc/worktrees/req',
   branch: 'orc/req', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: true, onTrunk: false,
   createdAt: '2026-01-01T00:00:00.000Z', archivedAt: null,
 }
-// …and the verdict that now travels with it. Full for the same reason: both doors pass `health`
-// through untouched, so a partial here would let them ship a partial.
+// full for the same reason: both doors pass health through untouched
 const healthFixture: WorkspaceHealth = {
   state: WORKSPACE_STATE.waiting, lastActivityAt: '2026-01-02T00:00:00.000Z',
   taskCount: 1, openTaskCount: 1, merged: false, dirExists: true, clean: false,
@@ -74,8 +68,7 @@ function scriptModel(turns: Array<{ text?: string; toolCalls?: Array<{ toolCallI
   })
 }
 
-// An EMPTY log behind the read tools: no plan, no conversation, no decomposition, no activity —
-// each answers its own "nothing yet", which is what the tools that do not exercise a fold need.
+// an empty log: each read tool answers its own 'nothing yet'
 const stubSessions = sessionsOf([], {
   snapshot: async () => ({
     seq: 1,
@@ -83,8 +76,7 @@ const stubSessions = sessionsOf([], {
   }),
 })
 
-// The exchange these tools are built for. Every mutating tool passes it to the action it calls,
-// so there is no origin-less spelling of buildCopilotTools to fall back to.
+// every mutating tool passes it: there is no origin-less buildCopilotTools
 const ORIGIN: Origin = { chatId: 'chat-copilot', door: Door.mcp }
 const wrotePlanNote = (seq: number, note: PlanNote): EventRecord =>
   eventFixture({ seq, taskId: 't1', kind: EVENT_KIND.plan_note_written, payload: { note } })
@@ -141,10 +133,6 @@ describe('copilot tools', () => {
     expect(r.output).toHaveProperty('knowledge', { state: 'unavailable', reason: 'no checkout' })
   })
 
-  // `visual` is an ALLOWLIST, not a spread: the plans view serves a BROWSER as well, and a field
-  // added there for a renderer must not silently start costing model tokens on every task_plan
-  // call. It caught exactly that once — a mermaid diagram string, re-telling the model what
-  // `waves` already says. So this pins the two keys a driver can act on, and nothing else.
   it('task_plan passes only the visual fields a driver can act on, dropping any other', async () => {
     const withPlan = sessionsOf([
       eventFixture({ seq: 1, taskId: 't1', kind: EVENT_KIND.task_created, payload: { task: taskFixture({ id: 't1' }) } }),
@@ -204,19 +192,17 @@ describe('copilot tools', () => {
       tools,
       stopWhen: stepCountIs(3),
     })
-    // budgetUSD travels explicitly: a chat tool never invents a spend cap, and the action requires one stated
+    // budgetUSD travels explicitly: a chat tool never invents a spend cap
     expect(calls).toEqual([{ title: 'demo request', budgetUSD: null }])
     expect(result.text).toContain('t-new')
   })
 })
 
-// Door #2 shape: call through asResolvedTools so the assertions run against the SAME
-// safeParse-then-execute path an MCP client hits with raw JSON.
+// calls through asResolvedTools: the same safeParse-then-execute path an MCP client hits
 const callTool = async (tools: ToolSet, name: string, input: unknown) =>
   must(asResolvedTools(tools).find(t => t.name === name), 'asResolvedTools(tools).find(t => t.name === name)').execute(input, undefined)
 
-// A step's conversation as the EVENTS it is folded from: a canned item list could assert a shape
-// the fold can never produce.
+// a step's conversation as events: a canned list could assert a shape the fold never produces
 const spoke = (seq: number, kind: EventRecord['kind'], payload: Record<string, unknown>): EventRecord =>
   eventFixture({ seq, taskId: 't1', stepId: 's1', runToken: 'r1', kind, payload })
 const calledTool = (seq: number, toolCallId: string, toolName: string, input: unknown): EventRecord =>
@@ -237,8 +223,7 @@ describe('workspaces at the doors', () => {
     const tools = buildCopilotTools({ sessions: stubSessions, actions, projectId: 'p1', origin: ORIGIN })
     expect((await callTool(tools, 'workspace_new', { title: 'Req', spec: 'do it' })).output).toMatchObject({ taskId: 't1' })
     expect(calls).toEqual([{ title: 'Req', spec: 'do it' }])
-    // the verdict travels WITH the record: a driver deciding where to work next needs to see that
-    // this checkout is waiting on a person, not just that it exists
+    // the verdict travels with the record: a driver must see a checkout is waiting on a person
     expect((await callTool(tools, 'workspace_list', {})).output).toEqual([wsRow])
   })
 
@@ -262,8 +247,6 @@ describe('workspaces at the doors', () => {
     expect(calls).toEqual([{ title: 'in that worktree', workspaceId: wsFixture.id, budgetUSD: null }])
   })
 
-  // A driver's first question in a multi-workspace project is "which checkout is this task in?" —
-  // project_status is where it starts, so the grouping lives there rather than behind a second tool.
   it('project_status groups the tasks it already lists under their workspaces', async () => {
     const sessions = sessionsStub({
       snapshot: async () => ({
@@ -282,19 +265,15 @@ describe('workspaces at the doors', () => {
       workspaces: [{
         id: wsFixture.id, title: 'Req', kind: WORKSPACE_KIND.worktree, branch: 'orc/req',
         cwd: '/repo/.orc/worktrees/req', taskIds: ['t1'],
-        // the SAME verdict workspace_list and `orc ws ls` carry — the tool a driver starts from
-        // must not describe a checkout differently from the tool it moves on to
+        // the same verdict workspace_list and orc ws ls carry
         health: healthFixture,
       }],
     })
-    // no dep wired → the field is OMITTED. An empty array would read as "this project has no
-    // workspaces", which is never true — every task has one.
+    // no dep wired: the field is omitted; [] would read as 'no workspaces', never true
     const bare = buildCopilotTools({ sessions, actions: null, projectId: 'p1', origin: ORIGIN })
     expect((await callTool(bare, 'project_status', {})).output).not.toHaveProperty('workspaces')
   })
 
-  // Same posture the health probe already holds: project_status is the tool a driver starts from,
-  // so an optional dep that fails must cost the caller that ONE field, never the whole answer.
   it('a failing listWorkspaces omits the field — it never takes project_status down', async () => {
     const tools = buildCopilotTools({
       sessions: stubSessions, actions: null, projectId: 'p1', origin: ORIGIN,
@@ -307,8 +286,7 @@ describe('workspaces at the doors', () => {
   })
 })
 
-// The decision tools own no shape of their own: DecisionInput and DecisionFilter ARE the inputSchemas, so a bad
-// input is refused at the door's parse, before actions is ever reached.
+// DecisionInput and DecisionFilter are the inputSchemas: bad input is refused at the door's parse
 describe('decisions at the doors', () => {
   it('record_decision hands the parsed decision to actions and is absent without a mutating door', async () => {
     const calls: unknown[] = []
@@ -345,8 +323,7 @@ describe('decisions at the doors', () => {
   })
 })
 
-// What the copilot is told about the selection. The block is rendered from the derived focus, so
-// a copilot answering "this request" can never name a task the fold does not hold.
+// rendered from the derived focus: the copilot cannot name a task the fold lacks
 describe('the system prompt renders the selection', () => {
   const taskFocus: CopilotFocus = {
     type: ScopeType.task, title: 'wire the door', spec: 'the whole spec', status: TASK_STATUS.running,
@@ -439,8 +416,7 @@ describe('plan_notes (mechanical fields)', () => {
 })
 
 describe('recent_activity (pollable)', () => {
-  // five events across two steps and two kinds — enough that a cursor and a kind filter each have
-  // something to leave out
+  // five events, two steps, two kinds: a cursor and a kind filter each leave something out
   const feed = [
     spoke(5, EVENT_KIND.step_started, { stepId: 's1', attempt: 1 }),
     spoke(6, EVENT_KIND.tool_call, { stepId: 's1', iteration: 1, toolCallId: 'c1', toolName: 'fs_read', input: {} }),
@@ -453,8 +429,7 @@ describe('recent_activity (pollable)', () => {
 
   it('returns { rows, maxSeq }, and the cursor and kind filter reach the read', async () => {
     const r = await callTool(tools, 'recent_activity', { scope: project, sinceSeq: 5, kinds: ['step_started', 'step_completed'], limit: 3 })
-    // seq 5 is the caller's own cursor (EXCLUSIVE) and seq 6 is the wrong kind: a door that
-    // dropped either filter would hand back rows the driver has already paid to read
+    // seq 5 is the exclusive cursor, seq 6 the wrong kind: dropping either filter returns seen rows
     expect(r.output).toMatchObject({ maxSeq: 9 })
     expect(listOf(recordOf(r.output).rows).map(i => recordOf(i).seq)).toEqual([7, 9])
   })
@@ -469,8 +444,6 @@ describe('recent_activity (pollable)', () => {
     expect(r.isError).toBe(true)
   })
 
-  // The scope is the view's own, so this door reads one conversation or one request without a
-  // second filtering rule living here.
   it('narrows to a scope: a chat reads only its own rows, and an unstated scope is refused', async () => {
     const chatty = buildCopilotTools({ sessions: sessionsOf([...feed, eventFixture({ seq: 11, kind: EVENT_KIND.copilot_exchange, taskId: null, chatId: 'c1', door: Door.web, payload: { user: 'u', assistant: 'a', toolCalls: [], modelRef: 'm/m', taskId: null, workspaceId: null } })]), actions: null, projectId: 'p1', origin: ORIGIN })
     const r = await callTool(chatty, 'recent_activity', { scope: { type: ScopeType.chat, id: 'c1' } })

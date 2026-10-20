@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, CheckVerdict, Door, EVENT_KIND, MemoryAuthor, NO_CHAT, PAYLOAD_SCHEMAS, TaskNode } from './index'
+import { AUTHOR_SOURCE, CheckVerdict, Door, EVENT_KIND, Author, NO_CHAT, PAYLOAD_SCHEMAS, TaskNode } from './index'
 import { authorFixture } from './fixtures'
 import { WORKSPACE_KIND, Workspace, WorkspaceArchivedPayload } from './workspace-entity'
 
@@ -47,22 +47,21 @@ describe('TaskNode.workspaceId', () => {
   })
 })
 
-describe('MemoryAuthor.workspaceId', () => {
+describe('Author.workspaceId', () => {
   it('is required on EVERY author — a write that cannot name its workspace is refused, not defaulted', () => {
-    expect(MemoryAuthor.safeParse({ source: AUTHOR_SOURCE.cli }).success).toBe(false)
-    expect(MemoryAuthor.safeParse({ source: AUTHOR_SOURCE.agent, taskId: 't1' }).success).toBe(false)
-    expect(MemoryAuthor.safeParse({ source: AUTHOR_SOURCE.agent, workspaceId: '' }).success).toBe(false)
+    expect(Author.safeParse({ source: AUTHOR_SOURCE.cli }).success).toBe(false)
+    expect(Author.safeParse({ source: AUTHOR_SOURCE.agent, taskId: 't1' }).success).toBe(false)
+    expect(Author.safeParse({ source: AUTHOR_SOURCE.agent, workspaceId: '' }).success).toBe(false)
   })
   it('round-trips an agent author carrying the workspace it wrote from', () => {
     const origin = NO_CHAT(Door.cli)
-    expect(MemoryAuthor.parse({ source: AUTHOR_SOURCE.agent, workspaceId: ws.id, origin })).toEqual({ source: AUTHOR_SOURCE.agent, workspaceId: ws.id, origin })
+    expect(Author.parse({ source: AUTHOR_SOURCE.agent, workspaceId: ws.id, origin })).toEqual({ source: AUTHOR_SOURCE.agent, workspaceId: ws.id, origin })
   })
-  // The door is the half of the provenance that is never null, so an author that named only a chat
-  // would read back as having come from nowhere on every chatless write.
+  // the door is never null: a chat-only author would read back as coming from nowhere
   it('requires a full origin — a bare chatId does not satisfy it', () => {
-    expect(MemoryAuthor.safeParse({ source: AUTHOR_SOURCE.cli, workspaceId: ws.id, chatId: null }).success).toBe(false)
-    expect(MemoryAuthor.safeParse({ source: AUTHOR_SOURCE.cli, workspaceId: ws.id, origin: { chatId: null } }).success).toBe(false)
-    expect(MemoryAuthor.parse({ source: AUTHOR_SOURCE.cli, workspaceId: ws.id, origin: NO_CHAT(Door.mcp) }).origin.door).toBe(Door.mcp)
+    expect(Author.safeParse({ source: AUTHOR_SOURCE.cli, workspaceId: ws.id, chatId: null }).success).toBe(false)
+    expect(Author.safeParse({ source: AUTHOR_SOURCE.cli, workspaceId: ws.id, origin: { chatId: null } }).success).toBe(false)
+    expect(Author.parse({ source: AUTHOR_SOURCE.cli, workspaceId: ws.id, origin: NO_CHAT(Door.mcp) }).origin.door).toBe(Door.mcp)
   })
   it('authorFixture names the chatless CLI origin every test-side author shares', () => {
     expect(authorFixture().origin).toEqual(NO_CHAT(Door.cli))

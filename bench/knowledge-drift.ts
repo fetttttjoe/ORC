@@ -1,4 +1,4 @@
-// How many claims read suspect per commit window, file level versus claim state. Run: bun bench/knowledge-drift.ts [--window 10] [--span 80]
+// Run: bun bench/knowledge-drift.ts [--window 10] [--span 80]
 import { z } from 'zod'
 import { anchorState, claimState, ClaimState, NO_ANCHOR_EVIDENCE, ROOT_ENTITY, type KnowledgeAnchor, type KnowledgeClaim } from '../packages/contracts/src/index.ts'
 import { readingOf } from '../packages/knowledge-core/src/index.ts'

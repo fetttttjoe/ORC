@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'bun:test'
-import { AUTHOR_SOURCE, ClaimClass, ClaimState, Door, KnowledgeHealthState, NO_CHAT, type ClaimDrift, type KnowledgeAccess, type MemoryAuthor } from '@orc/contracts'
-import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
+import { AUTHOR_SOURCE, ClaimClass, ClaimState, Door, KnowledgeHealthState, NO_CHAT, type ClaimDrift, type KnowledgeAccess, type Author } from '@orc/contracts'
+import { createInMemoryBackend, NO_STRUCTURE } from './in-memory-backend'
 import { knowledgeHealth } from './knowledge-health'
 import { createKnowledgePort } from './port'
 
-const author: MemoryAuthor = { source: AUTHOR_SOURCE.cli, workspaceId: 'ws-1', origin: NO_CHAT(Door.cli) }
+const author: Author = { source: AUTHOR_SOURCE.cli, workspaceId: 'ws-1', origin: NO_CHAT(Door.cli) }
 const portOver = () => createKnowledgePort({
-  backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }),
+  backend: createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }),
   checkoutOf: async () => '/checkout',
   append: async () => {},
   warn: () => {},

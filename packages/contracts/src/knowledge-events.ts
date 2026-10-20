@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { MemoryAuthor } from './author'
+import { Author } from './author'
 import { DecisionRef } from './decision'
 import { CheckVerdict, DecisionSlug, DeliveryMode, KNOWLEDGE_LIMITS, KnowledgeId, KnowledgeRef } from './knowledge'
 
@@ -7,7 +7,7 @@ export const KnowledgeDeliveredPayload = z.object({
   ids: z.array(KnowledgeId).min(1).max(KNOWLEDGE_LIMITS.deliveredIds),
   mode: z.enum(DeliveryMode),
   subject: z.string().max(KNOWLEDGE_LIMITS.subjectChars),
-  author: MemoryAuthor,
+  author: Author,
 })
 export type KnowledgeDeliveredPayload = z.infer<typeof KnowledgeDeliveredPayload>
 
@@ -27,7 +27,7 @@ export const KnowledgeWrittenPayload = z.object({
   decisionsRecorded: z.array(DecisionRef),
   decisionsSuperseded: z.array(DecisionRef),
   asserted: z.array(KnowledgeAssertion).max(KNOWLEDGE_LIMITS.assertedItems),
-  author: MemoryAuthor,
+  author: Author,
 })
 export type KnowledgeWrittenPayload = z.infer<typeof KnowledgeWrittenPayload>
 
@@ -37,6 +37,6 @@ export const KnowledgeCheckedPayload = z.object({
   text: z.string().min(1),
   anchors: z.array(DigestedAnchor).max(KNOWLEDGE_LIMITS.anchors),
   why: z.string().min(1),
-  author: MemoryAuthor,
+  author: Author,
 })
 export type KnowledgeCheckedPayload = z.infer<typeof KnowledgeCheckedPayload>

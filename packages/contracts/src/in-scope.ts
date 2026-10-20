@@ -4,18 +4,14 @@ import type { EventRecord } from './event-kinds'
 import { PAYLOAD_SCHEMAS } from './events'
 import type { Scope, ScopeIndex } from './scope'
 
-// The ONE membership test every read surface asks. It takes the task tree through a narrow index
-// rather than the kernel's State, so the rule stays a pure function: a second spelling of "is this
-// event in scope" would decide a transcript and a cost total differently and neither would look
-// wrong.
+// the one membership test: a second spelling would split transcript and cost totals
 
 // Authored events name their task, if any, and always their workspace.
 const AuthoredPayload = z.union([
   PAYLOAD_SCHEMAS.knowledge_written, PAYLOAD_SCHEMAS.knowledge_delivered, PAYLOAD_SCHEMAS.knowledge_checked,
 ])
 
-// The payloads that name a checkout the envelope's task cannot: a hook's commit and a copilot
-// exchange have no task, and a chat states the workspace it was opened in.
+// payloads naming a checkout the envelope's task cannot: hook commits, copilot exchanges, chats
 const PlacedPayload = z.union([
   PAYLOAD_SCHEMAS.commit_recorded, PAYLOAD_SCHEMAS.copilot_exchange, PAYLOAD_SCHEMAS.chat_opened,
 ])

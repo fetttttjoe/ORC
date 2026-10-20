@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'bun:test'
 import {
   AUTHOR_SOURCE, ClaimClass, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeToolName, NO_KNOWLEDGE_WRITES, PreloadArm, STEP_ID, STEP_ROLE,
-  KnowledgeDeliveredPayload, knowledgeIdFrom, type EventInput, type KnowledgePort, type KnowledgeWrites, type MemoryAuthor, type PreloadRequest,
+  KnowledgeDeliveredPayload, knowledgeIdFrom, type EventInput, type KnowledgePort, type KnowledgeWrites, type Author, type PreloadRequest,
 } from '@orc/contracts'
-import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
+import { createInMemoryBackend, NO_STRUCTURE } from './in-memory-backend'
 import { createKnowledgePort } from './port'
 import { bindStepKnowledge, PRELOAD_NOT_READ, preloadKey } from './step-knowledge'
 
-const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'c-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
+const author: Author = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'c-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
 type Params = Parameters<typeof bindStepKnowledge>[0]['p']
 const params = (over: Partial<Params> & { stepId: string; role: string }): Params =>
   ({ taskId: 't-1', ancestorTaskIds: [], step: { title: 'A step', instructions: 'do it' }, ...over })
@@ -17,7 +17,7 @@ const finisher = params({ stepId: STEP_ID.finish, role: STEP_ROLE.finisher })
 const verifier = params({ stepId: STEP_ID.verify, role: STEP_ROLE.auditor })
 const fact = (text: string, path: string) => ({ text, class: ClaimClass.fact, anchors: [{ path }] })
 const memoryPort = (events: EventInput[] = []) =>
-  createKnowledgePort({ backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }), checkoutOf: async () => '/c', append: async e => { events.push(e) } })
+  createKnowledgePort({ backend: createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }), checkoutOf: async () => '/c', append: async e => { events.push(e) } })
 const setup = (writes: KnowledgeWrites = NO_KNOWLEDGE_WRITES, p: Params = worker) => {
   const events: EventInput[] = []
   const port = memoryPort(events)
@@ -108,7 +108,7 @@ describe('the step preload', () => {
     const held = new Map<string, string>()
     const delivered: EventInput[] = []
     const port = createKnowledgePort({
-      backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }), checkoutOf: async () => '/c', warn: () => {},
+      backend: createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }), checkoutOf: async () => '/c', warn: () => {},
       append: async e => {
         const key = e.idempotencyKey ?? null
         const payload = JSON.stringify(e.payload)

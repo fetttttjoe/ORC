@@ -75,12 +75,7 @@ describe('vault projection over a real run (e2e)', () => {
   })
   afterAll(() => teardown())
 
-  // 30s, the value feedback-gate.test.ts and mcp-run.test.ts settled on for a full DBOS run: bun's
-  // default 5s has to cover a whole run's worth of DBOS workflow, live vault projection and file
-  // rendering, and the kernel-appended finish step added one more step to that budget — enough that
-  // the margin is load-sensitive when this file runs alongside the rest of packages/kernel rather
-  // than alone. A timeout that trips on machine load reports "the vault projection broke" for
-  // something that was only slow.
+  // 30s: a full DBOS run plus vault projection is load-sensitive at bun's 5s default
   it('projects the full run: working-graph DAG, session transcript, log, root index', async () => {
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'e2e demo', spec: 'write a file' }, CLI)
     await kernel.proposePlan(t.id, draftFixture([stepFixture({ id: 's1', modelRef: 'fake/m' })]), CLI)

@@ -1,11 +1,7 @@
 import { TASK_STATUS } from '@orc/contracts/task'
 import { StepRunStatus } from '@orc/contracts/execution'
 
-/**
- * The two-temperature system, in one place. Amber = waits on a HUMAN, steel = autonomous machine
- * work, moss = settled well, rust = settled badly. Every badge, pill, border and tile reads its
- * colour from here, so the vocabulary cannot drift per component.
- */
+// Amber waits on a HUMAN, steel is machine work, moss settled well, rust settled badly
 export type Temperature = 'human' | 'machine' | 'moss' | 'rust' | 'neutral'
 
 export const TEMP_TEXT: Record<Temperature, string> = {
@@ -41,8 +37,7 @@ export const statusTemperature = (status: string): Temperature => {
     case TASK_STATUS.awaiting_approval:
       return 'human'
     case TASK_STATUS.done:
-    // a step reports `completed` where a task reports `done`; without this a finished step
-    // rendered in the same grey as one that had never started
+    // a step reports `completed` where a task reports `done`: else a finished step rendered grey
     case StepRunStatus.completed:
       return 'moss'
     case TASK_STATUS.blocked:

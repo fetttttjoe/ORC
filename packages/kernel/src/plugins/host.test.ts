@@ -10,10 +10,7 @@ import { createPluginHost } from './host'
 
 let dirs: string[] = []
 const temp = () => { const d = mkdtempSync(path.join(tmpdir(), 'orc-host-')); dirs.push(d); return d }
-// Hosts are registered at CREATION, not shut down at the end of the it() body: a bare trailing
-// `await host.shutdown()` is skipped whenever an assertion above it throws, and the leaked host
-// then poisons every subsequent test in the process. Drained here, so a failing assertion costs
-// one failure instead of a cascade.
+// hosts register at creation: a trailing shutdown is skipped when an assertion throws and leaks
 const hosts: Array<{ shutdown: () => Promise<void> }> = []
 afterEach(async () => {
   for (const h of hosts.reverse()) await h.shutdown()

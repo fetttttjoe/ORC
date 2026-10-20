@@ -1,17 +1,13 @@
 import { CHECKS_EXECUTOR_REF, MASTERPLAN_NOTE_ID, checkCommandsOf, errorMessage, type ChildPlanDraft, type Plan } from '@orc/contracts'
 import { freezePlan, type Kernel } from '@orc/kernel'
 
-// The review surface of a plan: exactly the fields a human weighs at the gate. A named subset
-// (not the full Plan) so tests construct it cast-free and callers state their dependency.
+// a named subset of Plan, so tests construct it cast-free
 export type ReviewablePlan = Pick<Plan, 'version' | 'costEstimateUSD' | 'steps'>
 
-// Formats a model ref's price line ('$1/M in · $5/M out'). null = unknown ref or no discovery
-// available (read-only context) — the render simply omits the rate.
+// null = unknown ref or no discovery: the render omits the rate
 export type ModelRate = (modelRef: string) => string | null
 
-// Human-first render of the approval-gate artifact: what runs, on which model, at what rate,
-// under what iteration budget, fenced where. Plumbing (executorRef/isolation/strategyRef)
-// stays behind --json.
+// plumbing (executorRef/isolation/strategyRef) stays behind --json
 export function renderPlanHuman(plan: ReviewablePlan, rateFor?: ModelRate): string {
   const lines: string[] = []
   const est = plan.costEstimateUSD == null
@@ -36,9 +32,7 @@ export function renderPlanHuman(plan: ReviewablePlan, rateFor?: ModelRate): stri
   return lines.join('\n')
 }
 
-// What approving actually freezes. The gate used to show only the plan agent's prose, and the plan
-// hash then bound the human's approval to a note graph they had never seen — a run shipped where
-// the prose claimed a dependency the notes did not encode, and the steps raced.
+// what approving freezes: the plan hash binds approval to a graph the human must be shown
 export function renderDerivedPlan(draft: ChildPlanDraft): string {
   const lines = ['what approving freezes (derived from the plan notes, not from the text above):']
   for (const s of draft.steps) {
@@ -52,8 +46,7 @@ export function renderDerivedPlan(draft: ChildPlanDraft): string {
   return lines.join('\n')
 }
 
-// What approving would freeze from the task's plan notes, or '' before a masterplan exists. A freeze
-// error is what the human needs to see at the gate, so it is rendered, never thrown.
+// a freeze error is rendered, never thrown: the human needs to see it at the gate
 export async function derivedPlanBlock(kernel: Pick<Kernel, 'listPlanNotes'>, opts: { autoCommit?: boolean; checks: readonly string[] }, taskId: string): Promise<string> {
   try {
     const notes = await kernel.listPlanNotes(taskId)

@@ -8,8 +8,6 @@ describe('errorMessage', () => {
     expect(errorMessage('plain')).toBe('plain')
   })
 
-  // A ZodError's .message is the raw issue-JSON dump — a model reading a tool result should get
-  // the human line, not a page of JSON to re-parse.
   it('prettifies a ZodError instead of dumping issue JSON', () => {
     const r = z.object({ paths: z.array(z.string()) }).safeParse({ paths: 'src/x.ts' })
     if (r.success) throw new Error('parse unexpectedly succeeded')

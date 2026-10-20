@@ -15,16 +15,12 @@ const seen: string[] = []
 
 const CLI: Origin = NO_CHAT(Door.cli)
 
-// scripted executor: yields a feedback gate, records what it resumes with, then signals done —
-// mirrors fakeExecutor in dbos-port.test.ts, but for the feedback (not split) gate.
+// scripted executor: yields a feedback gate, records what it resumes with, then signals done
 function feedbackFake(): AgentExecutor<unknown> {
   return {
     id: 'feedback-fake',
     async *startTurn(ctx: ExecutorContext<unknown>): AsyncGenerator<UnifiedEvent, void, SplitResult[] | string | undefined> {
-      // The kernel appends a finish step to every root plan, and it runs this same fake executor.
-      // It must NOT open a second gate: nobody answers it, so the run would park forever and this
-      // file's subject — the ONE scripted question and the text it resumes with — would never be
-      // reached. It signals success straight away instead.
+      // the finish step runs this executor too and must not open a second gate; it succeeds at once
       let answer = 'finished'
       if (ctx.step.id !== FINISH_STEP_ID) {
         answer = String(yield { type: 'feedback', question: 'analyze the codebase?', topic: 'consent', toolCallId: 'c1' })
@@ -71,8 +67,7 @@ describe('durable conversational gate (feedback)', () => {
     await kernel.approvePlan(t.id, undefined, undefined, CLI)
 
     const handle = await port.startRun(t.id)
-    // deterministic step workflow id (spec: step:<taskId>:<stepId>:a<attempt>) — this IS the
-    // DBOS.recv destination for the feedback topic, mirroring the split gate's `split:<id>` send.
+    // the deterministic step workflow id is the DBOS.recv destination for the feedback topic
     const runToken = `step:${t.id}:s1:a1`
 
     expect(await waitFor(async () => (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.feedback_requested), 10_000)).toBe(true)
@@ -87,8 +82,6 @@ describe('durable conversational gate (feedback)', () => {
     const completed = (await kernel.eventsFor(t.id)).find(e => e.kind === EVENT_KIND.step_completed)
     expect(PAYLOAD_SCHEMAS.step_completed.parse(must(completed, 'step completed event').payload).summary).toContain('got:yes')
     expect((await kernel.getTask(t.id))?.status).toBe(TASK_STATUS.done)
-    // 30s, the budget the other gate tests (continuation.test.ts) use: the run is two DBOS step
-    // workflows now — the scripted step and the kernel's appended finish step — and bun's default
-    // 5s timed out on the second one while the gate itself worked.
+    // 30s: two DBOS step workflows run (scripted step + finish step); bun's default 5s timed out
   }, 30_000)
 })

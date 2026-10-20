@@ -1,14 +1,6 @@
 import pg from 'pg'
 
-// One execution runtime per project, enforced rather than assumed. DBOS recovers PENDING workflows
-// for its executor at launch, so a second runtime does not queue behind the first — it re-executes
-// the same step as a new attempt, and the operation journal fences the loser into a step_failed
-// that blocks a healthy task. Observed live: `orc reply` launched a runtime while `orc graph` held
-// one, both drove the analyze step, and the run died one second later.
-//
-// Session-scoped (`pg_try_advisory_lock`, not the `_xact_` variant the append path uses): held for
-// the runtime's life on a dedicated connection, so it is released by a crash as well as a clean
-// shutdown — which a lease row in a table would not be.
+// session-scoped, so a crash releases it too, which a lease row would not
 export interface RuntimeLock { release(): Promise<void> }
 
 // distinct from the append lock, which hashes the bare projectId
@@ -21,16 +13,7 @@ export class RuntimeBusyError extends Error {
   }
 }
 
-// Is a runtime holding the lock RIGHT NOW — asked without taking it. Read from pg_locks rather
-// than probed with pg_try_advisory_lock: a try-then-release cannot evict the holder, but on a
-// polled path (health asks every 3s) it would make a legitimate acquirer fail spuriously in the
-// window it is held. Advisory keys live in pg_locks as classid/objid — the high and low 32 bits of
-// the bigint key, objsubid 1 for the single-bigint form.
-//
-// Answers a DIFFERENT question from the supervisor heartbeat: that row says "a supervisor is
-// beating", this says "something is driving" — which may be a supervisor, a `--no-daemon` command,
-// or the graph server. The banner claimed "nothing will run" on the absence of the first alone,
-// while a --no-daemon task was running.
+// read from pg_locks: a try-then-release probe could fail a legitimate acquirer when polled
 const RUNTIME_LOCK_HELD_SQL = `
   SELECT EXISTS (
     SELECT 1 FROM pg_locks

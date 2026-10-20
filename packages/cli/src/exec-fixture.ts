@@ -1,5 +1,4 @@
-// Subprocess fixture: runs the real `run` command against a stub port so tests can
-// assert the process exit status without poisoning the shared bun test process.
+// subprocess fixture: runs the real `run` command so tests can assert the exit status
 import { Door, EVENT_KIND, NO_CHAT, RunOutcome, TASK_STATUS, type ExecutionPort, type RunHandle, type TaskStatus } from '@orc/contracts'
 import { buildProgram, openKernel } from './main'
 import { exitCodeFor } from './exit'
@@ -8,8 +7,6 @@ import { TEST_PROJECT_ID, testOrcConfig } from '@orc/kernel/test-helpers'
 const [dbUrl, taskId, outcome] = process.argv.slice(2)
 if (!dbUrl || !taskId || (outcome !== 'done' && outcome !== 'blocked'))
   throw new Error('usage: exec-fixture <dbUrl> <taskId> done|blocked')
-// one CLI arg names both vocabularies: the run outcome the fixture reports, and the task
-// status the fake supervisor stamps — distinct enums that happen to share these two spellings
 const runOutcome = outcome === 'done' ? RunOutcome.done : RunOutcome.blocked
 const taskStatus = outcome === 'done' ? TASK_STATUS.done : TASK_STATUS.blocked
 const { kernel, log } = await openKernel(dbUrl, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
@@ -19,12 +16,8 @@ const port: ExecutionPort = {
   retry: async () => handle,
   cancelRun: async () => {},
 }
-// The supervisor's half, faked: this fixture holds no runtime, so once the command has recorded
-// its ask, the statuses a real run would stamp are appended here. Without them the watch would
-// wait forever on a task nothing is driving — which is the point of a supervisor, not a bug.
+// the supervisor's half, faked: without these appends the watch waits on a task nothing drives
 const stamp = (from: TaskStatus, to: TaskStatus) => log.append({
-  // Door.supervisor: these are the appends the supervisor's half would make, and this fixture is
-  // standing in for it.
   ...NO_CHAT(Door.supervisor), taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from, to },
 })
 const driving = (async () => {
@@ -35,9 +28,7 @@ const driving = (async () => {
   await stamp(TASK_STATUS.approved, TASK_STATUS.running)
   await stamp(TASK_STATUS.running, taskStatus)
 })()
-// mirrors bin.ts: a command states its outcome by throwing, the entry point turns it into the
-// process's exit status. This fixture exists to observe that status, so it must translate it the
-// same way the real binary does.
+// mirrors bin.ts: a command states its outcome by throwing, the entry point maps it to the exit
 let code = 0
 try {
   await buildProgram(kernel, async () => port).parseAsync(['run', taskId], { from: 'user' })

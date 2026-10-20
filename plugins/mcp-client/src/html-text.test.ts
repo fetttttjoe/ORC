@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { stripHtml } from './html-text'
 
-// Were assertions behind a `--selftest` flag CI never invoked.
 describe('stripHtml', () => {
   it('keeps prose and drops the markup around it', async () => {
     expect(await stripHtml('<b>Event</b> <span class="x">sourcing</span>')).toBe('Event sourcing')
@@ -13,7 +12,6 @@ describe('stripHtml', () => {
     expect(await stripHtml('a<style>.x{}</style>b')).toBe('a b')
   })
 
-  // the three the previous regex got wrong
   it("does not leak an attribute's own '>' into the text", async () => {
     expect(await stripHtml('<div data-x="a>b">text</div>')).toBe('text')
   })

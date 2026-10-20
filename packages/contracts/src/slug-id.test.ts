@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'bun:test'
-import { slugId, MEMORY_ID_RE } from './ids'
+import { slugId, SLUG_ID_RE } from './ids'
 
 describe('slugId', () => {
-  it('derives a MEMORY_ID_RE-safe id from a human title', () => {
+  it('derives a SLUG_ID_RE-safe id from a human title', () => {
     expect(slugId('Postgres Tuning Notes!')).toBe('postgres-tuning-notes')
     expect(slugId('  Ümlauts & spaces  ')).toBe('mlauts-spaces')
-    expect(MEMORY_ID_RE.test(slugId('A'.repeat(200)))).toBe(true)
+    expect(SLUG_ID_RE.test(slugId('A'.repeat(200)))).toBe(true)
     expect(slugId('A'.repeat(200)).length).toBeLessThanOrEqual(64)
   })
   it('is deterministic — same title, same id', () => {

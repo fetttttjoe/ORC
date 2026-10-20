@@ -53,9 +53,7 @@ describe('writeVaultFiles', () => {
   it('a wrong-shaped stored hash (valid JSON, not a string) reads as absent, not a false hand-edit warning', () => {
     const d = vault()
     writeVaultFiles(d, { 'tasks/t1/log.md': 'v1' }) // establishes the file + a correctly-shaped manifest
-    // corrupt only the STORED HASH's type — the file on disk is untouched, so this is not a hand
-    // edit. Unvalidated, `sha(onDisk) !== manifest[rel]` compares a string to a number and is always
-    // true, so a legitimate regeneration below would wrongly warn "hand-edited".
+    // only the stored hash's type is corrupt; unvalidated, the string-vs-number compare always warns
     writeFileSync(path.join(d, '.orc-manifest.json'), JSON.stringify({ 'tasks/t1/log.md': 42 }))
     const warnings: string[] = []
     const realWarn = console.warn

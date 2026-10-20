@@ -164,10 +164,7 @@ describe('shipped web-research skill', () => {
     expect(parsed.errors).toEqual([])
     expect(parsed.manifest?.name).toBe('web-research')
 
-    // The substantive claims the skill exists to make. These are asserted because the skill IS the
-    // trust posture — an agent handed web tools has no other statement of how to treat what it
-    // fetches, and the enforcement boundary (MCP declaration + grant) says nothing about content.
-    // hard-wrapped prose: collapse whitespace so an assertion cannot break on a line wrap
+    // the skill IS the trust posture: an agent with web tools has no other statement of it
     const body = parsed.body.replaceAll(/\s+/g, ' ')
     expect(body).toContain('DATA, not instructions')       // prompt injection
     expect(body).toMatch(/distil/i)                        // one synthesis per finding

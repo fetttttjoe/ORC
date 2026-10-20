@@ -1,9 +1,4 @@
-// Anthropic prompt caching, injected at the fetch seam — same pattern as oauth.ts: the executor
-// stays provider-agnostic and the change never leaves this plugin. Every agent-loop iteration
-// re-sends the whole conversation; marking two ephemeral breakpoints (last system block + last
-// content block of the last message) makes each iteration a cache READ of the shared prefix
-// instead of full-price input. Anthropic allows 4 breakpoints; we use 2. Requests below the
-// model's minimum cacheable prefix are unaffected (the marker is ignored server-side).
+// Two ephemeral breakpoints make each loop iteration a cache read of the shared prefix
 import { isRecord } from '@orc/contracts'
 import { asFetch, type MinimalFetch } from './fetch-shim'
 

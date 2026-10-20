@@ -2,21 +2,16 @@ import { BRIEF_LIMITS, BRIEF_TASK_STATUSES, TASK_STATUS, WORKSPACE_STATE, type B
 import { knowledgeHealthLine } from './knowledge-health-line'
 import { AGE_UNKNOWN, relativeAge } from './relative-age'
 
-// The brief: what a session is told about a project before it has asked anything, and how that
-// reads as text. No database, no git, no clock — brief-gather.ts reads, this decides what is worth a
-// line. Split that way so every selection rule (what is capped, what outranks what, what an outage
-// looks like) is testable against states no machine could be put into on demand.
+// pure: no database, git or clock, so every selection rule is testable against any state
 
 export interface BriefInput {
   project: string
   // The workspace this directory is, or null when the fold holds none for it.
   cwdWorkspaceId: string | null
-  // EVERY workspace, archived included: a task still names its workspace after the operator
-  // archives it, and the label has to resolve. The `elsewhere` counts leave archived rows out.
+  // every workspace, archived included: a task still names its workspace after archiving
   workspaces: readonly WorkspaceWithHealth[]
   tasks: readonly Pick<TaskNode, 'id' | 'title' | 'status' | 'workspaceId'>[]
-  // Decisions in force, in listing order. null = the decision files could not be read — kept apart
-  // from [] all the way to the text, because the two call for opposite behaviour from a reader.
+  // null = decision files unreadable, kept apart from [] to the text: opposite reader behaviour
   decisions: readonly { id: string; title: string; summary: string }[] | null
   knowledge: Brief['knowledge']
 }
@@ -29,11 +24,8 @@ export function buildBrief(input: BriefInput): Brief {
   const listed: BriefTask[] = input.tasks.flatMap(t => isBriefStatus(t.status)
     ? [{ id: t.id, title: t.title, status: t.status, workspaceId: t.workspaceId, workspaceTitle: titles.get(t.workspaceId) ?? null }]
     : [])
-  // This checkout's tasks lead within a status: they are what the session most likely opened for.
-  // Title then id below that, so two runs over one log print the same brief.
   const away = (t: BriefTask): number => (t.workspaceId === here ? 0 : 1)
-  // Capped PER STATUS, not over the whole list: one cap would let a burst of running work push the
-  // single plan awaiting approval off the end, and that is the line a human most needs to see.
+  // capped per status: one cap would let running work push the plan awaiting approval off the end
   const ranked = (status: BriefTaskStatus): BriefTask[] => listed
     .filter(t => t.status === status)
     .sort((a, b) => away(a) - away(b) || a.title.localeCompare(b.title) || a.id.localeCompare(b.id))
@@ -48,8 +40,7 @@ export function buildBrief(input: BriefInput): Brief {
     workspace: input.workspaces.find(r => r.workspace.id === here) ?? null,
     elsewhere: { dangling: inState(WORKSPACE_STATE.dangling), waiting: inState(WORKSPACE_STATE.waiting) },
     tasks,
-    // Spelled per key, not built with Object.fromEntries: that returns `{ [k: string]: number }`,
-    // and only a cast would turn it back into the exhaustive record the contract requires.
+    // spelled per key: Object.fromEntries loses the exhaustive record type and only a cast restores it
     hiddenTasks: {
       [TASK_STATUS.awaiting_approval]: hidden(TASK_STATUS.awaiting_approval),
       [TASK_STATUS.running]: hidden(TASK_STATUS.running),
@@ -67,8 +58,7 @@ export interface RenderBriefOptions {
   // A PARAMETER for relativeAge's reason: one clock for the whole block.
   now: Date
   oneLine: (text: string, maxChars: number) => string
-  // The commands the text points at, built by the command module from the subcommand constants —
-  // importing them here would pull commander into a file that prints nothing.
+  // built by the command module: importing the constants here would pull commander in
   hints: { workspaces: string; decisions: string }
 }
 
@@ -91,8 +81,7 @@ export function renderBrief(brief: Brief, opts: RenderBriefOptions): string[] {
   ]
   if (elsewhere.length > 0) lines.push(`elsewhere: ${elsewhere.join(', ')} — ${opts.hints.workspaces}`)
 
-  // Stated rather than omitted: a brief with no task section reads the same as one whose task read
-  // failed, and "nothing is waiting on you" is the single most useful thing it can say.
+  // stated, not omitted: a brief with no task section reads like a failed task read
   if (brief.tasks.length === 0) lines.push(`tasks: none ${BRIEF_TASK_STATUSES.join(', ')}`)
   const here = brief.workspace?.workspace.id
   for (const status of BRIEF_TASK_STATUSES) {

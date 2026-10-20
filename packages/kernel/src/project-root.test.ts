@@ -25,8 +25,7 @@ describe('resolveProjectRoot', () => {
   })
 
   it('a submodule (--git-dir under .git/modules, equal to --git-common-dir) is its own root', () => {
-    // equal, so the rule leaves it alone: re-rooting a submodule at its superproject would
-    // silently merge two projects
+    // re-rooting a submodule at its superproject would silently merge two projects
     expect(resolveProjectRoot('/super/lib', { gitDir: '/super/.git/modules/lib', commonDir: '/super/.git/modules/lib' })).toBe('/super/lib')
   })
 

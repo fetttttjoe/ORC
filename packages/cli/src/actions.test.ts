@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'bun:test'
+import { afterAll, describe, expect, it, spyOn } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -13,17 +13,12 @@ afterAll(async () => {
   await Promise.all(dbs.map(d => d.drop()))
 }, 30_000)
 
-// The actions layer holds no execution port: it records asks and a supervisor executes them, so
-// what a test injects is the promise that one exists — counted, to prove every write path asks.
+// the actions layer holds no execution port: tests count the asks a supervisor would execute
 function stubRuntime() {
   const ensured = { count: 0 }
   return { ensured, ensureRuntime: async () => { ensured.count++ } }
 }
 
-// The wiring every case shares — a per-test Postgres log, one seeded workspace, and the actions
-// layer over them.
-// The two doors this file drives, spelled once each. Not a default: every call below names the one
-// it is exercising, and the assertions read the chatId and door back off the log.
 const WEB: Origin = { chatId: 'chat-1', door: Door.web }
 const MCP: Origin = { chatId: 'chat-1', door: Door.mcp }
 
@@ -31,9 +26,7 @@ async function openActions(opts: { listModels?: () => Promise<string[]>; config?
   const db = await createTestDb()
   dbs.push(db)
   const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
-  // registered, not returned as a close() the test must remember to await: a bare close as the
-  // last statement is SKIPPED when an assertion above it throws, leaking the pool into every
-  // later test file — the same failure main.test.ts's cleanup comment records.
+  // teardown is registered, not returned: a bare close() is skipped when an assertion throws
   db.onClose(() => storage.close())
   const kernel = new Kernel(storage.events)
   // a task must name a workspace the fold has seen — one seeded record, then tasks as before
@@ -41,9 +34,6 @@ async function openActions(opts: { listModels?: () => Promise<string[]>; config?
   const { ensured, ensureRuntime } = stubRuntime()
   const config = testConfig(db.url, {
     vaultDir: mkdtempSync(path.join(tmpdir(), 'orc-vault-')),
-    // the project dir IS the seeded workspace's checkout: every write from this layer names the
-    // workspace of the directory it runs in, so a dir no workspace claims would make
-    // recordDecision/purge refuse rather than exercise their real paths
     projectName: 'purge-me', dir: TEST_WORKSPACE.cwd,
     ...opts.config,
   })
@@ -57,9 +47,6 @@ async function openActions(opts: { listModels?: () => Promise<string[]>; config?
 // the derived system-db url points at a never-created database (the common pre-first-run state)
 const setup = (listModels?: () => Promise<string[]>) => openActions({ ...(listModels && { listModels }) })
 
-// Test 1 of the origin work: identity travels with the CALL, so every event a mutation appends
-// carries the chat and the door it came in by. Asserted on the LOG, never a spy — a spy would only
-// prove the action was called with an origin, not that the append kept it.
 describe('every mutation stamps the origin it was called with', () => {
   type Row = { name: string; call: (a: ReturnType<typeof buildOrcActions>, kernel: Kernel, taskId: string) => Promise<unknown> }
   // the door parses --file/--from-vault into a draft; every row here takes the other PlanSource arm
@@ -67,8 +54,6 @@ describe('every mutation stamps the origin it was called with', () => {
   const rows: Row[] = [
     { name: 'newTask', call: a => a.newTask({ workspaceId: TEST_WORKSPACE_ID, title: 'stamped', budgetUSD: null }, WEB) },
     { name: 'propose', call: (a, _k, t) => a.propose(t, TEMPLATE, WEB) },
-    // the proposed plan handed back edited: a hand-built draft would only prove this file can
-    // spell PlanDraft, and the kernel parses the whole shape
     { name: 'edit', call: async (a, k, t) => { await a.propose(t, TEMPLATE, WEB); const plan = await k.getPlan(t); return a.edit(t, { draft: { ...PlanDraft.parse(plan), costEstimateUSD: 2 } }, WEB) } },
     { name: 'approve', call: async (a, _k, t) => { const { version } = await a.propose(t, TEMPLATE, WEB); return a.approve(t, { version }, WEB) } },
     { name: 'run', call: async (a, k, t) => { const { version } = await a.propose(t, TEMPLATE, WEB); await a.approve(t, { version }, WEB); void k; return a.run(t, process.cwd(), WEB) } },
@@ -177,8 +162,6 @@ describe('the decision door', () => {
   }, 30_000)
 })
 
-// The stall worry belongs to the SEAM, not to one door: both doors discover now, so a napping
-// provider daemon has to be BOUNDED here instead of answered with a flag at the call site.
 describe('per-provider discovery timeout', () => {
   it('a provider whose listModels never resolves falls back to its cost universe, within the timeout', async () => {
     const napping = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) })
@@ -207,8 +190,6 @@ describe('catalogAppends', () => {
   const last = new Map([['ollama', JSON.stringify(['all-minilm:latest', 'nomic-embed-text:latest'])]])
 
   it('records an EMPTIED catalog from a reachable provider — the stale-encoder case', () => {
-    // observed 2026-08-03: the embedding filter emptied ollama's live list, and the old
-    // empty-list guard skipped the append, so the served catalog kept offering the encoders
     expect(catalogAppends([{ pid: 'ollama', ids: [], reachable: true }], last))
       .toEqual([{ providerId: 'ollama', models: [] }])
   })
@@ -237,11 +218,31 @@ describe('renameProject', () => {
 })
 
 describe('purgeProject', () => {
+  it('a renamed project keeps its new name after a purge', async () => {
+    const { actions, storage } = await setup()
+    await actions.renameProject('renamed', WEB)
+    await actions.purgeProject(WEB)
+    const identified = (await storage.events.all()).filter(e => e.kind === EVENT_KIND.project_identified)
+    expect(identified.at(-1)?.payload).toEqual({ name: 'renamed', dir: TEST_WORKSPACE.cwd })
+  })
+
+  it('a purge falls back to the config name, without a warning, when the state read fails', async () => {
+    const { kernel, actions, storage } = await setup()
+    const spy = spyOn(kernel, 'state').mockRejectedValue(new Error('fold failed'))
+    try {
+      const r = await actions.purgeProject(WEB)
+      expect(r.warnings.some(w => w.includes('project identity not re-seeded'))).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
+    const identified = (await storage.events.all()).filter(e => e.kind === EVENT_KIND.project_identified)
+    expect(identified.at(-1)?.payload).toEqual({ name: 'purge-me', dir: TEST_WORKSPACE.cwd })
+  })
+
   it('wipes events + operations — stuck-running tasks included — and leaves the project usable', async () => {
     const { kernel, actions, url, db } = await setup()
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'to be purged', spec: '' }, WEB)
-    // status transitions are executor-appended events, not kernel methods — append directly.
-    // A task stuck 'running' (crashed run) is exactly what purge must clear without help.
+    // a task stuck 'running' (crashed run) is exactly what purge must clear
     const storage = await openStorage(url, { projectId: TEST_PROJECT_ID })
     db.onClose(() => storage.close())
     await storage.events.append({
@@ -285,14 +286,7 @@ describe('purgeProject', () => {
     }
   })
 
-  // The race purgeProject's own WHY names: a boot adoption lands in the window between the wipe and
-  // the re-seat, so the cwd is occupied again by the time restoreWorkspace runs and the kernel
-  // (correctly) refuses a second live record for one directory. The wipe is ALREADY COMMITTED at
-  // that point — throwing would leave the project worse off than not re-seeding, which is why every
-  // other post-wipe step here warns instead.
-  //
-  // The wipe is the only deterministic seam for that window, so the intruder is appended from inside
-  // a wrapped `purge()`. A test may write to the log directly; production code may not.
+  // a boot adoption lands between the wipe and the re-seat; the wipe is the only seam for it
   it('a workspace minted at that cwd between the wipe and the re-seat is reported, never thrown', async () => {
     const { kernel, actions, storage } = await setup()
     const intruderId = '99999999-9999-4999-8999-999999999999'
@@ -317,9 +311,6 @@ describe('purgeProject', () => {
 })
 
 describe('workspace binding at the action boundary', () => {
-  // Same rule as `orc new --parent`: a child of a task in workspace B belongs to B, never to
-  // whatever checkout this process happens to be serving. Only a caller that names a workspace
-  // outright may re-home it.
   it('newTask with a parentId inherits the parent\'s workspace, never this process\'s directory', async () => {
     const { kernel, actions } = await setup()
     const other = await kernel.createWorkspace({ title: 'Other', cwd: '/other', branch: 'b', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false }, WEB)
@@ -331,11 +322,6 @@ describe('workspace binding at the action boundary', () => {
     expect((await kernel.getTask(rehomed.taskId))?.workspaceId).toBe(TEST_WORKSPACE_ID)
   })
 
-  // The door refuses what the kernel accepts, and only for a caller that NAMED the workspace.
-  // Archiving is not a fact about whether a record may be referenced — the kernel is right to let a
-  // merged workspace's subtree keep growing — but an operator who archived a checkout on purpose and
-  // then files a task there has filed work nobody will find again: the listing hides it by default,
-  // and the directory may not even exist any more.
   it('refuses an explicitly named ARCHIVED workspace, while inheritance from one is untouched', async () => {
     const { kernel, actions } = await setup()
     const done = await kernel.createWorkspace({ title: 'Done', cwd: '/done', branch: 'b', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false }, WEB)
@@ -344,14 +330,10 @@ describe('workspace binding at the action boundary', () => {
 
     await expect(actions.newTask({ title: 'filed in a finished checkout', workspaceId: done.id, budgetUSD: null }, WEB))
       .rejects.toThrow(archivedRefusal(done.id))
-    // INHERITANCE is untouched: a subtree straddling two checkouts is worse than a task drafted in
-    // a finished one, so a child still lands in its parent's workspace whatever its standing
+    // inheritance is untouched: a child lands in its parent's workspace whatever its standing
     const child = await actions.newTask({ title: 'child', parentId: parent.id, budgetUSD: null }, WEB)
     expect((await kernel.getTask(child.taskId))?.workspaceId).toBe(done.id)
-    // an UNKNOWN id keeps the kernel's own refusal — the CODE as well as the words, so a door that
-    // checks first and one that does not are indistinguishable on a typo. A plain Error would carry
-    // the same sentence and make every caller that switches on the code read a typo as an internal
-    // failure, which is why the class is asserted and not just the message.
+    // an unknown id keeps the kernel's refusal, code included, for callers that switch on it
     const typo = await actions.newTask({ title: 'typo', workspaceId: 'no-such-workspace', budgetUSD: null }, WEB).catch((e: unknown) => e)
     expect(typo).toBeInstanceOf(KernelError)
     expect(typo instanceof KernelError && typo.code).toBe(KERNEL_ERROR_CODE.workspace_not_found)
@@ -365,15 +347,10 @@ describe('cwd validation at the action boundary', () => {
       .rejects.toThrow(/cwd is not an existing directory: \/workspace\/orc-sim/)
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'q', spec: '' }, WEB)
     await expect(actions.run(t.id, '/no/such/dir', WEB)).rejects.toThrow(/cwd is not an existing directory/)
-    // and it died before anything was recorded or spawned — a bad cwd must not become an ask
-    // every supervisor that boots picks up and fails on again
     expect([ensured.count, (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.run_requested)]).toEqual([0, false])
   })
 })
 
-// Move a freshly created task to approved: propose a single-step template, then approve it. This
-// is the ONLY state actions.run() will now accept — a draft/unapproved task is refused at the door,
-// exactly as the CLI `run` (main.ts requireDrivable) and startRunAt (dbos-port.ts) refuse it.
 async function approvedTask(kernel: Kernel, actions: ReturnType<typeof buildOrcActions>, title = 'door') {
   const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title, spec: 'do it' }, WEB)
   const { version } = await actions.propose(t.id, { template: { modelRef: 'any/model', skillRefs: [] } }, WEB)
@@ -393,11 +370,7 @@ describe('the MCP and web doors record the ask; the supervisor executes it', () 
     expect(requested?.payload).toEqual({ taskId: t.id, cwd: process.cwd(), retry: false })
   })
 
-  // An omitted cwd is not "the directory this process happens to serve": the kernel resolves it
-  // from the task's own workspace (requestRun), which is the only reading that keeps a task created
-  // in one worktree running there. So the door must pass the absence through, not fill it in — and
-  // must not validate a directory it was never given (TEST_WORKSPACE.cwd does not exist on disk,
-  // and a door that resolved-then-checked would refuse a run the kernel accepts).
+  // an omitted cwd is passed through: the kernel resolves it from the task's own workspace
   it('run without a cwd records the task\'s WORKSPACE cwd, validating nothing at the door', async () => {
     const { kernel, actions, ensured } = await setup()
     const t = await approvedTask(kernel, actions, 'no cwd')
@@ -408,18 +381,11 @@ describe('the MCP and web doors record the ask; the supervisor executes it', () 
     expect(requested?.payload).toEqual({ taskId: t.id, cwd: TEST_WORKSPACE.cwd, retry: false })
   })
 
-  // Finding 1 of the Phase-1 audit: actions.run() (the web + MCP door) used to skip the
-  // drivable-status admission the CLI `run` enforces, so a draft/unapproved/terminal task silently
-  // became a run_requested nobody could serve — sat in the log, and every booting supervisor
-  // failed on it again. run() now mirrors retry()'s refusal: reject at the door, with the exact
-  // startRunAt message, before ensureRuntime or requestRun.
   it('run refuses a draft task (no approved plan) — same message as CLI run, no ask, no supervisor', async () => {
     const { kernel, actions, ensured } = await setup()
     const t = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'draft', spec: '' }, WEB)
     await expect(actions.run(t.id, process.cwd(), WEB))
       .rejects.toThrow(`task is 'draft' — approve a plan first (orc approve ${t.id})`)
-    // and it died before anything was recorded or a supervisor guaranteed — a request nobody can
-    // serve must never reach the log
     expect([ensured.count, (await kernel.eventsFor(t.id)).some(e => e.kind === EVENT_KIND.run_requested)]).toEqual([0, false])
   })
 
@@ -439,10 +405,6 @@ describe('the MCP and web doors record the ask; the supervisor executes it', () 
   })
 })
 
-// `orc ws new` and the MCP door's workspace_new are ONE implementation (createRequestWorkspace in
-// workspace-ops.ts, which both doors call): a second one would be a second answer to "where does a
-// request's checkout come from", and the two doors would drift on the branch name, the base or the
-// drafted task.
 describe('the workspace door', () => {
   it('newWorkspace creates the worktree, records it and drafts the request as its first task', async () => {
     const db = await createTestDb()
@@ -460,8 +422,6 @@ describe('the workspace door', () => {
     expect(workspace.cwd).toBe(realpathSync(path.join(main, '.orc', 'worktrees', 'add-search')))
     // base defaults to this checkout's HEAD, stored as the resolved branch NAME
     expect(workspace.baseBranch).toBe(currentBranch(main))
-    // this door ALWAYS drafts the task: --no-task is a terminal affordance for a human who is about
-    // to work in the tree themselves, and a driver asking for a workspace is asking for a request
     const task = (await kernel.listTasks()).find(t => t.workspaceId === workspace.id)
     expect(task).toMatchObject({ title: 'Add search', spec: 'find by name' })
     expect(taskId).toBe(task?.id ?? null)
@@ -482,17 +442,11 @@ describe('the workspace door', () => {
   })
 })
 
-// The graph UI lists and streams EVERY project in the database, so a question it displays has to be
-// answerable from it. Answering is not executing: the append only unblocks the parked step, and the
-// supervisor's router carries it into the workflow off feedback_provided. Fencing it to the started
-// directory made the UI show a question it then refused to let the user answer, sending them to a
-// terminal for a row it already had the log to write.
 describe('reply names the project it answers in', () => {
   const parkedQuestion = async (db: TestDb, projectId: string) => {
     const storage = await openStorage(db.url, { projectId })
     db.onClose(() => storage.close())
-    // the log is scoped PER PROJECT, so the foreign project needs its own workspace record —
-    // setup()'s seed lives in the home project's log and is invisible from here
+    // the log is scoped per project, so the foreign project needs its own workspace record
     await seedTestWorkspace(storage.events, WEB)
     const t = await new Kernel(storage.events).createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'parked on a question', spec: '' }, WEB)
     await storage.events.append({
@@ -582,13 +536,7 @@ describe('newProject', () => {
   })
 
   it('a subdirectory of a worktree (no .orc of its own) reuses the repo project instead of throwing', async () => {
-    // the old `existsSync(.orc) ? loadConfig(...) : null` check fell straight through to
-    // initializeProject for a dir with no .orc/ of its own. A subdirectory of a linked worktree
-    // resolves (via resolveProjectRoot) to the MAIN checkout's identity, so initializeProject now
-    // throws "already initialized" instead of reusing it — measured directly: a subdirectory of
-    // the MAIN checkout does NOT reproduce this (main-checkout subdirectories are deliberately
-    // NOT re-rooted, so they'd just mint their own fresh identity, no throw); only a worktree
-    // subdirectory re-roots to an already-initialized ancestor and hits the throw.
+    // a worktree subdirectory resolves to the main checkout's identity, which initializeProject refuses
     const { actions } = await setup()
     const { main, worktree } = tmpGitRepo()
     const { projectId: original } = initializeProject(main, 'repo project')

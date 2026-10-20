@@ -13,9 +13,7 @@ const PUMP_RETRY_MS = 250
 type Row = typeof events.$inferSelect
 type Queryable = Pick<Tx, 'insert' | 'select' | 'execute'>
 
-// The envelope is spelled three times below — the insert, toRecord, and the idempotency
-// comparison. A key added to EventEnvelope and forgotten in one is stored as nothing, read back
-// undefined, or lets two different writes share one key; these types fail the build instead.
+// the envelope is spelled three times; these types fail the build when a key is missed
 type EnvelopeKey = keyof z.output<typeof EventEnvelope>
 type EnvelopeCoversInput<T extends Record<EnvelopeKey, unknown>> = T
 
@@ -47,9 +45,7 @@ export interface EventLogOps {
   byTask(taskId: string): Promise<EventRecord[]>
   byTaskSince(taskId: string, afterSeq: number): Promise<EventRecord[]>
   after(afterSeq: number, kinds?: EventKind[]): Promise<EventRecord[]>
-  // Oldest surviving seq for this project, or 0 when the log is empty. A cached reader compares it
-  // against what it still believes in: history only moves forward when it was TRUNCATED (purge,
-  // delete chat), which no event announces.
+  // 0 when empty; a cached reader compares it, since no event announces a truncation
   earliestSeq(): Promise<number>
   all(): Promise<EventRecord[]>
 }
@@ -65,8 +61,7 @@ const makeOps = (db: Queryable, ctx: LogContext): EventLogOps => {
   return {
     async append(input) {
       const parsed = EventEnvelope.parse(input)
-      // jsonb-shape the payload (drops undefined keys) before redact/compare — otherwise a
-      // byte-identical keyed replay deep-compares unequal against the stored row and throws
+      // jsonb-shape first, or a byte-identical keyed replay compares unequal and throws
       const payload = ctx.redact(JSON.parse(JSON.stringify(parsed.payload)))
       PAYLOAD_SCHEMAS[parsed.kind].parse(payload) // validated AFTER redaction: zod errors never quote raw secrets
       const values = {
@@ -132,8 +127,7 @@ const makeOps = (db: Queryable, ctx: LogContext): EventLogOps => {
   }
 }
 
-// onAppend is observe-only (spec D6): it fires inside the open transaction and may see
-// events that later roll back — observers must not assume durability.
+// onAppend is observe-only: it fires inside the open transaction and may see rolled-back events
 export class EventLog implements EventLogOps {
   onAppend?: (e: EventRecord) => void
   private readonly ctx: LogContext
@@ -184,11 +178,6 @@ export class EventLog implements EventLogOps {
     return row?.seq ?? 0
   }
 
-  // Lossless stream: NOTIFY is only a wake-up, catch-up queries are
-  // authoritative; the cursor advances only after the handler succeeds; a dropped LISTEN
-  // connection reconnects with bounded backoff and catches up first.
-  // `onReset` fires when delivery restarts from a DIFFERENT log (see rewindIfReplaced) — a
-  // subscriber caching a fold must drop it, or it carries ghosts from the old history.
   async subscribe(
     opts: { fromSeq?: number; onReset?: () => void | Promise<void> },
     handler: (e: EventRecord) => void | Promise<void>,
@@ -224,9 +213,7 @@ export class EventLog implements EventLogOps {
         if (!closed && pumpTimer === null) pumpTimer = setTimeout(() => { pumpTimer = null; pumpSafe() }, PUMP_RETRY_MS)
       })
     }
-    // A log that no longer reaches our cursor is a different log (dropped and re-created, restored,
-    // repointed). `seq > cursor` would then match nothing forever — silently, with no error and no
-    // dead connection to notice.
+    // a log that no longer reaches the cursor is a different log; `seq > cursor` matches nothing
     const rewindIfReplaced = async (): Promise<void> => {
       if (cursor === 0 || (await this.latestSeq()) >= cursor) return
       cursor = 0
@@ -240,18 +227,11 @@ export class EventLog implements EventLogOps {
       onNotification: () => pumpSafe(),
       onConnected: async () => {
         await rewindIfReplaced() // a reconnect is exactly when the log underneath may have changed
-        // catch-up closes the gap before live delivery resumes. On the INITIAL connect it must
-        // throw — the caller is still waiting to learn whether the subscription came up. On a
-        // RECONNECT it must not: pgListen reacts to a failure here by ending a perfectly healthy
-        // LISTEN and backing off, so a handler that threw once cost the stream its socket and
-        // pinned the backoff, where the steady-state path (pumpSafe, wired to onNotification)
-        // would have warned and retried in 250ms with LISTEN intact.
+        // throws on the initial connect; a reconnect throw would end a healthy LISTEN and pin the backoff
         if (firstConnect) { firstConnect = false; await pump() }
         else pumpSafe()
       },
       isGonePermanently,
-      // measured: with the database dropped mid-pump, the 250 ms retry re-armed on every failure
-      // for the rest of the process — four warnings in the first 1.2 s
       onStopped: () => {
         closed = true
         if (pumpTimer !== null) { clearTimeout(pumpTimer); pumpTimer = null }

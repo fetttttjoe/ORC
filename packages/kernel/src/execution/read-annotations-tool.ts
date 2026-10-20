@@ -2,10 +2,7 @@ import type { ResolvedTool } from '@orc/contracts'
 import { toolError, NO_INPUT_SCHEMA } from '@orc/contracts'
 import type { Kernel } from '../kernel'
 
-// read_annotations (M5b, D6 targeted re-plan): the plan-authoring agent's ONLY channel to read
-// plan_annotated events. annotatePlan (kernel) is the write side (human/CLI `orc annotate`); this
-// is the read side. taskId comes from the injected step context, never a model-supplied input, so
-// the agent can't be tricked into reading another task.
+// taskId comes from the step context, never model input, so no other task is readable.
 export function readAnnotationsTool(opts: {
   kernel: Pick<Kernel, 'listAnnotations'>
   p: { taskId: string }

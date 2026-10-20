@@ -4,7 +4,7 @@ import {
   KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeCheckInput, KnowledgeId, KnowledgePage, KnowledgePatch, knowledgeIdFrom, preloadLine, PreloadRequest,
   type ClaimReading, type DigestedAnchor, type EventInput, type KnowledgeAssertion, type KnowledgeBackend, type KnowledgeCall, type KnowledgeChange,
   type KnowledgeCheckedPayload, type KnowledgeClaim, type KnowledgePatchInput, type KnowledgePort, type KnowledgeRead, type KnowledgeWriteResult, type KnowledgeWrittenPayload,
-  type MemoryAuthor, type PreloadedClaim,
+  type Author, type PreloadedClaim,
 } from '@orc/contracts'
 import { driftOf } from './drift-of'
 import { assemblePreload, tokensOf } from './preload'
@@ -14,7 +14,7 @@ import type { Evidence } from './evidence'
 
 export interface KnowledgePortDeps {
   backend: KnowledgeBackend
-  checkoutOf: (author: MemoryAuthor) => Promise<string>
+  checkoutOf: (author: Author) => Promise<string>
   append: (event: EventInput) => Promise<void>
   evidence?: () => Promise<Evidence>
   warn?: (line: string) => void

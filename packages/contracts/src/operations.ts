@@ -1,8 +1,6 @@
 import { z } from 'zod'
 
-// One generic before/after journal covers model and tool effects: a node is created
-// (started) before the external call and resolved (completed/failed) after it, so a
-// crash can leave an explicit unresolved node but never a blind gap.
+// created before the external call, resolved after: a crash leaves an unresolved node, never a gap
 export enum OperationKind {
   model = 'model',
   tool = 'tool',
@@ -22,8 +20,7 @@ export const OperationSpec = z.object({
 })
 export type OperationSpec = z.infer<typeof OperationSpec>
 
-// typed transition payloads — PAYLOAD_SCHEMAS entries and the kernel's journal fold
-// parse through these, so payload access never needs a cast
+// typed transition payloads: PAYLOAD_SCHEMAS and the journal fold parse through these
 export const OperationStartedPayload = z.object({
   operationId: z.string().min(1),
   attempt: z.number().int().positive(),

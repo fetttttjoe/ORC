@@ -17,11 +17,7 @@ export function splitTool(opts: {
   p: { taskId: string; stepId: string; runToken: string; role: string; executor: string; modelRef: string; maxIterations: number; origin: Origin }
 }): ResolvedTool[] {
   const { kernel, config, p } = opts
-  // Registration gate, same shape as report_coverage's: a scout ORIENTS, it does not decompose. The
-  // grounded strategy decomposes in the plan step, from a note graph a human approved, via
-  // finalize_plan — so a scout holding task_split can build a second, unapproved decomposition of
-  // the same work. It did exactly that live: the analyze step split three ways, every child gated by
-  // the default manual policy, then joined on children nothing would ever approve.
+  // Registration gate: a scout orients, and task_split would let it build an unapproved plan.
   if (p.role === ANALYZE_STEP_ROLE) return []
   return [{
     ref: 'kernel/task_split', name: 'task_split',
@@ -38,8 +34,7 @@ export function splitTool(opts: {
             steps: {
               type: 'array', minItems: 1,
               items: {
-                // dependsOn/skillRefs mirror ChildPlanStep exactly: no zod default, so required —
-                // only toolRefs defaults to [] (house rule: advertised schema == zod parser).
+                // Mirrors ChildPlanStep: only toolRefs has a zod default (schema == parser).
                 type: 'object', required: ['id', 'role', 'title', 'instructions', 'dependsOn', 'skillRefs'],
                 properties: {
                   id: { type: 'string', pattern: '^[\\w-]+$' },
@@ -57,13 +52,7 @@ export function splitTool(opts: {
         budgetUSD: { type: 'number', exclusiveMinimum: 0 },
       },
     },
-    // toolCallId is the real provider tool_call id, threaded through executeTool →
-    // ResolvedTool.execute (contracts/plugins.ts). It IS stable across a DBOS checkpoint replay:
-    // the model's response (including tool_call ids) is captured in the persisted agent_call
-    // event, so a crash-retry of the `tools:${iteration}` checkpoint reuses the same id → the
-    // same split (idempotent, per kernel.proposeSplit's splitId derivation). randomUUID only
-    // covers a caller that bypasses executeTool entirely (direct/test callers) — never the real
-    // agent path, and never re-executed, so a fresh id there is harmless.
+    // toolCallId is stable across a DBOS checkpoint replay, so a retry derives the same split.
     execute: async (input, toolCallId) => {
       try {
         const q = SplitToolInput.parse(input)

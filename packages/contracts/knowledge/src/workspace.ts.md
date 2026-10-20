@@ -5,4 +5,5 @@
 - assertInZone refuses any write whose resolved path contains a '.git' path segment unconditionally, before checking the zone at all — the repository's own metadata is never writable in any zone. {j0ddwqop @packages/contracts/src/workspace.ts#assertInZone #fact}
 
 ## Why
+- No zone may make .git writable, because a step that writes there could plant a hook that git later runs outside the exec allowlist. {3x8ip5dv @packages/contracts/src/workspace.ts#assertInZone}
 - The per-step zone write-fence is defined once in packages/contracts/src/workspace.ts but enforced twice by design: the executor blocks an out-of-zone write at the moment it happens, and the kernel separately re-classifies every already-committed artifact path against the same declared zone after the fact — a step's own executor is not trusted as the sole judge of its own writes. {lw2pbd6g @packages/contracts/src/workspace.ts#assertInZone @plugins/executor-api-loop/src/tools.ts @packages/kernel/src/execution/scoped-changes-tool.ts#scopedChangesTool #architecture-current}

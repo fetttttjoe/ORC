@@ -27,10 +27,7 @@ afterAll(() => { for (const dir of dirs) rmSync(dir, { recursive: true, force: t
 const tool = (allowlist: string[], dir = ws()) => must(execTool({ workspaceDir: dir, allowlist })[0], 'exec tool')
 
 describe('exec tool', () => {
-  // 'close' waits for the stdio STREAMS, not the process. A command that leaves a grandchild
-  // holding the inherited pipes exits while close never fires — and the timeout kills only the
-  // CHILD, so the grandchild keeps them open and the tool hangs forever. `bun test` is on the
-  // default allowlist, so a suite that starts a background server hit exactly this.
+  // 'close' waits for stdio streams: a grandchild holding the pipes must not hang the tool forever
   it('settles when the command exits even if a grandchild holds the pipes open', async () => {
     // the script backgrounds a sleeper that INHERITS stdout and outlives sh, then sh exits at once
     const dir = ws()
@@ -60,12 +57,7 @@ describe('exec tool', () => {
     expect(execTool({ workspaceDir: ws(), allowlist: [] })).toEqual([])
   })
 
-  /**
-   * The clip is head+tail, so anything in the MIDDLE of a long run is unreachable — and an agent
-   * that needed one line from there had exactly one move: run the whole suite again. Observed live:
-   * a heal step ran `bun run typecheck` and `bun test` (~10 minutes) inside a run that changed no
-   * source file at all. The full stream goes to a file so a missed grep costs an fs_read.
-   */
+  // The full stream goes to a file so a line lost to the head+tail clip costs an fs_read
   it('writes the FULL output to a log file so a missed grep costs a read, not a re-run', async () => {
     const dir = ws()
     // a middle the clip is guaranteed to drop: two fat ends around a unique marker
@@ -78,11 +70,7 @@ describe('exec tool', () => {
     expect(full).toContain('sh noisy.sh') // the log names what produced it
   }, 15_000)
 
-  /**
-   * The BRACKET: sibling steps in one wave each ran the same gate against the same unchanged tree,
-   * paying the full suite every time. A repeat of an identical command on an identical fingerprint
-   * returns the first run's result instead of re-executing — flagged `cached`, never silently.
-   */
+  // an identical command on an identical fingerprint returns the first result, flagged `cached`
   it('reuses an identical run against an unchanged tree instead of re-executing', async () => {
     const dir = ws()
     // side-effecting: each real execution appends a line, so the count IS the execution count
@@ -108,8 +96,7 @@ describe('exec tool', () => {
     expect(readFileSync(path.join(dir, 'runs.txt'), 'utf8').trim().split('\n')).toHaveLength(2)
   }, 15_000)
 
-  // An unfingerprintable workspace (no repo) must never reuse: with nothing to invalidate against,
-  // a cache hit could serve a result for a tree that has completely changed.
+  // An unfingerprintable workspace must never reuse: nothing could invalidate a stale hit.
   it('never reuses when the tree cannot be fingerprinted', async () => {
     const dir = ws()
     writeFileSync(path.join(dir, 'count.sh'), 'echo ran >> runs.txt\necho done\n')
@@ -145,8 +132,7 @@ describe('exec tool', () => {
   })
 
   it('a refused compound command teaches the one-command rule', async () => {
-    // observed live (#31697): an agent tried `cd packages/ui-core && bun test … | tail -60` and
-    // burned an iteration learning by refusal that exec has no shell. The refusal should say so.
+    // an agent tried `cd X && bun test | tail`: the refusal must say exec has no shell
     const r = await tool(['bun test']).execute({ command: 'cd packages/ui-core && bun test src/x.test.ts 2>&1 | tail -60' })
     expect(r.isError).toBe(true)
     expect(JSON.stringify(r.output)).toContain('no shell')
@@ -159,13 +145,7 @@ describe('exec tool', () => {
     expect((await t.execute({ command: 'echo hix' })).isError).toBe(true) // 'echo hi' is not a prefix of 'echo hix'
   })
 
-  /**
-   * Quoting is a SEPARATE concern from shelling. Splitting on whitespace shattered every
-   * multi-word argument into argv tokens the target program read as filenames, so a grep pattern
-   * with a space could not be expressed at all: measured live, an agent's
-   * `grep -n "export const X" f.ts` came back `grep: const: No such file or directory`, and a
-   * later run reported grep "non-functional throughout" and left a question unanswered.
-   */
+  // Quoting is separate from shelling: a multi-word argument must reach the program as one token.
   it('a quoted multi-word argument survives as ONE argv token', async () => {
     const dir = ws()
     writeFileSync(path.join(dir, 'f.txt'), 'export const NOTE_CATEGORIES = 1\nunrelated line\n')

@@ -10,7 +10,7 @@ const EXIT_FLUSH_MS = 250 // after 'exit', how long the streams get to flush bef
 export const COMMAND_TIMEOUT_MS = 10 * 60_000
 export const COMMAND_CANCELLED = 'the run was cancelled'
 const CLIP_CHARS = 8_000 // per stream, head + tail: typecheck errors lead, test summaries trail
-const MAX_BYTES = 64 * 1024 * 1024 // per stream, matches the old spawnSync maxBuffer
+const MAX_BYTES = 64 * 1024 * 1024 // per stream
 
 const clip = (s: string): string => clipMiddle(s, CLIP_CHARS)
 

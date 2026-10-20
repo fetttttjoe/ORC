@@ -6,7 +6,7 @@ import { runOrigin } from './run-chat'
 import { instantiateFrozenPlan, planGraphHash } from './strategies/grounded-plan'
 import { withFinishStep } from '../finish-step'
 
-// the planning step runs inside its run's chat, so the frozen split it proposes is stamped with it
+// the planning step runs inside its run's chat, so the frozen split it proposes carries it
 const p = { taskId: 't1', stepId: 'plan', runToken: 'step:t1:plan:a1', role: 'auditor', executor: 'api-loop', modelRef: 'anthropic/x', maxIterations: 30, origin: runOrigin('run:t1:v1') }
 const config = { maxDepth: 3, finishChecks: [] }
 
@@ -46,9 +46,7 @@ describe('finalize_plan tool', () => {
       parentTaskId: 't1', stepId: 'plan', runToken: 'step:t1:plan:a1', toolCallId: 'call_1', title: 'Web app',
       policy: { default: 'auto' }, maxDepth: 3,
       parentStep: { executorRef: 'api-loop', modelRef: 'anthropic/x', maxIterations: 30 },
-      // the kernel appends the finish step at the freeze (withFinishStep), so the frozen split
-      // the tool proposes carries it after every subplan — toMatchObject compares arrays by
-      // length, so leaving it out would only prove the old shape
+      // the freeze appends the finish step (withFinishStep); toMatchObject compares arrays by length
       plan: { steps: [{ id: 'db', role: 'implementer', dependsOn: [] }, { id: 'api', dependsOn: ['db'] }, { id: FINISH_STEP_ID, role: STEP_ROLE.finisher, dependsOn: ['db', 'api'] }] },
     })
   })
@@ -65,8 +63,7 @@ describe('finalize_plan tool', () => {
     expect(calls).toHaveLength(0)
   })
 
-  // A refusal that only says "no" costs a round-trip: the plan agent cannot type an `orc reply`
-  // itself, so the message has to name the doors a HUMAN can use, verbatim enough to relay.
+  // A refusal must name the doors a HUMAN can use: the plan agent cannot type `orc reply` itself.
   it('no approval at all names the concrete human doors (orc reply + the web UI)', async () => {
     const notes = [
       note({ id: 'masterplan', title: 'M', subplans: ['a'] }),
@@ -75,18 +72,14 @@ describe('finalize_plan tool', () => {
     const calls: unknown[] = []
     const r = await finalizeFor({ kernel: fakeKernel(notes, calls, null), config, p }).execute({}, 'call_1')
     expect(r.isError).toBe(true)
-    // exact text: the message names the ACCEPTED door set (default 'cli') and the human doors that
-    // set implies. `orc reply <taskId> approve` is verbatim, placeholder and all — the real taskId
-    // must never reach a model prompt.
+    // exact text: names the accepted doors; `<taskId>` stays a placeholder (no real id in a prompt)
     expect((r.output as { error: string }).error).toBe(
       "finalize_plan requires human approval for this plan run (accepted approval doors: 'cli'), and none is recorded — ask the human to approve via `orc reply <taskId> approve` in a terminal, or in the web UI, then call finalize_plan again",
     )
     expect(calls).toHaveLength(0)
   })
 
-  // The observed defect: an 'approve' typed through the MCP door IS recorded (with a planHash),
-  // but approvedPlanHash discards it — so the agent saw the same "needs approval" it saw when
-  // nobody had approved, and retried. Say what happened, and NAME the door it came through.
+  // An MCP-door approve is recorded but discarded: the refusal must name the door it came through.
   it('an approval from a non-human door says so, names that source, and still points at the human doors', async () => {
     const notes = [
       note({ id: 'masterplan', title: 'M', subplans: ['a'] }),
@@ -108,9 +101,7 @@ describe('finalize_plan tool', () => {
     expect(calls).toHaveLength(0)
   })
 
-  // The refusal quotes the kernel's CONFIGURED door set, not a literal: an operator who opened the
-  // mcp door must not be told by the refusal to go type in a terminal for a gate that no longer
-  // requires it. Same list the gate tests, so advice and gate cannot disagree.
+  // The refusal quotes the kernel's CONFIGURED doors, the same list the gate tests, never a literal.
   it('the refusal names the operator-configured door set, not a hardcoded one', async () => {
     const notes = [
       note({ id: 'masterplan', title: 'M', subplans: ['a'] }),
@@ -127,8 +118,7 @@ describe('finalize_plan tool', () => {
     )
   })
 
-  // The gate is "no plan note written since the human approved" — NOT "two builds agree on a content
-  // hash": a hash another build stamped once made an untouched plan unfinalizable (task b3a49133).
+  // The gate is 'no plan note written since approval', not a content-hash match across builds.
   it('finalizes an untouched graph even when the approved hash is from another build', async () => {
     const notes = [
       note({ id: 'masterplan', title: 'M', subplans: ['a'] }),
@@ -170,9 +160,7 @@ describe('finalize_plan tool', () => {
     expect(JSON.stringify(r.output)).not.toContain(taskId)
   })
 
-  // The silent-failure bug (incidents c4bc1d38, 8b5e1034): a masterplan with no subplans freezes to
-  // steps: [] and (with autoCommit) a commit-only pipeline that reports done having written no code.
-  // finalize_plan must refuse it as an actionable error, never throw, and never propose a split.
+  // A masterplan with no subplans: finalize_plan refuses actionably, never throws or splits.
   it('errors (never throws) when the masterplan lists no subplans', async () => {
     const notes = [note({ id: 'masterplan', title: 'M', subplans: [] })]
     const calls: unknown[] = []
@@ -182,7 +170,7 @@ describe('finalize_plan tool', () => {
     expect(calls).toHaveLength(0)
   })
 
-  // M3: it force-auto-approves the derived split, so only the plan step is offered it.
+  // it force-auto-approves the derived split, so only the plan step is offered it
   it('a non-plan step gets no finalize_plan', () => {
     const kernel = fakeKernel([])
     expect(finalizePlanTool({ kernel, config, p: { ...p, role: STEP_ROLE.worker } })).toEqual([])
@@ -236,9 +224,7 @@ describe('finalize_plan tool', () => {
   })
 })
 
-// autoCommit appends the kernel-owned commit step at the freeze — the truthful-stamp pipeline's
-// tail, AFTER the finish step (which every freeze carries, autoCommit or not) so the stamp pass
-// sees reconciled notes. Off (the default) freezes the decomposition plus the finish step alone.
+// autoCommit appends the commit step AFTER the finish step; off, only the finish step.
 describe('autoCommit', () => {
   const notes = () => [
     note({ id: 'masterplan', title: 'M', subplans: ['a'] }),

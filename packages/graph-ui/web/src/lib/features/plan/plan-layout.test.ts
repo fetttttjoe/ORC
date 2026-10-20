@@ -25,11 +25,6 @@ describe('planLayout (columns are the wave the executor would run)', () => {
     expect(out.steps.filter(s => s.rank === 1).map(s => s.lane)).toEqual([0, 1])
   })
 
-  /**
-   * The reason rank is a LONGEST path. `late` waits on both `root` (rank 0) and `mid` (rank 1);
-   * shortest-path ranking would draw it at 1, i.e. beside a step it actually waits for, so the
-   * picture would contradict the wave board about what gates what.
-   */
   it('draws a step to the right of its LATEST dependency, not its earliest', () => {
     const out = planLayout([
       { id: 'root', dependsOn: [] },

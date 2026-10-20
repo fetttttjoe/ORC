@@ -11,7 +11,7 @@ import { openKernel } from './main'
 import { cli } from './test-helpers'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-// these tests drive the CLI door; SUPERVISOR is the half they fake (the statuses a run stamps)
+// these tests drive the CLI door; SUPERVISOR is the half they fake (the statuses a run appends)
 const CLI = NO_CHAT(Door.cli)
 const SUPERVISOR = NO_CHAT(Door.supervisor)
 afterAll(async () => { for (const d of dbs) await d.drop() })
@@ -48,8 +48,6 @@ async function approvedTask(run: (...a: string[]) => Promise<unknown>, lines: st
   return id
 }
 
-// The supervisor's half of a run, faked: no test here holds a real runtime, so the statuses a run
-// would stamp are appended straight onto the log.
 const stamp = (log: EventLog, taskId: string, from: TaskStatus, to: TaskStatus) =>
   log.append({ ...SUPERVISOR, taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from, to } })
 
@@ -95,8 +93,7 @@ describe('exec commands', () => {
   it('run --cwd records the override, the one thing only the caller knows', async () => {
     const { run, lines, log, kernel } = await makeCli()
     const id = await approvedTask(run, lines)
-    // a REAL directory: the shared action validates the override at the boundary, so an invented
-    // path is now a refusal rather than an ENOENT four retries deep in the executor
+    // a real directory: the shared action refuses an invented cwd at the boundary
     const shared = mkdtempSync(path.join(tmpdir(), 'orc-shared-ws-'))
     const watched = run('run', id, '--cwd', shared)
     await drive(log, lines, id, TASK_STATUS.done)
@@ -115,9 +112,7 @@ describe('exec commands', () => {
     const { run, lines } = cli(kernel, async () => port)
     const id = await approvedTask(run, lines)
 
-    // Simulate the real race: a step's last event commits in the same window as the terminal
-    // status the watch settles on, possibly after the push subscription has been torn down. The
-    // finally-block drain (a direct query, not NOTIFY-dependent) must still surface it.
+    // the race: a step's last event commits with the terminal status; the final drain must surface it
     const rawLog = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     try {
       const watched = run('run', id)
@@ -135,9 +130,6 @@ describe('exec commands', () => {
     }
   }, 15_000)
 
-  // Regression: a run that parks on ask_human never produces a terminal result, so the tail waited
-  // on a promise that could not resolve — at the terminal that is indistinguishable from a hang,
-  // and it is what killed the driver of a real grounded run mid-question.
   it('a run parked on a human gate reports the question and stops tailing', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -155,16 +147,13 @@ describe('exec commands', () => {
       payload: { question: 'May I analyze the codebase?', topic: `${id}:s1:1` },
     })
 
-    const out = (await run('run', id)).join('\n') // must RETURN — before the fix this awaited forever
+    const out = (await run('run', id)).join('\n') // must RETURN: a run parked on ask_human has no terminal result
     expect(out).toContain('parked')
     expect(out).toContain('May I analyze the codebase?')
     expect(out).toContain(`orc reply ${id}`)
     expect(out).not.toContain('run finished')
   }, 15_000)
 
-  // `orc reply` used to send the DBOS message and exit, so the answer sat durable while the run
-  // stayed parked — its own description claimed it resumed the step. It now watches the run
-  // through to its next stopping point instead, without starting anything.
   it('reply watches the run it just unblocked', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -199,10 +188,6 @@ describe('exec commands', () => {
     expect(calls).toEqual([])
   })
 
-  // finalize_plan hands the work to a CHILD task. Returning when the parent's own steps finish
-  // stranded it: the child sat `running` with no executor until someone ran `orc run <childId>` by
-  // hand. Observed live on the capability run. The CLI no longer starts the child — the supervisor
-  // does — so what has to hold now is that the watch does not call the parent done without it.
   it('waits for a child task the run spawned instead of calling the tree finished', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -265,8 +250,7 @@ describe('exec commands', () => {
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     db.onClose(() => log.close())
-    // a non-done outcome is a thrown CommandFailure now, not a write to process.exitCode, so this
-    // could assert either; 'done' keeps the test about the grounded bootstrap rather than exits.
+    // 'done' keeps the test about the grounded bootstrap rather than exit semantics
     const { port, calls } = stubPort(RunOutcome.done)
     const { run, lines } = cli(kernel, async () => port)
 
@@ -281,7 +265,7 @@ describe('exec commands', () => {
     expect(plan?.strategyRef).toBe('grounded-plan')
     expect(plan?.steps.map(s => s.id)).toEqual(['analyze', 'plan'])
     expect((await kernel.getTask(taskId))?.spec).toBe('analyze the repo and split the work')
-    // auto-started (D9): the ask is recorded, and a supervisor — not this command — serves it
+    // auto-started: the ask is recorded, and a supervisor, not this command, serves it
     expect((await kernel.eventsFor(taskId)).some(e => e.kind === EVENT_KIND.run_requested)).toBe(true)
     expect(calls).toEqual([])
     expect(out.join('\n')).toContain('run finished: done')

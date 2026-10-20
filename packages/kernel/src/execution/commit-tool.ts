@@ -7,20 +7,7 @@ import type { Kernel } from '../kernel'
 import { subtreeUsage } from '../projections'
 import { clipMiddle } from './clip'
 
-// The commit step's tool pair. commit_preview computes the exact content a commit would contain
-// (against a TEMPORARY index — a preview is a look, never a stage) and returns its real diff;
-// git_commit refuses whenever the tree no longer matches the last diff the agent saw, handing back
-// the fresh one — so the message is proposed from the changes by construction, not by contract
-// prose.
-// Two non-empty lines is the operator's history rule (subject + at most one body line). Enforced
-// here, not just in the committer skill's prose: the refusal names the rule, so the agent repairs
-// in one iteration instead of guessing.
-//
-// The repo's commit-msg hook (scripts/hooks/commit-msg) refuses messages longer than two lines. A
-// hook that rewrote long messages instead of refusing them left twenty commits cut at a 62–88
-// character wrap boundary — silent truncation, not a committer writing a short body. `git commit`
-// here does not pass --no-verify, so the refusal applies to this call and the hook's text is
-// surfaced verbatim in the `git commit failed: …` error below.
+// Two lines is the operator's history rule; the refusal names it so the agent repairs in one pass.
 const CommitInput = z.object({
   message: z.string().min(1).max(5000).refine(
     m => m.split('\n').filter(l => l.trim() !== '').length <= 2,
@@ -30,8 +17,7 @@ const CommitInput = z.object({
 
 export type SuspectAt = (paths: string[]) => Promise<KnowledgeRef[]>
 
-// The `degraded` convention: an absent measurement is `null` in its own field PLUS a reason here,
-// and the `degraded` key itself is omitted from the receipt when everything measured.
+// `degraded`: a null field plus a reason here; omitted from the receipt when everything measured.
 const STILL_DRIFTED_DEGRADED = 'stillDrifted unmeasured — knowledge is unavailable'
 const stillDriftedFailed = (reason: string): string => `stillDrifted unmeasured — the drift read failed: ${reason}`
 
@@ -41,19 +27,13 @@ const PREVIEW_DESCRIPTION =
 const COMMIT_DESCRIPTION =
   'Commit the previewed changes with your message. If the working tree no longer matches the diff you last saw (or you never looked), it refuses and returns the current diff — read it and call again. Commits by pathspec, so content someone else staged never rides along. Returns {commit, created, committedPaths, skippedIgnored, stillDrifted, degraded, usage}: created:false means nothing was left to commit (e.g. a child task already committed) and stillDrifted was still read. stillDrifted lists the claims this commit left suspect — a knowledge_check or a heal is owed; carry it into your summary verbatim. It is null when knowledge is unavailable. degraded lists why a measurement could not be made and is present ONLY when something is degraded — carry it into your summary verbatim too. usage is this task subtree\'s total cost so far (tokens in/out, cache read/write, costUSD) — carry it into your summary too.'
 
-// per stream, head + tail, like exec-tool's clip: enough diff to write an honest message, never an
-// unbounded prompt
+// head + tail per stream: enough diff to write an honest message, never an unbounded prompt
 const CLIP_CHARS = 12_000
 const clip = (s: string): string => clipMiddle(s, CLIP_CHARS)
 
 interface Git { code: number; stdout: string; stderr: string }
 
-// --literal-pathspecs: floor paths and note paths are recorded strings; none may act as ':(...)'
-// pathspec magic (check-ignore rejects the flag — measured — so it opts out). core.quotePath=false:
-// git otherwise octal-escapes non-ASCII names in porcelain output and every exact-string membership
-// set here silently misses them (measured: a deleted 'ü.ts' was not committed). Env inherited (and
-// only extended, for the temp index) on purpose — git is operator infra (signing agents, config),
-// not model-authored code; the model contributes only argv data.
+// Literal pathspecs and unquoted paths, or recorded names misbehave (non-ASCII, ':(' magic).
 async function git(dir: string, args: string[], opts?: { env?: Record<string, string>; literal?: boolean }): Promise<Git> {
   const argv = ['git', ...(opts?.literal === false ? [] : ['--literal-pathspecs']), '-c', 'core.quotePath=false', '-C', dir, ...args]
   const proc = Bun.spawn(argv, { stdout: 'pipe', stderr: 'pipe', ...(opts?.env && { env: { ...process.env, ...opts.env } }) })
@@ -63,8 +43,7 @@ async function git(dir: string, args: string[], opts?: { env?: Record<string, st
   return { code, stdout, stderr }
 }
 
-// What one staging pass concluded. `digest` fingerprints the UNCLIPPED diff — clip() could mask a
-// mid-diff change — and is what the preview↔commit handshake compares.
+// `digest` hashes the UNCLIPPED diff, since clip() could mask a mid-diff change.
 interface Staged { addable: string[]; paths: string[]; staged: string[]; diff: string; digest: string; skippedIgnored: string[] }
 
 export function commitTool(opts: {
@@ -74,24 +53,13 @@ export function commitTool(opts: {
   p: { taskId: string; stepId: string; role: string; runToken: string; origin: Origin }
 }): ResolvedTool[] {
   const { kernel, dir, suspectAt, p } = opts
-  // both terms, like scoped_changes: the committer role is kernel-set (withCommitStep, enforced by
-  // proposeSplit's reserved-role refusal), so a planner-authored step named 'commit' never arms this
+  // both terms: the committer role is kernel-set, so a planner-authored 'commit' step never arms this
   if (p.stepId !== COMMIT_STEP_ID || p.role !== STEP_ROLE.committer) return []
 
-  // The diff digest the agent last SAW (set by commit_preview and by every refusal, which delivers
-  // the same diff). git_commit commits only when the tree still matches it. Not durable: after a
-  // crash-resume the journal replays recorded calls without executing, so the first fresh
-  // git_commit re-refuses with the current diff — one extra iteration in a rare path, in exchange
-  // for never committing content the agent has not seen.
+  // The diff digest the agent last SAW; not durable, so a crash-resume re-refuses once.
   let seenDigest: string | null = null
 
-  // The floor, resolved into what git can act on. Three memberships, because a pathspec matching
-  // NOTHING is an error: `addable` (worktree or index — add's domain; tracked-but-deleted stays so
-  // add -A stages the deletion), `paths` (adds HEAD-only — a deletion already staged by a prior
-  // pass is gone from disk AND index, and dropping it from the commit pathspec silently uncommits
-  // it), and `skippedIgnored` (gitignored-and-untracked — naming them to add makes it exit 1 and
-  // would brick the step; check-ignore never reports tracked files, measured, so tracked-ignored
-  // changes still commit).
+  // Three memberships, since a pathspec matching nothing is an error: addable, paths, skippedIgnored.
   const floorSets = async (): Promise<{ addable: string[]; paths: string[]; skippedIgnored: string[] } | { error: string }> => {
     const [changed, knowledge] = await Promise.all([kernel.listTaskChangedPaths(p.taskId), kernel.listTaskKnowledgeWrites(p.taskId)])
     const floor = [...new Set([...changed.map(r => r.path), ...knowledge.files])]
@@ -110,10 +78,7 @@ export function commitTool(opts: {
     }
   }
 
-  // Stage the floor and describe exactly what a commit would contain. realIndex:false runs against
-  // a throwaway index seeded from HEAD, so a preview (or a refusal) can show untracked files and
-  // deletions without clobbering a human's curated staging; only git_commit, immediately before
-  // the commit that consumes it, touches the real index.
+  // realIndex:false uses a throwaway index, so a preview never clobbers a human's curated staging.
   const stagedDiff = async (realIndex: boolean): Promise<Staged | { error: string }> => {
     const sets = await floorSets()
     if ('error' in sets) return sets
@@ -174,9 +139,7 @@ export function commitTool(opts: {
       try {
         const fresh = await stagedDiff(false)
         if ('error' in fresh) return { output: { error: fresh.error }, isError: true }
-        // the handshake: commit only content the agent has seen. The refusal delivers the current
-        // diff and arms the gate with it, so the immediate retry commits — no preview-tool detour,
-        // no livelock — unless the tree moved again, which re-refuses with the newer diff.
+        // the handshake: commit only seen content; a refusal delivers the diff and arms the retry
         if (seenDigest !== fresh.digest) {
           seenDigest = fresh.digest
           return {
@@ -190,12 +153,9 @@ export function commitTool(opts: {
         let created = false
         let committedPaths: string[] = []
         if (fresh.staged.length > 0) {
-          const real = await stagedDiff(true) // now stage the REAL index, right before the commit that consumes it
+          const real = await stagedDiff(true) // stage the REAL index just before the commit
           if ('error' in real) return { output: { error: real.error }, isError: true }
-          // pathspec commit: commits the named paths' content and nothing else, so an unrelated
-          // entry someone left in the shared index can never ride along in this task's commit
-          // the chat rides into git's own environment, so the hook that sees the commit can name
-          // the interaction that made it; a chatless commit passes no key at all rather than ''
+          // pathspec commit: an entry someone else left in the shared index never rides along
           const commit = await git(dir, ['commit', '-m', parsed.data.message, '--', ...real.paths],
             p.origin.chatId === null ? undefined : { env: { [ORC_CHAT_ID]: p.origin.chatId } })
           if (commit.code !== 0) return { output: { error: `git commit failed: ${commit.stderr.trim() || commit.stdout.trim()}` }, isError: true }

@@ -5,3 +5,6 @@
 - renderRootIndex in packages/vault-projector/src/render.ts builds index.md from only task_created/task_status_changed events (via log.after and fold), keeping the root index render independent of the full event volume. {ij6q6o8h @packages/vault-projector/src/render.ts#renderRootIndex #architecture-current}
 - renderTaskFiles in packages/vault-projector/src/render.ts folds a task's events once and emits index.md, log.md, execution.md, lineage.md, one plan-v<N>.md per stored plan version, and one sessions/<stepId>.md per step that has events. {4zw79m5l @packages/vault-projector/src/render.ts#renderTaskFiles #architecture-current}
 - usageTable in render.ts renders one markdown row per plan step via stepUsage plus a totals row via taskUsage, both imported from @orc/kernel, iterating plan.steps in stored array order (never Map iteration) so the same events always render to byte-identical markdown. {2ex5xqrn @packages/vault-projector/src/render.ts#usageTable #architecture-current}
+
+## Why
+- Mermaid node ids share one namespace per graph and a plan step id may be any [\w-]+ string, so step nodes carry an s_ prefix and operation nodes an op_ prefix; unprefixed, a step named op0 would merge with operation node 0 and its edge would become a self-loop. {1semei1u @packages/vault-projector/src/render.ts#stepNode}

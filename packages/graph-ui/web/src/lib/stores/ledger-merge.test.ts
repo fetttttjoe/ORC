@@ -13,8 +13,6 @@ const row = (seq: number, kind: string = EVENT_KIND.step_started, failure?: { to
   stepId: null,
   chatId: null,
   door: Door.supervisor,
-  // nullable but not optional on the wire, so a fixture spells it too: a row that can omit it is a
-  // row the per-task filter drops without saying so
   authorTaskId: null,
   ...(failure && { failure }),
 })
@@ -39,9 +37,6 @@ describe('mergeOlder', () => {
 
 describe('dropTicker', () => {
   test('drops ticker kinds from a fetched page — paged history must read like the live feed', () => {
-    // observed live 2026-08-03: a backward page of 150 rows rendered mostly agent-loop noise
-    // (tool_call/operation_*) that the live tail collapses into the working line. Asserted
-    // against the REAL WORKING set, so a kind added there is covered here without edits.
     expect(dropTicker([row(1, EVENT_KIND.tool_call), row(2), row(3, EVENT_KIND.operation_started)], WORKING).map(r => r.seq)).toEqual([2])
   })
 

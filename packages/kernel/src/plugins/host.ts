@@ -46,25 +46,17 @@ export async function createPluginHost(
     on: (hook, handler) => hooks.on(hook, handler),
   }
   const extensions = new ExtensionHost(api)
-  // extensions are declared in the tracked settings and resolved relative to the PROJECT, so a
-  // worktree loads (and trusts) the same set the main checkout declared, not a per-checkout copy
+  // resolved relative to the PROJECT: a worktree trusts the same set the main checkout declared
   await extensions.load(config.extensions, decl => isExtensionTrusted(loadTrust(config.projectRoot), decl, config.projectRoot), config.projectRoot)
   const skills = await SkillIndex.open(config.skillsDir)
-  // A caller that builds its own runtime outside the CLI's memoized port cache (`orc serve`,
-  // which needs a claimed slot id the shared no-arg factory cannot express) and that cache's own
-  // fallback cleanup can both reach this SAME host on the same process exit. Unlike
-  // extensions.shutdown()/skills.close()/HookBus.drain(), which are naturally idempotent,
-  // session_shutdown has no dedupe of its own — a second emit is a second "session ended"
-  // notification to every listener, not a no-op. Guard here, once, rather than in every caller
-  // that might race to be the one that tears down.
+  // session_shutdown has no dedupe of its own: a second emit notifies every listener again
   let shutDown = false
 
   return {
     providers, executors, analyzers, skills, hooks, extensions,
     refValidator: async plan => {
       const errors: string[] = []
-      // read fresh per validation: a grant revoked (or a declaration edited) since process start
-      // must be seen here, the way every other trust check in the codebase already does it
+      // read fresh per validation: a revoked grant or edited declaration must be seen
       const trust = loadTrust(config.projectRoot)
       const byName = new Map(skills.list().map(e => [e.name, e]))
       for (const step of plan.steps) {

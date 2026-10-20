@@ -85,7 +85,6 @@ describe('summarizeEvent', () => {
     expect(row.taskId).toBe('task-A')
   })
 
-  // ── kinds that previously had no summarizer and fell back to a raw JSON snip ──────────────────
 
   it('task_created names the task, its type and status', () => {
     const row = summarizeEvent(eventFixture({

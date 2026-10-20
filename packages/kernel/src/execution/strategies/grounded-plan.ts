@@ -2,32 +2,21 @@ import { createHash } from 'node:crypto'
 import { COMMIT_STEP_ID, EVENT_KIND, MASTERPLAN_NOTE_ID, PAYLOAD_SCHEMAS, PlanNote, PlanNoteToolName, ROLE_SKILL, STEP_ID, STEP_ROLE, STRATEGY, TaskType, VERIFY_STEP_ID, isApprovalAnswer, type ChildPlanDraft, type EventRecord, type TaskNode } from '@orc/contracts'
 import { withFinishStep } from '../../finish-step'
 
-// the grounded plan step's role, stamped by createGroundedTask
+// the grounded plan step's role, set by createGroundedTask
 export const PLAN_STEP_ROLE = STEP_ROLE.auditor
 
-// Its step id, stamped by createGroundedTask — one source, so the step that must produce a plan and
-// the check that it did cannot drift apart.
+// One source, so the step that must produce a plan and the check that it did cannot drift.
 export const PLAN_STEP_ID = STEP_ID.plan
 
 // the line a frozen step's instructions and the split's spec carry the plan's rationale on
 export const WHY_PREFIX = 'Why: '
 
-// True when a feedback answer IS the grounded-plan approval: sent to this strategy's plan step, on
-// a grounded task, using the approval word (isApprovalAnswer, contracts/approval-answer.ts). Named
-// so the generic conversational-feedback path (Kernel.replyFeedback, which runs for every task
-// type) asks this strategy the question instead of re-deriving its step/task shape inline.
+// True when an answer sent to a grounded plan step is the approval word.
 export function planApprovalStamp(task: TaskNode, event: EventRecord, text: string): boolean {
   return task.type === TaskType.grounded && event.stepId === PLAN_STEP_ID && isApprovalAnswer(text)
 }
 
-// A grounded plan step's whole job is to PRODUCE a plan: a decomposition the human approved, which
-// finalize_plan freezes into a split. Signalling success without one means the agent did the work
-// itself, or merely narrated it — and the run then reports success while the entire point of the
-// strategy, splitting into executable steps, silently did not happen. Observed live on a real run:
-// a plan step wrote two unlinked notes, never called finalize_plan, and passed.
-//
-// Returns the reason to REFUSE the success, or null when this is not a grounded plan step or it did
-// produce its split. Pure: the caller supplies the task's events.
+// Pure: the caller supplies the task's events; returns the refusal reason, or null.
 export function groundedPlanOmission(events: EventRecord[], stepId: string, runToken: string): string | null {
   if (stepId !== PLAN_STEP_ID) return null
   const isGrounded = events.some(e => {
@@ -48,18 +37,8 @@ export function groundedPlanOmission(events: EventRecord[], stepId: string, runT
       + `then call ${PlanNoteToolName.finalize}. Doing the work yourself instead of decomposing it defeats the grounded-plan strategy.`
 }
 
-// The grounded analyze step's role (agentAnalyzer.analysisStep stamps it). report_coverage is only meaningful for THIS step, so its gate reads this one
-// source rather than a scattered 'scout' literal.
+// report_coverage gates on this role (one source), not a scattered 'scout' literal.
 export const ANALYZE_STEP_ROLE = STEP_ROLE.scout
-
-// The auditor/heal/commit contracts live in the shipped role skills (vault/skills/role-auditor,
-// vault/skills/role-committer — ROLE_SKILL in contracts). The kernel appends the REF at the
-// freeze, so a planner can neither author nor remove a role contract; the BODY is operator-
-// editable and audited by skill_loaded content-hash events at step init. Enforcement never
-// lived in this prose — the commit handshake, scoped_changes gating and write fences are tool
-// code — so moving the prose moves guidance, not the guarantees. A vault missing a role skill
-// fails refValidator when finalize_plan proposes the split (kernel.appendPlanVersion), before
-// any step runs.
 
 export function planGraphHash(notes: PlanNote[]): string {
   const canonical = [...notes].sort((a, b) => a.id.localeCompare(b.id)).map(note => PlanNote.parse(note))
@@ -92,11 +71,11 @@ function instructionsFor(n: PlanNote): string {
 const subplansError = (masterId: string, detail: string): Error =>
   new Error(`masterplan '${masterId}' ${detail} — list each subplan note id in the masterplan's subplans (write the notes with ${PlanNoteToolName.write}) before finalizing`)
 
-// the freeze is a pure function of the approved notes: the masterplan's subplans, in order, become the steps
+// Pure function of the approved notes: the masterplan's subplans, in order, become the steps
 export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): ChildPlanDraft {
   const byId = new Map(notes.map(n => [n.id, n]))
   const kids = byId.get(masterId)?.subplans ?? []
-  // an empty plan would freeze to a finish/commit-only pipeline that reports done having written nothing
+  // an empty plan would freeze to a finish-only pipeline that reports done having written nothing
   if (kids.length === 0) throw subplansError(masterId, 'lists no subplans')
   return {
     steps: kids.map(id => {
@@ -117,21 +96,14 @@ export function instantiateFrozenPlan(masterId: string, notes: PlanNote[]): Chil
   }
 }
 
-// The ONE derivation of "what finalize_plan will freeze": the approval render (orc's derived-plan
-// block) and the freeze itself both call this, so a human can never approve a shape the freeze
-// then silently changes.
+// The one derivation of what finalize_plan freezes: the approval render and the freeze share it.
 export function freezePlan(masterId: string, notes: PlanNote[], opts: { autoCommit?: boolean; checks: readonly string[] }): ChildPlanDraft {
-  // instantiateFrozenPlan FIRST, and its blank-plan refusal with it: a childless masterplan must
-  // throw before anything is appended, or the append would turn `steps: []` into a finish-only
-  // pipeline that asks the human to summarize a task that wrote nothing — the same silent success
-  // the commit-only pipeline reported (incidents c4bc1d38, 8b5e1034).
+  // Freeze first: a childless masterplan must throw before a finish-only pipeline can be built.
   const frozen = withFinishStep(instantiateFrozenPlan(masterId, notes), { checks: opts.checks })
   return opts.autoCommit ? withCommitStep(frozen) : frozen
 }
 
-// The trailing commit step (config autoCommit; freezePlan applies it after the freeze).
-// dependsOn EVERY sibling, not just verify: a plan is not required to have one, and last-by-
-// construction is what makes the stamp truthful — nothing moves the tree after it.
+// dependsOn every sibling, not just verify: last by construction keeps the commit truthful.
 export function withCommitStep(draft: ChildPlanDraft): ChildPlanDraft {
   if (draft.steps.some(s => s.id === COMMIT_STEP_ID))
     throw new Error(`the plan already carries a step named '${COMMIT_STEP_ID}' — that id belongs to the kernel-appended commit step; rename the subplan`)

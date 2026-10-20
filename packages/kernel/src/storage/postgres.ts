@@ -9,18 +9,9 @@ import { pgListen } from './pg-listen'
 
 export type Tx = Parameters<Parameters<NodePgDatabase['transaction']>[0]>[0]
 
-// The shared append wake-up channel — owned here (the Postgres owner) so EventLog.subscribe and
-// watchProjectIds speak through one declaration, never two literals.
 export const NOTIFY_CHANNEL = 'orc_events'
 
-// A reconnect that can NEVER succeed, so retrying it is a leak rather than resilience.
-//   3D000 invalid_catalog_name — the database is gone. It is not coming back: a dropped project
-//     database, or a test database dropped while a subscription was still live.
-//   28P01/28000 — the credentials are wrong. A retry loop cannot fix a password.
-// Left running, these spin at the 3s backoff ceiling forever, logging on every attempt. Measured on
-// CI: one test file dropped its database and the orphaned loop then logged into every LATER file's
-// output, which is the same "poisons every later test file" shape unconditional teardown exists to
-// prevent — except here the noise also buries the failures a reader is looking for.
+// reconnects that can never succeed (database gone, credentials wrong): retrying only leaks
 export const TERMINAL_PG_CODES = new Set(['3D000', '28P01', '28000'])
 const pgErrorCode = z.object({ code: z.string() })
 export const isGonePermanently = (err: unknown): boolean => {
@@ -40,16 +31,7 @@ export class PostgresStore {
 
   // verifies the schema instead of migrating — migration is an explicit step
   static async open(url: string, opts: { projectId: string; redactEnv?: string[] }): Promise<PostgresStore> {
-    // Sized deliberately, not left at node-postgres's generic default of 10. Every writer here
-    // serializes on ONE per-project advisory lock (withProjectLock), so connections beyond a
-    // couple cannot buy write throughput — they only reserve server slots. Reads are short.
-    //
-    // The default cost real failures: a store that had ten concurrent queries kept ten idle
-    // connections for the default ten seconds, so sequential test files stacked their idle pools
-    // on top of each other and, with a live supervisor also holding one, the suite exhausted
-    // Postgres' 100-connection default and failed with `sorry, too many clients already` —
-    // tests that pass in isolation. Four is headroom for concurrent reads plus a transaction plus
-    // a spare; the short idle timeout returns slots quickly instead of hoarding them.
+    // max 4: writers serialize on one advisory lock, and idle pools stacked past 100 server slots
     const pool = new pg.Pool({ connectionString: url, max: 4, idleTimeoutMillis: 2_000 })
     const db = drizzle(pool)
     try {
@@ -61,9 +43,7 @@ export class PostgresStore {
     return new PostgresStore(pool, db, url, opts.projectId, buildRedactor(process.env, opts.redactEnv ?? []))
   }
 
-  // READ COMMITTED lets check-then-append transactions interleave (write skew); the
-  // per-project advisory lock serializes writers, unrelated projects stay concurrent.
-  // ponytail: one lock per project — per-task locks if writer throughput matters
+  // READ COMMITTED lets check-then-append interleave (write skew); the lock serializes writers
   withProjectLock<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
     return this.db.transaction(async tx => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${this.projectId}, 0))`)
@@ -76,8 +56,7 @@ export class PostgresStore {
   }
 }
 
-// Cross-project discovery for read-only viewers. Deliberately outside PostgresStore, which is
-// bound to ONE project by design. Ordered by most recent activity.
+// not on PostgresStore, which is bound to one project; ordered by recent activity
 export async function listProjectIds(url: string): Promise<string[]> {
   const pool = new pg.Pool({ connectionString: url, max: 1 })
   try {
@@ -90,14 +69,7 @@ export async function listProjectIds(url: string): Promise<string[]> {
   }
 }
 
-// Push complement of listProjectIds, for viewers that render the chats list live. The shared
-// orc_events NOTIFY is only a wake-up (its payload is a seq, project unknown): the authoritative
-// re-query happens here, debounced so an append burst costs one query. Emits the fresh id list
-// on EVERY wake — subscribers own change detection, because names resolve above this layer and
-// a rename wakes without changing membership. Row-DELETING operations (project deletion) send
-// no NOTIFY; the layer above pushes those changes through its own channel. Reconnects with the
-// same bounded backoff as EventLog.subscribe and re-queries on every reconnect, so a dropped
-// LISTEN delays a membership change but never loses it.
+// emits on every wake: a rename changes names, not membership; deletes send no NOTIFY
 export interface ProjectIdsWatch {
   close(): Promise<void>
 }

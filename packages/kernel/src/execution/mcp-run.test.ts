@@ -42,10 +42,7 @@ describe('MCP + skills through a durable run (integration)', () => {
       path.join(skillsRoot, 'haiku-style', 'SKILL.md'),
       `---\nname: haiku-style\ndescription: write everything as haiku\n---\nAlways answer in haiku.`,
     )
-    // The kernel appends a finish step to every root plan and it declares ROLE_SKILL.finisher, so
-    // this index must carry it or the step fails init with "unknown skill" — the same way the
-    // shipped vault carries the role skills. A stand-in body: this file's subject is the MCP round
-    // trip and the skill_loaded record, not which prose the finish contract holds.
+    // the finish step declares ROLE_SKILL.finisher, so this index must carry it (a stand-in body)
     mkdirSync(path.join(skillsRoot, ROLE_SKILL.finisher), { recursive: true })
     writeFileSync(
       path.join(skillsRoot, ROLE_SKILL.finisher, 'SKILL.md'),
@@ -58,8 +55,7 @@ describe('MCP + skills through a durable run (integration)', () => {
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: 'mcp__fixture__echo', input: { text: 'ping' } }] },
       { toolCalls: [{ toolCallId: 'c2', toolName: 'signal', input: { outcome: 'success', summary: 'echoed' } }] },
-      // the appended finish step runs this same scripted model: one turn that signals, so the
-      // script is not exhausted into empty text and the step does not loop to its iteration cap
+      // the finish step runs this scripted model: one signalling turn, so the script is not exhausted
       { toolCalls: [{ toolCallId: 'c3', toolName: 'signal', input: { outcome: 'success', summary: 'nothing to reconcile' } }] },
     ])
     const config = testConfig(db.url)
@@ -104,9 +100,7 @@ describe('MCP + skills through a durable run (integration)', () => {
     const agentCall = must(events.find(e => e.kind === EVENT_KIND.agent_call), 'agent call event')
     expect(JSON.stringify(agentCall.payload)).toContain('Always answer in haiku.')
 
-    // replay identity (golden-replay style): a fresh storage handle re-reads the durable log and
-    // must fold to the same state — folding one in-memory array twice is tautological and passes
-    // even when nothing was durably stored.
+    // replay identity: a fresh storage handle must fold to the same state (one array is tautological)
     const snap = (x: unknown) => JSON.stringify(x, (_k, v) => (v instanceof Map ? [...v.entries()] : v))
     const reopened = await openStorage(dbUrl, { projectId: TEST_PROJECT_ID })
     try {
@@ -114,7 +108,6 @@ describe('MCP + skills through a durable run (integration)', () => {
     } finally {
       await reopened.close()
     }
-    // 30s: the run is two step workflows now — the scripted step and the kernel's appended finish
-    // step — and bun's default 5s sat right on the boundary (5.5s observed under a loaded suite).
+    // 30s: two step workflows run (scripted + finish); bun's default 5s sat on the boundary under load
   }, 30_000)
 })

@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'bun:test'
 import {
   AUTHOR_SOURCE, CheckVerdict, ClaimClass, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_REFUSAL, KnowledgeToolName, knowledgeIdFrom,
-  type EventInput, type MemoryAuthor, type ResolvedTool,
+  type EventInput, type Author, type ResolvedTool,
 } from '@orc/contracts'
-import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
+import { createInMemoryBackend, NO_STRUCTURE } from './in-memory-backend'
 import { createKnowledgePort } from './port'
 import { KNOWLEDGE_READ_TOOLS, KNOWLEDGE_STEP_TOOLS, KNOWLEDGE_VERIFY_TOOLS, knowledgeTools, type KnowledgeStepToolName } from './tools'
 
-const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'c-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
+const author: Author = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'c-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
 const setup = (names: readonly KnowledgeStepToolName[] = KNOWLEDGE_STEP_TOOLS) => {
   const events: EventInput[] = []
-  const port = createKnowledgePort({ backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }), checkoutOf: async () => '/checkout', append: async e => { events.push(e) } })
+  const port = createKnowledgePort({ backend: createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }), checkoutOf: async () => '/checkout', append: async e => { events.push(e) } })
   const tools = knowledgeTools({ port }, author, names)
   const tool = (name: KnowledgeToolName): ResolvedTool => {
     const found = tools.find(t => t.name === name)

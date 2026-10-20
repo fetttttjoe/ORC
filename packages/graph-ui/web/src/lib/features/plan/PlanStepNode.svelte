@@ -5,14 +5,7 @@
   import { STEP_STATUS } from './plan-status'
   import type { StepNodeData } from './plan-flow'
 
-  /**
-   * One step on the plan canvas, in the SAME chip vocabulary the wave rail uses (dot temperature,
-   * running/failed tints) — they are two views of one plan, and a second colour language would
-   * make them look like two systems.
-   *
-   * Handles are rendered but invisible until `editable`: a read-only canvas that shows connection
-   * ports invites a drag it will refuse.
-   */
+  // One step in the wave rail's chip vocabulary; handles are invisible until editable
   let { data }: NodeProps = $props()
   const step = $derived(data as StepNodeData)
 </script>

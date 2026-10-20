@@ -6,8 +6,7 @@ import { AUTHOR_SOURCE, Door, NO_CHAT, WORKSPACE_KIND, type Workspace } from '@o
 import { authorFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { cwdAuthor, cwdWorkspaceId, type WorkspaceFold } from './cwd-workspace'
 
-// A real directory, because both doors realpath the cwd before asking the fold — a made-up path
-// would exercise the ENOENT fallback instead of the lookup these tests are about.
+// a real directory: a made-up path would exercise the ENOENT fallback instead
 const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'orc-cwd-ws-')))
 
 const workspace: Workspace = {
@@ -16,8 +15,6 @@ const workspace: Workspace = {
   createdAt: '2026-01-01T00:00:00.000Z', archivedAt: null,
 }
 
-// Only `state()` is read, and only its `workspaces` map — the narrow slice both doors declare,
-// which is exactly why WorkspaceFold can be satisfied here without building a whole kernel State.
 const kernelWith = (...ws: Workspace[]): WorkspaceFold =>
   ({ state: async () => ({ workspaces: new Map(ws.map(w => [w.id, w])) }) })
 

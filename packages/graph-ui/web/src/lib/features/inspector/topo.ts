@@ -1,9 +1,4 @@
-/**
- * Execution order of a plan's steps: dependencies first, ties broken by declaration order so the
- * same plan always reads the same way. A cycle cannot be ordered — the remaining steps are
- * appended in declaration order rather than dropped, because a plan the operator cannot see is
- * worse than one drawn in an imperfect order.
- */
+// Dependencies first, ties by declaration order; a cycle's remainder is appended, never dropped
 export interface OrderableStep {
   id: string
   dependsOn: readonly string[]

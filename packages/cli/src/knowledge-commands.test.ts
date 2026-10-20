@@ -4,12 +4,12 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   AUTHOR_SOURCE, ClaimClass, Door, EVENT_KIND, FS_READ_TOOL_NAME, PAYLOAD_SCHEMAS, KNOWLEDGE_REFUSAL, KnowledgePatch, NO_CHAT, WORKSPACE_KIND,
-  type EventInput, type EventKind, type EventRecord, type MemoryAuthor, type Workspace,
+  type EventInput, type EventKind, type EventRecord, type Author, type Workspace,
 } from '@orc/contracts'
 import { authorFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { gitFilesPlugin } from '@orc/knowledge-git'
 import { createTreeSitterStructure } from '@orc/structure-treesitter'
-import { knowledgeAuthor, type WorkspaceFold } from './cwd-workspace'
+import { cliAuthor, type WorkspaceFold } from './cwd-workspace'
 import { CommandFailure } from './exit'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
 import {
@@ -31,7 +31,7 @@ const commitAll = (dir: string, message: string): void => {
   Bun.spawnSync(['git', '-C', dir, 'add', '.'])
   Bun.spawnSync(['git', '-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', message])
 }
-const testAuthor: MemoryAuthor = { source: AUTHOR_SOURCE.cli, workspaceId: 'ws-1', origin: NO_CHAT(Door.cli) }
+const testAuthor: Author = { source: AUTHOR_SOURCE.cli, workspaceId: 'ws-1', origin: NO_CHAT(Door.cli) }
 const portOn = (dir: string) => {
   const events: EventInput[] = []
   let seq = 0
@@ -209,13 +209,13 @@ describe('the knowledge command line', () => {
       kind: WORKSPACE_KIND.checkout, managed: false, onTrunk: true, createdAt: '2026-01-01T00:00:00.000Z', archivedAt: null,
     }
     const fold: WorkspaceFold = { state: async () => ({ workspaces: new Map([[workspace.id, workspace]]) }) }
-    expect(await knowledgeAuthor(fold, dir)).toEqual(authorFixture())
+    expect(await cliAuthor(fold, dir)).toEqual(authorFixture())
   })
 })
 
 describe('stats, verify and drift through the command line', () => {
   const FAKE_LOG_REASON = 'log is down'
-  const memoryLog = (seed: EventInput[] = [], failReads = false) => {
+  const fakeLog = (seed: EventInput[] = [], failReads = false) => {
     const records: EventRecord[] = []
     const append = async (input: EventInput): Promise<EventRecord> => {
       const record: EventRecord = {
@@ -246,7 +246,7 @@ describe('stats, verify and drift through the command line', () => {
     }
     return { state: async () => ({ workspaces: new Map([[workspace.id, workspace]]) }) }
   }
-  const commandOn = (dir: string, log: ReturnType<typeof memoryLog>['log']) => {
+  const commandOn = (dir: string, log: ReturnType<typeof fakeLog>['log']) => {
     const knowledge = knowledgeCommand({
       requireKernel: () => cliWorkspace(dir),
       project: { config: { knowledge: { plugin: 'git-files', options: {} }, dir }, log },
@@ -272,7 +272,7 @@ describe('stats, verify and drift through the command line', () => {
 
   it('stats lists a file an agent read that no claim covers', async () => {
     const dir = checkout()
-    const fake = memoryLog([readCall('src/a.ts')])
+    const fake = fakeLog([readCall('src/a.ts')])
     await fake.ready
     const lines = await run(commandOn(dir, fake.log), [KNOWLEDGE_SUBCOMMAND.stats])
     expect(lines).toContain('gaps: 1 files read with no claim (0 covered by a folder claim alone)')
@@ -281,7 +281,7 @@ describe('stats, verify and drift through the command line', () => {
 
   it('stats fails loudly, with the reason, when the log cannot be read or is not open', async () => {
     const dir = checkout()
-    const down = memoryLog([], true)
+    const down = fakeLog([], true)
     await expect(run(commandOn(dir, down.log), [KNOWLEDGE_SUBCOMMAND.stats])).rejects.toThrow(FAKE_LOG_REASON)
     const noLog = knowledgeCommand({ requireKernel: () => cliWorkspace(dir), project: { config: { knowledge: { plugin: 'git-files', options: {} }, dir }, logUnreachable: { reason: 'postgres is down', error: new Error('connection refused') } } })
     for (const k of [noLog, ...noLog.commands]) k.exitOverride()
@@ -290,7 +290,7 @@ describe('stats, verify and drift through the command line', () => {
 
   it('stats --json prints one parseable document', async () => {
     const dir = checkout()
-    const fake = memoryLog([readCall('src/a.ts'), readCall('src/b.ts')])
+    const fake = fakeLog([readCall('src/a.ts'), readCall('src/b.ts')])
     await fake.ready
     const [line] = await run(commandOn(dir, fake.log), [KNOWLEDGE_SUBCOMMAND.stats, '--json', '--top', '1'])
     expect(JSON.parse(line ?? '').gaps).toEqual({ total: 2, top: [{ path: 'src/a.ts', runs: 1, reads: 1 }], byExtension: { '.ts': 2 }, folderCovered: 0 })
@@ -299,7 +299,7 @@ describe('stats, verify and drift through the command line', () => {
   it('a holds check appends knowledge_checked with the anchor digests, and the suspect claim then reads clean', async () => {
     const dir = checkout()
     const id = await suspectClaim(dir)
-    const fake = memoryLog()
+    const fake = fakeLog()
     const command = commandOn(dir, fake.log)
     expect((await run(command, [KNOWLEDGE_SUBCOMMAND.drift]))[0]).toStartWith(`suspect  ${id}`)
     expect(await run(command, [KNOWLEDGE_SUBCOMMAND.verify, id, 'holds', '--why', 'still true'])).toEqual([`holds ${id}`])
@@ -313,7 +313,7 @@ describe('stats, verify and drift through the command line', () => {
   it('a false check with --retire retires the claim and records both events', async () => {
     const dir = checkout()
     const id = await suspectClaim(dir)
-    const fake = memoryLog()
+    const fake = fakeLog()
     const lines = await run(commandOn(dir, fake.log), [KNOWLEDGE_SUBCOMMAND.verify, id, 'false', '--why', 'gone', '--retire'])
     expect(lines).toEqual([`false ${id}`, expect.stringMatching(new RegExp(`^retired ${id} from `))])
     expect(fake.records.map(r => r.kind)).toEqual([EVENT_KIND.knowledge_written, EVENT_KIND.knowledge_checked])
@@ -323,7 +323,7 @@ describe('stats, verify and drift through the command line', () => {
   it('a false check with --text corrects the claim', async () => {
     const dir = checkout()
     const id = await suspectClaim(dir)
-    const fake = memoryLog()
+    const fake = fakeLog()
     const lines = await run(commandOn(dir, fake.log), [KNOWLEDGE_SUBCOMMAND.verify, id, 'false', '--why', 'reworded', '--text', 'about a, corrected'])
     expect(lines[1]).toStartWith(`changed ${id} in `)
     expect(await run(commandOn(dir, fake.log), [KNOWLEDGE_SUBCOMMAND.card, 'src'])).toEqual([expect.stringContaining('about a, corrected')])
@@ -332,7 +332,7 @@ describe('stats, verify and drift through the command line', () => {
   it('a false check with neither or both corrections refuses, exits 1, and appends nothing', async () => {
     const dir = checkout()
     const id = await suspectClaim(dir)
-    const fake = memoryLog()
+    const fake = fakeLog()
     const lines: string[] = []
     const original = console.log
     console.log = (line: string) => { lines.push(line) }
@@ -347,7 +347,7 @@ describe('stats, verify and drift through the command line', () => {
   it('drift with a log that cannot be read prints the reason first, then the blame-only rows', async () => {
     const dir = checkout()
     const id = await suspectClaim(dir)
-    const fake = memoryLog([], true)
+    const fake = fakeLog([], true)
     expect(await run(commandOn(dir, fake.log), [KNOWLEDGE_SUBCOMMAND.drift])).toEqual([
       DRIFT_WITHOUT_LOG(FAKE_LOG_REASON),
       `suspect  ${id}  knowledge/src/a.ts.md  src/a.ts`,
@@ -358,10 +358,10 @@ describe('stats, verify and drift through the command line', () => {
   it('drift and stats each read the log once', async () => {
     const dir = checkout()
     await suspectClaim(dir)
-    const forDrift = memoryLog()
+    const forDrift = fakeLog()
     await run(commandOn(dir, forDrift.log), [KNOWLEDGE_SUBCOMMAND.drift])
     expect(forDrift.afterCalls).toEqual([0])
-    const forStats = memoryLog()
+    const forStats = fakeLog()
     await run(commandOn(dir, forStats.log), [KNOWLEDGE_SUBCOMMAND.stats])
     expect(forStats.afterCalls).toEqual([0])
   })
@@ -370,7 +370,7 @@ describe('stats, verify and drift through the command line', () => {
     const dir = checkout()
     await suspectClaim(dir)
     const noWorkspaces: WorkspaceFold = { state: async () => ({ workspaces: new Map() }) }
-    const knowledge = knowledgeCommand({ requireKernel: () => noWorkspaces, project: { config: { knowledge: { plugin: 'git-files', options: {} }, dir }, log: memoryLog().log } })
+    const knowledge = knowledgeCommand({ requireKernel: () => noWorkspaces, project: { config: { knowledge: { plugin: 'git-files', options: {} }, dir }, log: fakeLog().log } })
     for (const k of [knowledge, ...knowledge.commands]) k.exitOverride()
     await expect(run(knowledge, [KNOWLEDGE_SUBCOMMAND.drift])).rejects.toThrow('no workspace for this directory')
   })

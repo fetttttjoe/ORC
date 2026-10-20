@@ -60,23 +60,17 @@ export interface State {
   splits: Map<string, SplitState>
   operations: Map<string, OperationRecord>
   artifacts: Map<string, ArtifactRecord[]>
-  // The runtime failing at its own job, per task, latest last: a reaction that threw means nobody
-  // acted on something the log already records as asked. Folded so `orc status` can SAY why a task
-  // never moved — the failure used to exist only as a line on a supervisor's stdout.
+  // a reaction that threw means nobody acted on something the log records as asked
   reactionFailures: Map<string, ReactionFailedPayload[]>
   workspaces: Map<string, Workspace>
-  // A merge is its OWN fact, keyed by workspace, never a field on the Workspace record: the record
-  // is what workspaceByCwd matches on, and that match must keep ignoring whether the branch landed
-  // (a merged worktree is still the live directory its tasks run in until someone archives it).
+  // its own fact, never a Workspace field: workspaceByCwd must keep ignoring whether it landed
   workspaceMerges: Map<string, WorkspaceMergedPayload>
   project: ProjectIdentity | null
 }
 
 
 
-// The ONE transition function for the durable operation journal: the live journal row
-// mutation (EventLog.beginOperation/completeOperation/failOperation) and the rebuild fold
-// both apply committed transition events through here, so they can never disagree.
+// the one transition shared by the live journal row and the rebuild fold
 export function applyOperationEvent(current: OperationRecord | undefined, e: EventRecord): OperationRecord {
   if (e.kind === EVENT_KIND.operation_started) {
     const p = OperationStartedPayload.parse(e.payload)
@@ -119,15 +113,9 @@ export function foldOperations(events: EventRecord[]): Map<string, OperationReco
 }
 
 export const crashDedupKey = (e: EventRecord): string | null => {
-  // task_status_changed is excluded: run-init (→running) and run-finish (→done) share a runToken
-  // and would collide; a replayed status append is idempotent in fold anyway.
-  // operation transitions are excluded: their db idempotency keys already forbid raw duplicates,
-  // and attempts 1 and 2 of one operation would collide here and hide the retry.
-  // rate_limit_wait carries no discriminator field: every wait of a run would share one key
+  // excluded kinds share a runToken across distinct events: status changes, operation attempts, waits
   if (!e.runToken || e.kind === EVENT_KIND.task_status_changed || e.kind === EVENT_KIND.rate_limit_wait || OPERATION_KINDS.has(e.kind)) return null
-  // `name` discriminates multiple `skill_loaded` events sharing one runToken.
-  // `splitId` discriminates multiple `split_proposed` events sharing one runToken.
-  // `path` discriminates multiple `artifact_produced` receipts sharing one runToken.
+  // name, splitId and path discriminate repeated events that share one runToken
   const f = (key: string): string => {
     const v = e.payload[key]
     return typeof v === 'string' || typeof v === 'number' ? String(v) : ''
@@ -135,9 +123,7 @@ export const crashDedupKey = (e: EventRecord): string | null => {
   return `${e.runToken}:${e.kind}:${f('iteration')}:${f('toolCallId')}:${f('name')}:${f('splitId')}:${f('path')}`
 }
 
-// Read-side views: only the fields fold derives state from, looser than the write-time
-// PAYLOAD_SCHEMAS on purpose — historical events may predate later-added fields (e.g.
-// plan_approved provenance), and reading must stay lenient where writing is strict.
+// lenient on purpose: historical events may predate later-added fields; reading stays lenient
 const View = {
   task_created: z.object({ task: TaskNode }),
   plan: z.object({ plan: Plan }),
@@ -167,8 +153,7 @@ const setStep = (state: State, taskId: string, s: StepState): void => {
 
 const stepUsageKey = (taskId: string, stepId: string): string => `${taskId}\u0000${stepId}`
 
-// `seen` travels with the state because it is not recoverable from it: a suppressed duplicate
-// leaves no trace, so an incremental fold without it would double-count every replayed event.
+// `seen` is not recoverable from state: without it an incremental fold double-counts replays
 export interface FoldAcc {
   state: State
   seen: Set<string>
@@ -179,9 +164,7 @@ export const emptyFold = (): FoldAcc => ({
   seen: new Set(),
 })
 
-// Mutates and returns `acc`: copy-per-event would be O(state) per event, which is the cost this
-// exists to remove. Lenient by design — a malformed payload skips its case rather than throwing,
-// or one poison event wedges every projection.
+// mutates `acc` (copy-per-event is O(state)); a malformed payload skips its case, never throws
 export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
   const { state, seen } = acc
   {
@@ -222,8 +205,6 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
         break
       }
       case EVENT_KIND.run_requested:
-        // A run was explicitly requested. The actual run state (planVersion, workflowId, etc.)
-        // comes from run_started events; this event only carries the caller's overrides (cwd, retry).
         break
       case EVENT_KIND.run_started: {
         const p = View.run_started.safeParse(e.payload)
@@ -257,9 +238,7 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
       case EVENT_KIND.operation_started:
       case EVENT_KIND.operation_completed:
       case EVENT_KIND.operation_failed: {
-        // honor fold's own contract uniformly: a malformed/orphaned operation transition skips its
-        // case rather than throwing out of every consumer (status, vault, ui, the run-init checkpoint).
-        // foldOperations/rebuild stays strict below — surfacing a poison event loudly is intended there.
+        // lenient like every fold; foldOperations stays strict so a poison event surfaces loudly
         const id = OperationIdOnly.safeParse(e.payload)
         if (!id.success) break
         try {
@@ -317,8 +296,7 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
         break
       }
       case EVENT_KIND.reaction_failed: {
-        // lenient like every other fold: an unparseable diagnosis is not a diagnosis, and must not
-        // throw away the history around it
+        // lenient: an unparseable diagnosis must not throw away the history around it
         const p = ReactionFailedPayload.safeParse(e.payload)
         if (!p.success || !e.taskId) break
         const list = state.reactionFailures.get(e.taskId) ?? []
@@ -344,9 +322,7 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
         break
       }
       case EVENT_KIND.workspace_retitled: {
-        // The transition itself lives in workspaces.ts and is shared with the kernel method that
-        // appends this event; only the lenient lookup (malformed payload, unknown id → no-op) is
-        // the fold's own business.
+        // the transition lives in workspaces.ts; only the lenient lookup is the fold's own
         const p = View.workspace_retitled.safeParse(e.payload)
         const w = p.success ? state.workspaces.get(p.data.workspaceId) : undefined
         if (p.success && w) state.workspaces.set(w.id, applyRetitle(w, p.data.title))
@@ -369,8 +345,7 @@ export function foldInto(acc: FoldAcc, e: EventRecord): FoldAcc {
         break
       }
       case EVENT_KIND.chat_opened:
-        // A chat is its envelope: the fold holds no chat state, so opening one changes nothing here.
-        // Named anyway because the exhaustive `never` below refuses an unhandled kind.
+        // a chat is its envelope: no fold state; named so the exhaustive `never` below holds
         break
       default: {
         const unhandled: never = e.kind
@@ -392,14 +367,7 @@ export function completedStepIds(state: State, taskId: string): Set<string> {
   return out
 }
 
-/**
- * The VERDICTS holding a task back: failed steps that judged the work unacceptable rather than
- * malfunctioning (FailureClass.rejected). Empty when the task failed for ordinary reasons.
- *
- * This is the ONE derivation behind "may this be retried?", shared by the CLI/web door
- * (assertRetryable) and the execution port (port.retry) — the same pairing completedStepIds and
- * nextAttempts already have, so the two cannot disagree about whether a retry is worth offering.
- */
+// the ONE derivation behind retryability, shared by assertRetryable and port.retry
 export function blockingVerdicts(state: State, taskId: string): Array<{ stepId: string; message: string }> {
   const out: Array<{ stepId: string; message: string }> = []
   for (const [id, s] of state.steps.get(taskId) ?? [])
@@ -408,48 +376,20 @@ export function blockingVerdicts(state: State, taskId: string): Array<{ stepId: 
   return out
 }
 
-/**
- * Whether re-running would be pointless. True only when the task HAS failures and every one of
- * them is a verdict: a retry re-runs nothing that already completed, so identical siblings feed
- * the rejecting step identical inputs and it can only reach the identical conclusion.
- *
- * A mixed run (one verdict, one provider timeout) stays retryable — clearing the timeout may
- * change what the verdict sees, so refusing there would withhold a recovery that could work.
- */
+// futile only when EVERY failure is a verdict: a mixed run may change what the verdict sees
 export function retryIsFutile(state: State, taskId: string): boolean {
   const steps = [...(state.steps.get(taskId) ?? []).values()].filter(s => s.status === StepRunStatus.failed)
   return steps.length > 0 && steps.every(s => s.failure?.class === FailureClass.rejected)
 }
 
-/**
- * Whether a retry of this task would be SERVED — the whole admission rule, spelled once.
- *
- * Three sites need this verdict and only two of them can raise an error: the actions door and the
- * execution port each refuse with their own message, and a read model has to decide whether to
- * OFFER the retry at all. An offer derived from anything else contradicts the refusal that follows
- * it — reading it off the event order ("a step failed, and nothing has started since") calls a
- * verdict-blocked task retryable, and leaves a task that was cancelled out of `blocked` retryable
- * forever, because no later event unsets that reading.
- *
- * `blocked` is the only status with a run waiting to resume: every other one has either no failure
- * to clear or has already settled. Pure over State, so the offer and the refusal read one fact.
- */
+// only `blocked` has a run waiting to resume; the offer and the refusals read this one fact
 export function canRetry(state: State, taskId: string): boolean {
   return state.tasks.get(taskId)?.status === TASK_STATUS.blocked && !retryIsFutile(state, taskId)
 }
 
 export function nextAttempts(state: State, taskId: string, plan: Pick<Plan, 'steps'>): Record<string, number> {
   const out: Record<string, number> = {}
-  // A step folded `running` normally means a LIVE attempt, and reusing its number is what makes the
-  // deterministic workflowID re-attach instead of starting a duplicate. But that reading only holds
-  // while the RUN is live. Once the task has settled, no step of it can still be running: the fold
-  // says `running` only because the step died between its last checkpoint and step_failed — a
-  // Postgres blip inside the finish window exhausts the checkpoint's retries, and finishFailed's own
-  // append fails the same way, so the event that would have said "failed" was never written.
-  //
-  // Reusing the attempt then re-attached to a DEAD DBOS workflow, which replays its stored error, so
-  // every `orc retry` failed identically and forever with no way to move past it. A settled task is
-  // the log's own proof that the attempt is orphaned, so it gets a fresh one.
+  // a settled task has no live step: reusing a dead attempt re-attached to a dead workflow forever
   const settled = state.tasks.get(taskId)?.status !== TASK_STATUS.running
   for (const step of plan.steps) {
     const s = state.steps.get(taskId)?.get(step.id)
@@ -459,19 +399,7 @@ export function nextAttempts(state: State, taskId: string, plan: Pick<Plan, 'ste
   return out
 }
 
-/**
- * The attempt each step is CURRENTLY on — what a cancel must target. Distinct from nextAttempts,
- * which answers the opposite question ("which attempt should the next run start?") and deliberately
- * returns attempt+1 for a settled task so a retry gets a fresh workflow id.
- *
- * Cancel used nextAttempts and was therefore always one ahead: cancelSubtree stamps `cancelled`
- * BEFORE cancelWorkflowsFor runs, so `settled` is true, every started step resolves to attempt+1,
- * and DBOS.cancelWorkflow was handed an id that does not exist — swallowed by its own .catch(). The
- * live step kept running its model loop to completion against a cancelled task.
- *
- * A step with no recorded start has nothing to cancel and is omitted, so the caller cancels only
- * ids that were actually created.
- */
+// the attempt each step is CURRENTLY on: cancel needs it, nextAttempts is always one ahead
 export function startedAttempts(state: State, taskId: string, plan: Pick<Plan, 'steps'>): Record<string, number> {
   const out: Record<string, number> = {}
   for (const step of plan.steps) {
@@ -489,10 +417,7 @@ export function stepUsage(state: State, taskId: string, stepId: string): Usage {
   return state.stepUsage.get(stepUsageKey(taskId, stepId)) ?? ZERO_USAGE
 }
 
-// Descendants parked at the human approval gate. `task_split` honours the project's approvalPolicy,
-// so under the default (manual) the child sits here while the parent's join_splits recv's on it —
-// and nothing else in the system says so: no event, no output, no outcome. Pure, so the run tail
-// (which refolds anyway) and `orc status` (which already holds a fold) share one rule.
+// a gated child is invisible otherwise: the parent's join_splits waits on it with no event
 export function gatedChildren(state: State, rootId: string): Array<{ id: string; title: string }> {
   return subtreeTaskIds(state, rootId)
     .filter(id => id !== rootId)
@@ -502,11 +427,7 @@ export function gatedChildren(state: State, rootId: string): Array<{ id: string;
     })
 }
 
-// A run's outcome is the TREE's, not the root task's. A grounded parent finishes as soon as its
-// plan step splits, so its own status reads `done` while the child doing the actual work sits
-// blocked — observed live, reported at the terminal as success with exit code 0.
-// `awaiting_approval` is deliberately NOT a failure here: a gated child is a stopping point the
-// watch already announces by name, not a run that went wrong.
+// the TREE's outcome, not the root's; awaiting_approval is a stopping point, not a failure
 const FAILED_TASK_STATUS: ReadonlySet<TaskStatus> = new Set([TASK_STATUS.blocked, TASK_STATUS.failed])
 
 export function subtreeOutcome(state: State, rootId: string): RunOutcome {
@@ -527,8 +448,7 @@ export function subtreeTaskIds(state: State, rootId: string): string[] {
     siblings.push(t.id)
     children.set(t.parentId, siblings)
   }
-  // breadth-first by appending while iterating: the array iterator reads by index, so ids pushed
-  // during the walk are visited in turn
+  // breadth-first by appending while iterating: ids pushed during the walk are visited in turn
   const out: string[] = [rootId]
   for (const id of out) out.push(...(children.get(id) ?? []))
   return out
@@ -541,9 +461,7 @@ export function knowledgeOwnerTaskIds(state: State, taskId: string): string[] {
   return parent?.type === TaskType.grounded ? [...owned, parent.id] : owned
 }
 
-// The chain ABOVE a task, nearest first (parent, grandparent, …, root); excludes the task itself.
-// One walk, because three callers had their own: the budget envelope, the CLI's root-of-tree lookup,
-// and the knowledge lanes a step may read from.
+// nearest first, excluding the task; one walk shared by the budget and the root lookup
 export function ancestorTaskIds(state: State, taskId: string): string[] {
   const out: string[] = []
   for (let id = state.tasks.get(taskId)?.parentId ?? null; id !== null; id = state.tasks.get(id)?.parentId ?? null)
@@ -556,21 +474,7 @@ export function subtreeUsage(state: State, rootId: string): Usage {
   return subtreeTaskIds(state, rootId).reduce((acc, id) => addUsage(acc, taskUsage(state, id)), ZERO_USAGE)
 }
 
-// What a plan about to be approved is likely to COST, from measured history alone.
-//
-// The comparable-past-task rule, stated once so the door and its tests agree: a task counts when
-// (1) its status is TERMINAL (done/failed/cancelled — it has spent everything it is going to spend),
-// (2) its LATEST plan version's strategyRef equals the one being estimated, and
-// (3) when the caller names an analyzerRef, that plan's analyzerRef matches too (a grounded plan
-//     seeded by a different analyzer is a different shape of work).
-// The estimate is the mean of subtreeUsage(costUSD) over those tasks — subtree, not task, because a
-// grounded parent's real cost is the split children it spawns.
-//
-// Only tasks whose subtree cost is non-null are averaged: an unpriced model measured nothing, and
-// folding it in as 0 would quietly halve the number the human approves against. No comparable
-// history at all → null, which the render turns into 'none provided'. Never a fabricated zero —
-// the same discipline drift/degraded measurements already follow.
-// ponytail: O(matching tasks × subtree walk) per call, once per plan proposal — cache if it slows.
+// null with no comparable history, never a fabricated zero; unpriced subtrees are not averaged
 export function estimateCostUSD(state: State, opts: { strategyRef: string; analyzerRef?: string }): number | null {
   const measured: number[] = []
   for (const task of state.tasks.values()) {
@@ -585,12 +489,7 @@ export function estimateCostUSD(state: State, opts: { strategyRef: string; analy
   return measured.reduce((a, b) => a + b, 0) / measured.length
 }
 
-// The budget a task may still spend: the TIGHTEST remaining envelope over its whole ancestor chain
-// (itself, parent, grandparent, …) — min over ancestors that set a budgetUSD of
-// (ancestor.budgetUSD − subtreeUsage(ancestor)). Ancestors with no budget are unconstrained and
-// skipped; null means no ancestor sets one at all. Enforcing at the spend point across ancestors is
-// what stops N sibling splits — each granted the full remaining budget before any spend — from
-// together overspending the parent's envelope.
+// the tightest remaining envelope over the ancestor chain, so sibling splits cannot overspend
 export function remainingBudget(state: State, taskId: string): number | null {
   let remaining: number | null = null
   for (const id of [taskId, ...ancestorTaskIds(state, taskId)]) {
@@ -602,18 +501,12 @@ export function remainingBudget(state: State, taskId: string): number | null {
   return remaining
 }
 
-// The cwd a retry or a child run inherits: an explicit override always wins; otherwise the most
-// recent run in history that HAD a cwd — findLast, never runs.at(-1), so a pre-project-dir-default
-// run recorded with a null cwd cannot poison inheritance into an empty scratch dir. Falls back when
-// no run in the history ever had one. Shared by retry() and startChildRun() so the rule lives once.
+// findLast, never at(-1): a run recorded with a null cwd must not poison inheritance
 export function inheritedCwd(runs: RunRecord[] | undefined, override: string | undefined, fallback: string): string {
   return override ?? runs?.findLast(r => r.cwd)?.cwd ?? fallback
 }
 
-// The cwd a run STARTS in: an explicit override, else the world its parent ran in, else the project
-// dir. The router (on an approved child) and the CLI (following a finished parent's children) both
-// start the same child under the same deterministic workflow id, so whichever got there first used
-// to decide the directory — two rules for one thing. This is that one rule.
+// one rule for a child's start dir, shared by the router and the CLI that follows children
 export function runCwd(state: State, task: TaskNode, override: string | undefined, fallback: string): string {
   return inheritedCwd(task.parentId ? state.runs.get(task.parentId) : undefined, override, fallback)
 }
@@ -623,28 +516,14 @@ export function pendingSplitForChild(state: State, childTaskId: string): SplitSt
   return undefined
 }
 
-// ── Scoped change set (audit) ────────────────────────────────────────────────────────────────
-// The paths a task's steps WROTE, derived purely from EventRecord[] so the auditor never has to
-// trust git. This is a MEMBERSHIP projection with exactly one permitted use: telling this task's
-// declared-zone changes apart from sibling-task pollution in the scope-cleanliness check. It is a
-// FLOOR, not a complete diff — exec-driven writes (formatters, codegen) are uncaptured — and it
-// NEVER substitutes for the full bun test / bun run typecheck gate, nor dismisses a real defect in
-// an in-zone file (the role-auditor skill contract: any defect ⇒ signal failure, unqualified).
-
-// Which tool_calls are writes: contracts' FS_WRITE_TOOL_NAMES, so this audit projection and the
-// executor's fence (loop.ts's WRITING_FILE_TOOLS, tools.ts's TOOL_NAME) read the same set — a
-// fourth writing tool that only one side knew about would silently escape taskChangedPaths.
-
-// The path a write tool acted on — exactly loop.ts's editedPath rule: input is a record, input.path
-// is a non-empty string, or it is skipped rather than guessed at.
+// loop.ts's editedPath rule: a record with a non-empty string path, else skipped
 const WriteToolInput = z.object({ path: z.string().min(1) }).loose()
 const writeInputPath = (input: unknown): string | null => {
   const parsed = WriteToolInput.safeParse(input)
   return parsed.success ? parsed.data.path : null
 }
 
-// One step's contribution to a changed path: the id, the tool that produced it, and the seq of the
-// contributing event (the tool_call seq for a write, the receipt seq for an artifact).
+// seq of the contributing event: the tool_call for a write, the receipt for an artifact
 export interface PathContributor {
   stepId: string | null
   tool: string
@@ -656,17 +535,9 @@ export interface ChangedPath {
   steps: PathContributor[]
 }
 
-// Pure derivation of a task's change set from its events. Rules:
-//  • only fs_write/fs_edit/fs_delete tool_calls whose input.path is a non-empty string;
-//  • each paired with the tool_result carrying the SAME toolCallId, kept only when isError===false
-//    (an unpaired tool_call — a crash before the result — is NOT a write);
-//  • artifact_produced receipts folded in too (declared outputs count even if produced outside a
-//    write tool), as a floor;
-//  • normalized, deduped by path (keeping every contributing step), ordered by first seq then path.
+// unpaired tool_calls are not writes; a FLOOR (exec writes uncaptured); ordered by first seq
 export function taskChangedPaths(events: EventRecord[]): ChangedPath[] {
-  // tool_result outcomes by toolCallId — pass one: a result present with isError===false is what
-  // turns a tool_call into a confirmed write. A call id counts only when it saw at least one success
-  // AND never an error (once failed, stays failed — a stray success replay cannot resurrect it).
+  // once failed, stays failed: a stray success replay cannot resurrect a call
   const sawSuccess = new Set<string>()
   const sawError = new Set<string>()
   for (const e of events) {

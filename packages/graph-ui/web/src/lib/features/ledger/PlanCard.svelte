@@ -10,8 +10,7 @@
   import { cn } from '$lib/utils'
   import { statusTemperature, TEMP_DOT } from '$lib/temperature'
 
-  // The task's live shape, in the feed where the operator is already looking: waves as rows,
-  // steps as chips that carry their own status and open in the inspector.
+  // The task's live shape in the feed: waves as rows, steps as chips that open in the inspector
   let { taskId }: { taskId: string } = $props()
 
   const plans = createQuery(viewQuery(VIEW.plans, () => ({ taskId })))

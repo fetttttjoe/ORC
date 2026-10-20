@@ -1,6 +1,4 @@
-// The copilot: an AI-SDK agent whose tools are the SAME read APIs and OrcActions the UI uses —
-// it can never bypass the action layer, and every call it makes is streamed to the client as a
-// visible card. Transport-free: the web server (or a TUI) supplies the model and runs the loop.
+// tools are the same read APIs and OrcActions the UI uses: it cannot bypass the action layer
 import { tool, type ToolSet } from 'ai'
 import type { GraphNode, NodeType } from './graph-wire'
 import { z } from 'zod'
@@ -15,8 +13,7 @@ import { VIEW, WIRE } from './wire'
 import type { KnowledgeHealth, ResolvedTool, SupervisorHealth, WorkspaceWithHealth } from '@orc/contracts'
 import { DecisionFilter, DecisionInput, errorMessage, EventKind, groupByWorkspace, KnowledgeHealthState, KnowledgeToolName, toolError, type Origin } from '@orc/contracts'
 
-// Why a session can't act: 'read-only' = server started outside a project; 'foreign-project'
-// = the user is viewing a chat other than the one this server runs in.
+// 'read-only' = server outside a project; 'foreign-project' = viewing another project's chat
 export type CopilotMode = 'act' | 'read-only' | 'foreign-project'
 
 const MODE_LINES: Record<CopilotMode, string> = {
@@ -25,8 +22,7 @@ const MODE_LINES: Record<CopilotMode, string> = {
   'foreign-project': `This chat is READ-ONLY: actions run only in the project chat where orc graph was started. If the user wants to act, tell them to switch to that chat — or restart orc graph from this project's directory.`,
 }
 
-// The selection in the user's own words, so "run this" resolves to the pane they are reading
-// rather than to whatever task the model last saw in a tool result.
+// the selection in the user's words, so 'run this' resolves to the pane they are reading
 const focusBlock = (f: CopilotFocus): string =>
   f.type === ScopeType.task
     ? [
@@ -55,9 +51,7 @@ export function copilotSystemPrompt(projectName: string, mode: CopilotMode, defa
   ].join('\n')
 }
 
-// Door #2 bridge (P7): the SAME toolset the web copilot uses, reshaped for any ResolvedTool
-// consumer — the MCP server today, a TUI tomorrow. One tool definition, two doors: zod
-// schemas become JSON Schema natively (zod v4), execute wraps into {output, isError}.
+// the web copilot's toolset reshaped for any ResolvedTool consumer, such as the MCP server
 export function asResolvedTools(tools: ToolSet): ResolvedTool[] {
   return Object.entries(tools).map(([name, t]) => {
     const schema = t.inputSchema as z.ZodType
@@ -67,10 +61,7 @@ export function asResolvedTools(tools: ToolSet): ResolvedTool[] {
       description: typeof t.description === 'string' ? t.description : name, // ai v7 allows fn descriptions; ours are strings
       inputSchema: inputSchema as Record<string, unknown>,
       execute: async (input: unknown) => {
-        // On the web door the ai SDK safeParses against inputSchema before this execute ever
-        // runs; the MCP door calls this execute directly with raw client JSON. Every mutating
-        // tool below destructures assuming parsed args (e.g. run's `{ taskId: id, cwd }`) — a
-        // numeric taskId or object cwd from an MCP client reached actions.run unvalidated.
+        // the MCP door calls execute with raw client JSON, so parse here; the web door's SDK already did
         const parsed = schema.safeParse(input ?? {})
         if (!parsed.success) return toolError(parsed.error)
         try {
@@ -86,20 +77,14 @@ export function asResolvedTools(tools: ToolSet): ResolvedTool[] {
 }
 
 export function buildCopilotTools(deps: {
-  // Exactly the two reads this door performs: every grounded answer comes through `model` (the
-  // view registry reads it) and the graph snapshot project_status counts. Narrow on purpose —
-  // a composition without a full session store can still serve these tools.
+  // exactly the two reads this door performs: narrow so a composition without a full store serves it
   sessions: Pick<ProjectSessions, 'model' | 'snapshot'>
   actions: OrcActions | null
   projectId: string
-  // The EXCHANGE this toolset serves: every mutation below is stamped with it, so the events a
-  // copilot call appends are readable as one conversation rather than as anonymous door traffic.
+  // every mutation is stamped with it: a copilot call's events read as one conversation
   origin: Origin
   listModels?: () => Promise<string[]>
-  // The project's workspaces for project_status, wired from the kernel exactly as listModels is.
-  // Optional for the same reason health is: a composition without a project context has none, and
-  // an empty list would read as "this project has no workspaces" — which is never true, since every
-  // task belongs to one. Absent means the field is OMITTED.
+  // optional: absent omits the field, since [] would read as 'no workspaces', never true
   listWorkspaces?: () => Promise<readonly WorkspaceWithHealth[]>
   // Absent means project_status omits the field: a fabricated "ok" would read as healthy knowledge.
   health?: () => Promise<{ knowledge: KnowledgeHealth; supervisor?: SupervisorHealth }>
@@ -120,15 +105,9 @@ export function buildCopilotTools(deps: {
       inputSchema: z.object({}),
       execute: async () => {
         const { graph } = await sessions.snapshot(projectId)
-        // A failed lookup OMITS the field, the same posture the health probe below holds and for
-        // the same reason: this is the tool a driver starts from, and one optional dep must never
-        // take the whole answer down. Omission, not `[]` — an empty list reads as "this project has
-        // no workspaces", which is never true.
+        // a failed lookup omits the field, never []: one optional dep must not sink project_status
         const workspaces = await listWorkspaces?.().catch(() => undefined)
-        // Typed against NodeType rather than free-floating: this was the fourth hand-spelled copy
-        // of the node vocabulary, and a kind added to the wire counted as undefined here. Still
-        // written out — Record<NodeType, number> makes a MISSING key a compile error, which is the
-        // guarantee wanted, and building it from the tuple would need a cast on the seed object.
+        // Record<NodeType, number> makes a missing key a compile error
         const counts: Record<NodeType, number> = { task: 0, step: 0, artifact: 0, model: 0 }
         for (const n of graph.nodes) counts[n.type]++
         const h = health
@@ -136,10 +115,7 @@ export function buildCopilotTools(deps: {
             .catch((err: unknown) => ({ knowledge: { state: KnowledgeHealthState.unavailable, reason: errorMessage(err) } }))
           : undefined
         const tasks = graph.nodes.filter(n => n.type === 'task')
-        // groupByWorkspace requires a required workspaceId; GraphNode's stays `| undefined` because
-        // the field is wire-shared across every node kind, so the predicate narrows here rather
-        // than asserting one. Computed once, outside the return, so every workspace entry below
-        // reads its slice off ONE grouping pass instead of re-filtering `tasks` per workspace.
+        // narrowed here: GraphNode.workspaceId is optional across node kinds; one grouping pass
         const byWorkspace = workspaces && new Map(
           groupByWorkspace(
             workspaces.map(w => w.workspace),
@@ -149,19 +125,12 @@ export function buildCopilotTools(deps: {
         return {
           tasks: tasks.map(n => ({ taskId: n.id, title: n.label, status: n.detail })),
           counts,
-          // Grouped from the task list this call ALREADY has, not from a second fold: the snapshot's
-          // task nodes carry their workspaceId. `tasks` above still lists every task whatever its
-          // workspace, because two kinds of task fall into no group here and BOTH have to stay
-          // visible: one whose workspace record the log never recorded (an orphan — a log defect),
-          // and one whose workspace was ARCHIVED, which listWorkspaces filters out while the task
-          // itself is still perfectly real.
+          // from this call's task list; tasks still lists orphans and archived-workspace tasks
           ...(workspaces && {
             workspaces: workspaces.map(({ workspace: w, health }) => ({
               id: w.id, title: w.title, kind: w.kind, branch: w.branch, cwd: w.cwd,
               taskIds: (byWorkspace?.get(w.id) ?? []).map(n => n.id),
-              // Passed through WHOLE, never re-derived and never narrowed here: this is the same
-              // verdict `orc ws ls` and workspace_list carry, and a door that summarized it into its
-              // own words would be a fourth reading of "is this checkout still going anywhere".
+              // passed through whole: the same verdict as orc ws ls and workspace_list
               health,
             })),
           }),
@@ -173,14 +142,9 @@ export function buildCopilotTools(deps: {
     }),
     task_plan: tool({
       description: 'Read a task’s plan versions (steps, models, dependencies) and which version is approved.',
-      // Derived, not re-spelled: this tool's input IS the plans view's params, and a door whose
-      // schema drifts from the view it reads asks for a field the read will not honour.
+      // derived from the plans view's params: a drifting schema asks for a field the read ignores
       inputSchema: WIRE[VIEW.plans].params,
-      // `visual` is rebuilt field-by-field rather than spread: this is an ALLOWLIST, so a field
-      // added to the plans view for the browser's benefit cannot silently start costing model
-      // tokens on every call. It caught exactly that once — visual.mermaid was a diagram
-      // serialization for a renderer, re-telling the model what `waves` already says. That field is
-      // gone, which makes the projection an identity TODAY; it stays because the next one will not.
+      // an allowlist: a field added to the plans view for the browser must not cost model tokens
       execute: async ({ taskId: id }) => {
         const plans = await viewOf(sessions, projectId, VIEW.plans, { taskId: id })
         if (!plans) return { error: 'no plan proposed yet' }
@@ -190,15 +154,9 @@ export function buildCopilotTools(deps: {
     }),
     task_transcript: tool({
       description: 'Read a task’s agent conversation (messages, tool calls, questions, signal). Recent items only; tool payloads are truncated — read an artifact or the file itself for the full text.',
-      // The transcript view's params plus this door's own bound. The limit is NOT the view's:
-      // a model reads 50 items at most because it pays per token, while a pane scrolls thousands.
+      // the transcript view's params plus this door's bound: a model reads 50 items, a pane thousands
       inputSchema: WIRE[VIEW.transcript].params.extend({ limit: z.number().int().min(1).max(50).optional() }),
-      // Every payload is bounded because an unbounded one is not a readable answer: one single
-      // tool result came back as 88KB through this door, burying the conversation it was meant
-      // to explain. Tool input/output become snipped STRINGS (they are arbitrary JSON — a
-      // file read, a search hit list); messages keep their existing text snip. QUESTIONS AND
-      // SIGNALS PASS THROUGH VERBATIM: a driver has to answer the exact question that was asked
-      // and read the exact summary that was signalled — a truncated one is a wrong one.
+      // bounded: one result was 88KB; questions and signals pass through verbatim, never truncated
       execute: async ({ taskId: id, stepId, limit }) =>
         (await viewOf(sessions, projectId, VIEW.transcript, { taskId: id, stepId }) ?? []).slice(-(limit ?? 30)).map(i =>
           i.kind === 'message' ? { ...i, text: snip(i.text, 400) }
@@ -208,11 +166,7 @@ export function buildCopilotTools(deps: {
     plan_notes: tool({
       description: 'Read a grounded task’s decomposition plan-notes (the split-up: subplans, dependencies, zones, skills/tools, models, uncertainty).',
       inputSchema: WIRE[VIEW.planNotes].params,
-      // The mechanics — subplans and dependsOn (what orders the frozen plan), zone (the write
-      // fence), skillRefs/toolRefs/modelRef — are what a driver has to see to judge or revise a
-      // decomposition; mapping only the prose left it reviewing a plan it could not read.
-      // modelRef is conditional: '' means "inherit the parent's", and an empty string reads as a
-      // model choice that was made.
+      // modelRef is conditional: '' means inherit, and an empty string reads as a choice
       execute: async ({ taskId: id }) =>
         ((await viewOf(sessions, projectId, VIEW.planNotes, { taskId: id }))?.notes ?? []).map(n => ({
           id: n.id, title: n.title, summary: snip(n.summary, 400), rationale: snip(n.rationale, 400),
@@ -223,18 +177,11 @@ export function buildCopilotTools(deps: {
     }),
     recent_activity: tool({
       description: 'The latest events (one line each) — what just happened. scope says what to read: {"type":"project"} for everything, {"type":"task","id":"…","subtree":true} for one request and its subtasks, {"type":"workspace","id":"…"} for a checkout, {"type":"chat","id":"…"} for one conversation. Pass the previous call’s maxSeq as sinceSeq to read only what is new, and kinds to watch specific event kinds.',
-      // The timeline view's params, narrowed to what a model should hold: no beforeSeq (paging
-      // backward is a scrollback gesture, not a driver's question) and a limit of 50 rather than
-      // the view's 1000, because this door's rows are paid for per token. Everything else — the
-      // scope, the seq cursor, the event vocabulary behind `kinds` — is the view's own schema, so
-      // this door cannot ask for a field the read will not honour, and `scope` stays REQUIRED here
-      // for the reason it is required there: a default would silently pick one of two questions.
+      // timeline params narrowed: no beforeSeq, limit 50 not 1000 (paid per token); scope stays required
       inputSchema: WIRE[VIEW.timeline].params.pick({ scope: true, sinceSeq: true, kinds: true }).extend({
         limit: z.number().int().min(1).max(50).optional(),
       }),
-      // maxSeq is the poll cursor: without one a driver had no way to ask "what happened since?"
-      // and re-read the whole tail every time, paying for (and re-reasoning about) rows it had
-      // already seen.
+      // maxSeq is the poll cursor: without it a driver re-reads the whole tail
       execute: async ({ scope, limit, sinceSeq, kinds }) => {
         const rows = await viewOf(sessions, projectId, VIEW.timeline, { scope, sinceSeq, kinds, limit: limit ?? 15 }) ?? []
         return { rows, maxSeq: rows.at(-1)?.seq ?? null } // log rows are ascending by seq
@@ -252,8 +199,7 @@ export function buildCopilotTools(deps: {
         workspaceId: z.string().min(1).optional(),
         grounded: z.object({ modelRef: z.string().min(1), cwd: z.string().min(1) }).optional(),
       }),
-      // no budget from a chat tool: a ceiling is an operator decision, and a model inventing one
-      // silently capped runs the human never agreed to
+      // no budget from a chat tool: a ceiling is an operator decision
       execute: async input => actions.newTask({ ...input, budgetUSD: null }, origin),
     }),
     workspace_list: tool({
@@ -286,15 +232,9 @@ export function buildCopilotTools(deps: {
       inputSchema: z.object({ taskId, modelRef: z.string().min(1), skillRefs: z.array(z.string()).optional() }),
       execute: async ({ taskId: id, modelRef, skillRefs }) => actions.propose(id, { template: { modelRef, skillRefs: skillRefs ?? [] } }, origin),
     }),
-    // no `approve` tool by design: the human gate is structural — a prompt line is not a gate
-    // (observed live: create→propose→approve→run in 600ms with no human in the loop). The one
-    // deliberate exception is operator-owned, not prompt-owned: groundedApprovalDoors in
-    // .orc/config.json can add 'mcp' to the sources the grounded gate accepts — a config-file
-    // edit the operator makes, which no tool here can perform.
+    // no approve tool by design: a prompt line is not a gate; groundedApprovalDoors is operator config
     run: tool({
-      // cwd is the OVERRIDE, not the instruction: omitted, the run happens in the task's own
-      // workspace (the kernel resolves it from the record). Naming a directory for every run is how
-      // a task created in one worktree gets driven from another checkout.
+      // cwd is an override: omitted, the run uses the task's own workspace
       description: 'Start the approved plan running in its workspace (or an explicit cwd).',
       inputSchema: z.object({ taskId, cwd: z.string().min(1).optional() }),
       execute: async ({ taskId: id, cwd }) => actions.run(id, cwd ?? null, origin),

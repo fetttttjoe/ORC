@@ -12,14 +12,7 @@
   import { cn } from '$lib/utils'
   import { fmtCost, fmtTokens } from '$lib/features/inspector/node-head'
 
-  /**
-   * What is happening RIGHT NOW, for the task that is happening.
-   *
-   * The tiles above count states; the ledger narrates the past. Neither answers the question an
-   * operator actually asks while a run is live — how far along is it, what is each agent doing,
-   * how close is it to its iteration ceiling, and what has it cost so far. All of that is on the
-   * wire already; nothing here polls anything the stream does not already invalidate.
-   */
+  // What is happening right now for the running task; nothing here polls beyond the stream
   let { taskId }: { taskId: string } = $props()
 
   const node = createQuery(viewQuery(VIEW.node, () => ({ id: taskId })))

@@ -1,6 +1,4 @@
-// The trust boundary for URLs an agent chooses. Every A/AAAA record is checked, not just the first.
-// ponytail: DNS-rebinding TOCTOU remains (check-then-fetch re-resolves) — pin the connection to the
-// vetted IP via a custom dispatcher if this graduates past simulation.
+// Trust boundary for agent-chosen URLs: every A/AAAA record is checked; DNS rebinding remains
 import { lookup } from 'node:dns/promises'
 import { z } from 'zod'
 
@@ -9,8 +7,7 @@ export const USER_AGENT = 'orc-sim-web-mcp/0.0 (durable-workflow research simula
 const MAX_REDIRECTS = 5
 
 const octet = z.number().int().min(0).max(255)
-// Exactly four in-range octets — the shape a dotted-quad IPv4 address must have, checked once
-// instead of the hand-rolled length + range guard it replaces.
+// exactly four in-range octets: the shape a dotted-quad IPv4 address must have
 const Octets = z.tuple([octet, octet, octet, octet])
 
 // WHATWG URL already canonicalized 0x7f.1 / 2130706433 into dotted quads. Unparseable = refuse.

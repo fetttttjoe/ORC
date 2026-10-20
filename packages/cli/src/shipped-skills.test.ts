@@ -6,9 +6,7 @@ import { KnowledgeToolName, PlanNoteToolName, ROLE_SKILL } from '@orc/contracts'
 import { parseSkillMd, SCOPED_CHANGES_TOOL_NAME, TASK_PLAN_TOOL_NAME } from '@orc/kernel'
 import { SHIPPED_SKILLS } from './shipped-skills'
 
-// The tracked shipped-skill sources (exceptions inside gitignored vault/). The role skills carry
-// contract prose the freeze used to inline as kernel constants (grounded-plan.ts); these pin the
-// battle-tested sentences so an operator edit that guts a rule fails the build, not a live audit.
+// these pin the battle-tested sentences: an operator edit that guts a rule fails the build
 const DIR = fileURLToPath(new URL('../../../vault/skills', import.meta.url))
 
 const read = (name: string) => parseSkillMd(readFileSync(path.join(DIR, name, 'SKILL.md'), 'utf8'), name)
@@ -29,8 +27,6 @@ describe('shipped skills', () => {
     expect(body).toContain('never licenses skipping the test/typecheck gate')
     expect(body).toContain('never excuses a defect in a file that IS in scope')
     expect(body).toContain('empty set is not evidence of success')
-    // heal candidates come from scoped_changes' citingClaims — every recorded claim anchored at a
-    // path this task changed. Each gets a knowledge_check verdict.
     expect(body).toContain('citingClaims')
     expect(body).toContain(`${KnowledgeToolName.check}, one call per claim: \`holds\` for a claim still true`)
     expect(body).toContain(`\`false\` carries the patch that retires the claim or changes it`)
@@ -49,10 +45,7 @@ describe('shipped skills', () => {
     expect(body).toContain('Carry stillDrifted into your step summary verbatim')
     expect(body).toContain('Carry degraded the same way')
     expect(body).not.toContain('stamp')
-    // C.8: commit messages must follow Conventional Commits format with a concrete example
-    // showing the type(scope): subject pattern for clarity and consistency in the message history.
     expect(body).toContain('Conventional Commits format')
-    // C.9: guidance on type/scope fields and the importance of message clarity for the historical record
     expect(body).toContain('Type is one of fix, feat, refactor, docs, or test')
   })
 
@@ -84,9 +77,7 @@ describe('shipped skills', () => {
     expect(body).toContain(`If ${TASK_PLAN_TOOL_NAME}'s tag is null, write new feature claims untagged and leave a kept claim as it is`)
   })
 
-  // A planner froze a newline-joined zone entry (zone: ["a/**\nb.ts"]); the fence then matched no
-  // real path and two steps could not write their own files, with no repair path. This pins the
-  // STRUCTURE RULES bullet that tells planners a zone entry is one glob, never a joined string.
+  // a newline-joined zone entry matches no real path: pins the rule that an entry is one glob
   test('plan-authoring pins the one-glob-per-zone-entry rule', () => {
     const { body } = read('plan-authoring')
     expect(body).toContain('one glob per entry')
@@ -98,11 +89,6 @@ describe('shipped skills', () => {
   })
 })
 
-// The planner had no clarify phase and no way to record WHY a decomposition looked the way it did
-// past the owning task: a plan note's `rationale` belongs to its task, so every decision a plan
-// committed to was readable only on that task, by someone who already knew which task to open. This
-// pins the two-phase protocol that fixes it — ask once before authoring, propose the decisions inside
-// the approval ask, record them on approve.
 describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
   const { body } = read('plan-authoring')
 
@@ -111,9 +97,6 @@ describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
     expect(body).toContain('ask nothing and author')
   })
 
-  // The two-way gate this replaces ("answered in step 2, OR contradicts a recorded decision") had
-  // no path for a decision that is still mostly right but now partly wrong — the common case, and
-  // the one that silently accumulates contradictions when it has nowhere to go.
   test('every candidate is classified against the existing set, and all-false writes nothing', () => {
     expect(body).toContain('**collides**')
     expect(body).toContain('**needs rewrite**')
@@ -178,10 +161,6 @@ describe('plan-authoring pins the ask-then-record-decisions protocol', () => {
   })
 })
 
-// The scout used to author a linked note graph from working-tree reading. It now reads what is
-// already recorded FIRST and writes only classed, anchored claims — re-deriving existing knowledge
-// is the single biggest waste in a scout run, and report_coverage counts claims from the log itself
-// rather than trusting a self-report.
 describe('codebase-analysis pins the knowledge-first grounding protocol', () => {
   const { body } = read('codebase-analysis')
 

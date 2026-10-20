@@ -13,17 +13,14 @@ import { EXIT_CODE } from './exit'
 import { buildServeTools } from './mcp-serve'
 import { actionsStub, sessionsStub } from './test-helpers'
 
-// The Claude Code plugin this repository ships. It lives here rather than beside the plugin because
-// Claude Code COPIES a plugin directory into its own cache on install: a test file in there would
-// ship to every user, could not resolve @orc/* from the cache, and sits outside every tsc project.
+// lives here, not beside the plugin: Claude Code copies that directory into its cache on install
 
 const REPO = fileURLToPath(new URL('../../..', import.meta.url))
 const PLUGIN = path.join(REPO, 'plugin')
 const HOOK = path.join(PLUGIN, 'hooks', 'session-start.sh')
 const readJson = (file: string): unknown => JSON.parse(readFileSync(file, 'utf8'))
 
-// The fields orc USES, strict so a key Claude Code would ignore (or, for `hooks`, act on) cannot
-// slip in unnoticed. Not Claude Code's whole schema — `claude plugin validate` owns that.
+// strict, so a key Claude Code would ignore (or act on) cannot slip in unnoticed
 const PluginManifest = z.strictObject({
   name: z.literal('orc'),
   version: z.string().regex(/^\d+\.\d+\.\d+$/),
@@ -45,10 +42,7 @@ const HooksFile = z.strictObject({
 describe('plugin manifests', () => {
   const manifest = PluginManifest.parse(readJson(path.join(PLUGIN, '.claude-plugin', 'plugin.json')))
 
-  // Strictness is what carries the rule that matters most here: Claude Code loads hooks/hooks.json
-  // by itself, and a manifest that ALSO names it is reported at load as a duplicate hooks file —
-  // which `claude plugin validate` accepts without a word (measured on 2.1.274). A `hooks` key
-  // fails the strict parse above.
+  // a manifest naming hooks/hooks.json is a duplicate hooks file at load, which validate accepts
   it('plugin.json carries exactly the fields orc uses, and serves the MCP door through the bundled wrapper', () => {
     expect(manifest.mcpServers.orc.command).toBe('${CLAUDE_PLUGIN_ROOT}/bin/orc-mcp')
   })
@@ -67,9 +61,7 @@ describe('plugin manifests', () => {
     expect(statSync(HOOK).isFile()).toBe(true)
   })
 
-  // Claude Code execs both files directly, so the mode bit is load-bearing: without it the MCP
-  // server never starts and the hook fails on every session. git tracks the bit; this catches a
-  // file re-created by a tool that does not.
+  // Claude Code execs both files directly: without the mode bit the server and hook never start
   it.each(['bin/orc-run', 'bin/orc-mcp', 'hooks/session-start.sh'])('%s is executable', rel => {
     expect(statSync(path.join(PLUGIN, rel)).mode & 0o100).toBe(0o100)
   })
@@ -78,8 +70,6 @@ describe('plugin manifests', () => {
 describe('plugin skills', () => {
   const SKILLS = path.join(PLUGIN, 'skills')
   const read = (name: string) => parseSkillMd(readFileSync(path.join(SKILLS, name, 'SKILL.md'), 'utf8'), name)
-  // The door's whole surface, from the composition that serves it — not a list typed here, which
-  // would keep passing after a tool was renamed out from under a skill.
   const served = new Set(buildServeTools({
     sessions: sessionsStub(), projectId: 'p1', actions: actionsStub(), autonomy: 'gated',
     knowledgeTools: knowledgeTools({ unavailable: 'skills-check' }, authorFixture(), KNOWLEDGE_READ_TOOLS),
@@ -95,11 +85,7 @@ describe('plugin skills', () => {
     expect(manifest?.name).toBe(name)
   })
 
-  // A skill that names a tool the door does not serve sends a session looking for it. EVERY
-  // backticked lowercase word is read as a tool name — eight served tools are one word (`run`,
-  // `revise`, …), and a pattern that wanted an underscore checked none of them. The skills keep
-  // parameters in camelCase, as the tools do, so the only other backticked lowercase words are
-  // task statuses, which come from the enum rather than a list typed here.
+  // every backticked lowercase word is read as a tool name: eight served tools are one word
   it.each(['request', 'adr', 'workspace'])('%s names only tools the MCP door serves', name => {
     const statuses = new Set<string>(Object.values(TaskStatus))
     const named = [...read(name).body.matchAll(/`([a-z][a-z_]*)`/g)].map(m => m[1] ?? '').filter(t => !statuses.has(t))
@@ -108,9 +94,7 @@ describe('plugin skills', () => {
   })
 })
 
-// The hook, run for real against a stand-in `orc` that is first on PATH. What is pinned is the
-// contract with Claude Code: ALWAYS exit 0 (a non-zero SessionStart hook prints an error into the
-// session), and say at most one line when orc has nothing to give.
+// the hook runs for real against a stand-in `orc`: always exit 0, at most one line when empty
 describe('session-start hook', () => {
   const tmp: string[] = []
   afterAll(() => { for (const d of tmp) rmSync(d, { recursive: true, force: true }) })
@@ -125,8 +109,7 @@ describe('session-start hook', () => {
       writeFileSync(path.join(dir, as), `#!/usr/bin/env bash\n${stub}\n`)
       chmodSync(path.join(dir, as), 0o755)
     }
-    // /usr/bin:/bin for bash, head, sed, mktemp — and deliberately NOT the caller's PATH, which
-    // holds the developer's real linked `orc`.
+    // deliberately NOT the caller's PATH, which holds the developer's real linked `orc`
     const child = Bun.spawn([script, ...args], {
       cwd: dir, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
       env: { PATH: `${dir}:/usr/bin:/bin`, CLAUDE_PROJECT_DIR: dir, ...env },
@@ -188,8 +171,7 @@ describe('session-start hook', () => {
     expect(r).toMatchObject({ exitCode: 0, stdout: `/opt/orchestrator/packages/cli/src/bin.ts ${BRIEF_COMMAND}\n` })
   })
 
-  // The MCP wrapper shares the hook's resolver (bin/orc-run), so it is driven the same way. What
-  // it adds is the cd: the server binds to the project of the directory it starts in.
+  // the MCP wrapper shares the hook's resolver (bin/orc-run) and adds the cd to the project
   const MCP = path.join(PLUGIN, 'bin', 'orc-mcp')
 
   it('the MCP wrapper serves from the session\'s project directory and passes its arguments on', async () => {

@@ -1,6 +1,4 @@
 <script lang="ts">
-  // the task as a request: plan versions, the approved plan's waves, grounded plan notes,
-  // and (when this server can act) the revise gate
   import { FailureClass } from '@orc/contracts/execution'
   import { createQuery } from '@tanstack/svelte-query'
   import { SvelteSet } from 'svelte/reactivity'
@@ -46,11 +44,9 @@
   // waves are rendered server-side for ONE version only — other versions fall back to a flat list
   const waves = $derived(plans.data?.visual?.version === shownVersion ? (plans.data?.visual?.waves ?? null) : null)
 
-  // the OLDEST open question on this task — a "your move" card shows one line; GateCard (in the
-  // ledger and chat tab) is where every open question on the task renders, one card each
+  // the OLDEST open question; GateCard renders every open question, one card each
   const openQuestion = $derived(taskId === null ? null : (operator.questionsFor(taskId)[0]?.question ?? null))
-  // read off the task detail's own artifacts, parsed once by the view client — a completion line
-  // computed elsewhere claimed zero regardless
+  // read off the task detail's artifacts, parsed once: a line computed elsewhere claimed zero
   const artifacts = $derived(node.data?.type === NODE_KIND.task ? node.data.artifacts : [])
   const failed = $derived(waves?.flatMap(w => w.steps).find(st => st.status === 'failed') ?? null)
   const failedStep = $derived(failed?.id ?? null)

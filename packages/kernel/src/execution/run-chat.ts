@@ -3,14 +3,10 @@ import {
   type ChatRef, type EventDraft, type Origin, type TaskNode,
 } from '@orc/contracts'
 
-// A run IS a chat: the run workflow's id names the interaction, so every event of that run — and of
-// every step workflow under it — correlates without a second id to thread.
-
 // The run's own workflow id, never a step's: a step chat would split one run's transcript into N.
 export const runOrigin = (workflowId: string): Origin => ({ chatId: workflowId, door: Door.supervisor })
 
-// Keyed by the chat id, so the replayed init that DBOS re-executes finds its open committed and
-// appends nothing — the run would otherwise open the same chat once per recovery.
+// Keyed by chat id so a DBOS-replayed init appends nothing.
 export const runChatOpened = (input: { chatId: string; task: TaskNode; parent: ChatRef | null }): EventDraft => ({
   kind: EVENT_KIND.chat_opened,
   payload: ChatOpenedPayload.parse({

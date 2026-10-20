@@ -9,23 +9,15 @@ import { singleStepDraft } from './plan-template'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
 import type { OrcActions, PlanSource } from '@orc/ui-core'
 import type { PlanDraft } from '@orc/contracts'
-import type { MemoryAuthor, Workspace } from '@orc/contracts'
-import { createVaultProjector } from '@orc/vault-projector'
+import type { Author, Workspace } from '@orc/contracts'
+import { createVaultProjector, VAULT_TASKS_DIR } from '@orc/vault-projector'
 import { existsSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
 
-// The statuses startRunAt (dbos-port.ts) admits — anything else is terminal or waiting on a human,
-// so a run_requested naming it could never be served. ONE set, so "can this be driven?" means the
-// same thing at every door: the CLI `run`/`retry` guard (main.ts), the dbos port, and this actions
-// layer that the web + MCP doors call through.
+// the statuses startRunAt admits; one set so every door agrees on "can this be driven"
 export const DRIVABLE_TASK_STATUS: ReadonlySet<TaskStatus> =
   new Set([TASK_STATUS.approved, TASK_STATUS.running, TASK_STATUS.blocked])
 
-// The admission startRunAt enforces, checked at the boundary so a request that could never be
-// served is refused BEFORE it is recorded: a run_requested naming a draft/unapproved/terminal task
-// would sit in the log forever, and every supervisor that boots would pick it up and fail on it
-// again. This is the ONE implementation — main.ts's `requireDrivable` and actions.ts's `run()` both
-// call it, so the CLI door and the web/MCP doors cannot drift on the check or its message.
 export async function assertDrivable(kernel: Kernel, taskId: string): Promise<void> {
   const task = await kernel.getTask(taskId)
   if (!task) throw new Error(`no task '${taskId}'`)
@@ -34,23 +26,15 @@ export async function assertDrivable(kernel: Kernel, taskId: string): Promise<vo
     throw new Error(`task is '${task.status}' — approve a plan first (orc approve ${taskId})`)
 }
 
-// Same boundary rule for retry, and the same ONE-implementation reason: the CLI `retry` and this
-// actions layer (web + MCP doors) both refuse a non-blocked task BEFORE the ask is recorded — the
-// refusal port.retry makes, kept client-side so an ask nobody can serve never reaches the log.
 export async function assertRetryable(kernel: Kernel, taskId: string): Promise<void> {
   const task = await kernel.getTask(taskId)
   if (!task) throw new Error(`no task '${taskId}'`)
   const state = await kernel.state()
-  // canRetry is the DECISION; everything below only picks which refusal to explain. Split that way
-  // because a read model has to make the same call to decide whether to offer the retry at all, and
-  // it cannot throw — a second `status === blocked && !retryIsFutile` spelled here is the drift.
+  // canRetry is the decision: a UI offering retry makes the same call and cannot throw
   if (canRetry(state, taskId)) return
   if (task.status !== TASK_STATUS.blocked)
     throw new Error(`task is '${task.status}' — only a blocked task can be retried`)
-  // A task blocked purely on VERDICTS cannot be moved by repeating itself: retry re-runs only what
-  // did not complete, so the rejecting step would see the same sibling outputs and reach the same
-  // conclusion. Refuse here, at the door, and name the action that does work — otherwise the
-  // operator is handed a button that provably cannot succeed (measured: three identical passes).
+  // a task blocked only on verdicts cannot be moved by repeating itself: name the action that works
   const verdicts = blockingVerdicts(state, taskId)
   throw new Error(
     `this run was REJECTED, not broken — ${verdicts.map(v => `'${v.stepId}'`).join(', ')} judged the work unacceptable, `
@@ -59,14 +43,11 @@ export async function assertRetryable(kernel: Kernel, taskId: string): Promise<v
   )
 }
 
-// A provider's valid model ids: live-discovered UNION cost-table. The API list omits aliases
-// the provider still serves (claude-haiku-4-5 vs …-20251001), and the cost table is exactly
-// the set we can price. Sorted for stable append-on-change comparison.
+// live-discovered UNION cost-table: the API list omits aliases the provider still serves
 export const modelUniverse = (live: string[], costs: Record<string, unknown>): string[] =>
   [...new Set([...live, ...Object.keys(costs).filter(k => k !== '*')])].sort()
 
-// A provider that never answers would hang every door that discovers; rejecting turns "no answer"
-// into the unreachable case discovery already handles. The loser's rejection is handled by the race.
+// rejecting turns a provider that never answers into the unreachable case
 const bounded = async <T>(work: Promise<T>, ms: number, pid: string): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined
   const expiry = new Promise<never>((_, reject) => {
@@ -75,29 +56,15 @@ const bounded = async <T>(work: Promise<T>, ms: number, pid: string): Promise<T>
   try { return await Promise.race([work, expiry]) } finally { clearTimeout(timer) }
 }
 
-// One fetch attempt per provider: `reachable` is whether it ANSWERED — a provider that answered
-// with nothing usable carries ids: [] and reachable: true, which are different facts.
+// reachable = the provider ANSWERED; an answer with no ids differs from silence
 export interface DiscoveredProvider { pid: string; ids: string[]; reachable: boolean }
 
-// Which catalogs deserve a models_discovered event this fetch — pure, so the rule is testable
-// without providers or a log. Gated on REACHABILITY, not emptiness: an empty catalog from a
-// provider that answered is a fact worth recording (the embedding filter made [] ollama's
-// legitimate steady state, and the old `ids.length === 0` guard pinned the served catalog to
-// the pre-filter event — observed 2026-08-03); silence from one that did not answer is not.
+// gated on reachability, not emptiness: an answered empty catalog is a fact worth recording
 export const catalogAppends = (perProvider: readonly DiscoveredProvider[], last: ReadonlyMap<string, string>): { providerId: string; models: string[] }[] =>
   perProvider
     .filter(({ ids, reachable, pid }) => reachable && JSON.stringify(ids) !== last.get(pid))
     .map(({ pid, ids }) => ({ providerId: pid, models: ids }))
 
-// Model discovery + resolution + pricing over the provider registry — shared by the actions
-// layer (validation), the copilot (available_models), and the web model picker. Cached briefly.
-// With a log, each fetch persists changed catalogs as models_discovered events (append-on-
-// change), making the catalog a projection: linkable to tasks and served without provider APIs.
-// `persist` pairs the log with the ORIGIN its models_discovered appends carry: a catalog is a fact
-// about the serving process, not about an interaction, so the composition root names its door once
-// instead of every discovery call carrying one.
-// A provider daemon that naps answers no faster than one that is down, and BOTH doors discover —
-// so the bound lives at this seam, injectable because a test cannot wait out the production value.
 export const PROVIDER_DISCOVERY_TIMEOUT_MS = 10_000
 
 export function buildModelDiscovery(config: ProjectConfig, persist?: { log: EventLog; origin: Origin }, providerTimeoutMs: number = PROVIDER_DISCOVERY_TIMEOUT_MS) {
@@ -109,8 +76,6 @@ export function buildModelDiscovery(config: ProjectConfig, persist?: { log: Even
     if (!p) throw new Error(`unknown provider '${providerId}'`)
     return { p, modelId }
   }
-  // The catalog as the LOG states it: the latest models_discovered per provider. One fold, read by
-  // the door that must not fetch and by append-on-change alike.
   const catalogs = async (): Promise<Map<string, string[]>> => {
     const last = new Map<string, string[]>()
     if (!log) return last
@@ -126,8 +91,7 @@ export function buildModelDiscovery(config: ProjectConfig, persist?: { log: Even
   const discoverModels = async (): Promise<string[]> => {
     if (cache && Date.now() - cache.at < 300_000) return cache.refs
     const perProvider: DiscoveredProvider[] = await Promise.all([...providers.entries()].map(async ([pid, p]) => {
-      // a throwing OR timed-out provider is UNREACHABLE, isolated here so one napping daemon
-      // neither rejects the whole fetch nor masquerades as "this provider serves nothing"
+      // a throwing or timed-out provider is unreachable, isolated so one cannot reject the whole fetch
       try {
         const live = p.listModels ? await bounded(p.listModels(), providerTimeoutMs, pid) : []
         return { pid, ids: modelUniverse(live, p.costs), reachable: true }
@@ -149,8 +113,7 @@ export function buildModelDiscovery(config: ProjectConfig, persist?: { log: Even
     cache = { at: Date.now(), refs }
     return refs
   }
-  // ONE core, no flag: every door discovers. A door that folded the log answered [] for a project
-  // with no models_discovered yet, and an agent handed { refs: [] } cannot name a model at all.
+  // no flag: every door discovers, since an agent handed { refs: [] } cannot name a model
   const listModels = discoverModels
   // discovery already knows both halves; pairing them here keeps every consumer off `p.costs`
   const listModelOptions = async (): Promise<ModelOption[]> =>
@@ -172,18 +135,7 @@ export function buildModelDiscovery(config: ProjectConfig, persist?: { log: Even
   }
 }
 
-// Wiping durable state under a LIVE runtime wedges it, silently. Both destructive paths truncate
-// the DBOS system database; a supervisor holding that database keeps in-memory accounting derived
-// from rows that no longer exist, so its queue believes the vanished workflows still occupy their
-// concurrency slots and never releases them. Observed: after a purge, four step workflows sat at
-// ENQUEUED with an empty `dbos.workflow_queue` while the supervisor heartbeat stayed healthy — no
-// error, no failed run, just a request that never started.
-//
-// So this REFUSES rather than warning. A warning in a return value is the wrong shape for a fault
-// whose symptom is silence: by the time the operator notices nothing is running, the cause is
-// fifteen minutes upstream. It clears itself — a supervisor that is genuinely gone stops beating and
-// its row falls outside the stale window within SUPERVISOR_STALE_MS, so the guard only blocks while
-// a runtime is actually alive to be broken.
+// refuses under a live supervisor: wiping the DBOS system db under it wedges its queue silently
 async function refuseWhileSupervised(storage: Storage, verb: string): Promise<void> {
   const live = await liveSupervisors(storage, new Date())
   if (live.length === 0) return
@@ -196,29 +148,18 @@ async function refuseWhileSupervised(storage: Storage, verb: string): Promise<vo
   )
 }
 
-// The ONE implementation of every mutating command — the terminal's subcommand handlers and the web
-// adapter both call through here, so they cannot drift. Nothing in this file's import graph reaches
-// the terminal's argument parser: this is the door the web and MCP surfaces are served through, and
-// it has no business pulling a command-line library in behind it.
+// nothing in this import graph may reach the terminal's argument parser (web and MCP load it)
 export function buildOrcActions(deps: {
   kernel: Kernel
-  // Guarantee something will drive what we are about to record — a live supervisor, one spawned
-  // for us, or (under --no-daemon) a runtime this process holds. This layer never touches an
-  // execution port itself: every door records the ask and lets the supervisor execute it.
   ensureRuntime: () => Promise<unknown>
   plugin?: { config: ProjectConfig; log: EventLog; storage?: Storage }
-  // The ONE model core (buildModelDiscovery), flagless: it discovers for every door, bounded
-  // per provider, so no call site chooses between a fetch and a fold.
   listModels?: () => Promise<string[]>
   listModelOptions?: () => Promise<ModelOption[]>
 }): OrcActions {
   const { kernel, ensureRuntime, plugin, listModels, listModelOptions } = deps
 
-  // Every knowledge write this layer makes names the checkout the process is serving — ONE spelling.
-  // Folded per call, not captured: `orc ws new` can mint a workspace mid-session.
-  // The SOURCE is derived from the door the call came in by — there is no `via` dep to disagree
-  // with the origin the same call stamps on its events.
-  const doorAuthor = (origin: Origin): Promise<MemoryAuthor> =>
+  // folded per call, not captured: `orc ws new` can mint a workspace mid-session
+  const doorAuthor = (origin: Origin): Promise<Author> =>
     cwdAuthor(kernel, plugin?.config.dir, authorSourceOf(origin.door), origin)
 
   const decisionPort = async () => {
@@ -234,8 +175,7 @@ export function buildOrcActions(deps: {
     return task
   }
 
-  // fail at the BOUNDARY, not 4 retries deep in the executor: a cwd that does not exist is
-  // a deterministic EACCES/ENOENT later (models love inventing /workspace/… paths)
+  // fail at the boundary: an invented cwd is a deterministic ENOENT retries deep in the executor
   const assertRunnableCwd = (cwd: string): string => {
     const abs = path.resolve(cwd)
     if (!existsSync(abs) || !statSync(abs).isDirectory())
@@ -243,8 +183,7 @@ export function buildOrcActions(deps: {
     return abs
   }
 
-  // fail at CREATION, not mid-run: an invented model ref must never reach a frozen plan.
-  // Best-effort — when discovery is unavailable (offline, no listModels) nothing is blocked.
+  // best-effort: with no discovery available nothing is blocked
   const assertKnownModel = async (ref: string): Promise<void> => {
     if (!listModels) return
     const refs = await listModels().catch(() => null)
@@ -252,8 +191,6 @@ export function buildOrcActions(deps: {
     throw new Error(`unknown model '${ref}' — valid refs include: ${refs.slice(0, 8).join(', ')}${refs.length > 8 ? ', …' : ''}. Call available_models (copilot) or check orc's providers.`)
   }
 
-  // A door parses an authored draft; building the TEMPLATE and validating either source is this
-  // layer's — an authored draft used to reach proposePlan unchecked from the terminal.
   const draftFrom = async (taskId: string, plan: PlanSource): Promise<PlanDraft> => {
     const draft = 'draft' in plan
       ? plan.draft
@@ -264,15 +201,7 @@ export function buildOrcActions(deps: {
 
   return {
     async newTask(input, origin) {
-      // Same rule as `orc new`: a ROOT task lands in the checkout this process is serving, so the
-      // web and MCP doors agree with the terminal; a CHILD is left to the kernel's inheritance
-      // (createTaskIn), because a child of a task in another workspace must not be re-homed to
-      // whatever directory this process happens to serve — one subtree, one working directory.
-      // An explicit input.workspaceId wins over both.
-      // Named outright, so it is checked outright — the same rule `orc new --workspace` applies at
-      // the terminal. The kernel accepts an archived workspace by design (a merged workspace's
-      // subtree keeps growing); what this refuses is a caller filing NEW work into a checkout the
-      // operator finished with, which the default listing hides and the disk may no longer hold.
+      // a root lands in the served checkout, a child inherits its parent's; an explicit id wins
       if (input.workspaceId !== undefined) await requireLiveWorkspace(kernel, input.workspaceId)
       const workspaceId = input.workspaceId
         ?? (input.parentId === undefined ? await cwdWorkspaceId(kernel, plugin?.config.dir) : undefined)
@@ -281,8 +210,7 @@ export function buildOrcActions(deps: {
         return { taskId: t.id }
       }
       await assertKnownModel(input.grounded.modelRef)
-      // a null cwd stays null: requestRun then resolves the task's OWN workspace, so a task created
-      // in one worktree is never dragged into the directory this process happens to serve
+      // a null cwd stays null: requestRun resolves the task's own workspace
       const cwd = input.grounded.cwd === null ? null : assertRunnableCwd(input.grounded.cwd)
       const t = await kernel.createGroundedTask({
         title: input.title, spec: input.spec ?? '', parentId: input.parentId, budgetUSD: input.budgetUSD, workspaceId,
@@ -290,8 +218,6 @@ export function buildOrcActions(deps: {
         modelCatalog: await listModelOptions?.().catch(() => []) ?? [],
         ...(plugin ? { maxIterations: plugin.config.maxIterations } : {}),
       }, origin)
-      // the grounded template is policy-approved — the analyze→plan conversation starts now;
-      // callers watch progress over the event stream, nothing tails here
       await ensureRuntime()
       await kernel.requestRun(t.id, { ...(cwd !== null && { cwd }) }, origin)
       return { taskId: t.id }
@@ -308,55 +234,35 @@ export function buildOrcActions(deps: {
     },
 
     async approve(taskId, opts, origin) {
-      // Approving only UNBLOCKS a split child — something still has to execute it, and a bare
-      // approval used to leave the parent parked inside join_splits while the child never started.
-      // Same rule as reply: guarantee the supervisor BEFORE the event it has to react to.
+      // ensure the supervisor before the event it must react to: approval only unblocks a child
       if ((await kernel.getTask(taskId))?.parentId) await ensureRuntime()
       const plan = await kernel.approvePlan(taskId, opts.version, opts.approvedBy ? { approvedBy: opts.approvedBy } : undefined, origin)
       return { version: plan.version }
     },
 
     async listModels() {
-      // No discovery configured answers []: nothing is blocked, the same best-effort posture
-      // assertKnownModel holds.
       return listModels ? listModels() : []
     },
 
     async run(taskId, cwd, origin) {
-      // cwd is validated BEFORE the ask is recorded: an unrunnable directory must not become a
-      // request every supervisor that boots picks up and fails on again. An OMITTED cwd is passed
-      // on as omitted — the kernel resolves it from the task's workspace record, and substituting
-      // this process's directory here would run a task created in one worktree in another checkout.
+      // validate cwd BEFORE recording: an unrunnable directory would fail on every booting supervisor
       const resolved = cwd === null ? null : assertRunnableCwd(cwd)
-      // …and the SAME drivable-status admission the CLI `run` enforces (main.ts) and startRunAt
-      // (dbos-port.ts) enforces: a draft/unapproved/terminal task can never be served, so the web
-      // and MCP doors must refuse it here too rather than silently logging a run nobody can run.
       await assertDrivable(kernel, taskId)
       await ensureRuntime()
-      // conditional spread, not `{ cwd: resolved }`: requestRun reads `opts.cwd ?? the workspace's`,
-      // and an explicitly-undefined key is the same thing today — but the idiom keeps it that way
-      // if the option ever becomes a presence check.
+      // conditional spread: the idiom stays correct if requestRun's option becomes a presence check
       const since = await kernel.requestRun(taskId, { ...(resolved !== null && { cwd: resolved }) }, origin)
       return { requested: true, since }
     },
 
-    // Needs the plugin context, unlike the kernel call it replaces: a workspace's health is derived
-    // from the log AND counted out of the note read model, and a door that answered without them
-    // would hand back records with a health nobody measured.
     async listWorkspaces() {
       if (!plugin) throw new Error('listing workspaces needs a project context')
       return listWorkspaceHealth(plugin)
     },
 
     async newWorkspace(input, origin) {
-      // The worktree is created under the PROJECT ROOT, which only a project context knows — the
-      // same refusal `orc ws` makes, at the same boundary, before git is touched.
+      // the worktree is created under the project root, which only a project context knows
       if (!plugin) throw new Error('creating a workspace needs a project context')
-      // ONE implementation with `orc ws new` (createRequestWorkspace, workspace-ops.ts — the lifecycle
-      // operations both doors call): a second copy here would be a second
-      // answer to where a request's checkout comes from, and the doors would drift on the branch
-      // name, the base or the rollback. `task: true` is not a default this door hides — a driver
-      // asking for a workspace is asking for the request; --no-task is a terminal affordance.
+      // one implementation with `orc ws new`; `task: true` because a driver asks for the request
       const { workspace, taskId } = await createRequestWorkspace(kernel, plugin.config, {
         title: input.title, spec: input.spec ?? '', base: input.base ?? HEAD_REF, task: true,
       }, origin)
@@ -364,25 +270,15 @@ export function buildOrcActions(deps: {
     },
 
     async reply(taskId, text, projectId, origin) {
-      // this door's own project: the answer only unblocks the step; a supervisor is what carries it
-      // into the parked workflow (its router reacts to feedback_provided) and keeps executing, so
-      // guaranteeing one is what makes the answer's promise true.
+      // the answer only unblocks the step; a supervisor carries it into the parked workflow
       if (!projectId || projectId === plugin?.config.projectId) {
         await ensureRuntime()
         const topic = await kernel.replyFeedback(taskId, text, origin)
         return { answered: topic !== null, supervised: true }
       }
-      // A FOREIGN project — the graph UI's chat switcher can see one, and a question it displays has
-      // to be answerable. This is an append into that project's own log and nothing else: no runtime
-      // is spawned, because EXECUTION is what stays bound to the directory orc was started in
-      // (ensureRuntime's spawn, the DBOS port, the in-process zone write-fence), and answering is
-      // not execution. Whether anything is live over there is reported, never assumed: with no
-      // supervisor the row simply waits, exactly as `orc reply` from a fresh terminal always did.
+      // a foreign project: append only and spawn nothing; execution stays bound to the started directory
       if (!plugin) throw new Error('answering another project needs a project context')
-      // ponytail: one short-lived pool per answered question (the newProject/deleteProject shape) —
-      // a human-rate action, so it is not worth reaching into the graph server's cached per-project
-      // sessions for. Doing that would also make the read-side session store a writer, and would
-      // only serve the web door; this serves every door that holds a project context.
+      // one short-lived pool per answered question: a human-rate action
       const storage = await openStorage(plugin.config.databaseUrl, { projectId })
       try {
         const topic = await new Kernel(storage.events).replyFeedback(taskId, text, origin)
@@ -437,23 +333,13 @@ export function buildOrcActions(deps: {
       if (!plugin) throw new Error('creating projects needs a project context')
       const abs = path.resolve(dir)
       if (!existsSync(abs)) throw new Error(`directory does not exist: ${abs}`)
-      // a directory that already holds (or resolves, via resolveProjectRoot, to) an orc project
-      // is REUSED, never re-minted — "new chat" on a known folder means "open that project", the
-      // name becomes its display name. `existsSync(.orc)` used to gate this, but a directory can
-      // resolve to an ALREADY-initialized project without holding `.orc` itself (a subdirectory
-      // of a linked worktree resolves to the main checkout's identity) — that fell through to
-      // initializeProject, which now throws "already initialized" instead of reusing. loadConfig
-      // already answers `null` for a plain, uninitialized directory, so it alone is the check.
+      // loadConfig answers null for an uninitialized dir; existsSync(.orc) misses worktree subdirectories
       const existing = loadConfig(abs).projectId
       const projectId = existing ?? initializeProject(abs, name).projectId
       // first events = the checkout and the identity: listable, named, and locatable immediately
       const storage = await openStorage(plugin.config.databaseUrl, { projectId })
       try {
-        // Adopt the new project's own checkout into its OWN log before writing into it. Not
-        // `doorAuthor()`: that names the workspace of the directory THIS process serves, which is a
-        // different project entirely — its id means nothing in the log being seeded here. Adoption
-        // is idempotent (ensureWorkspace keys on cwd), so reusing an existing project re-finds the
-        // record instead of minting a second one.
+        // adopt into the new project's OWN log, not doorAuthor()'s workspace, which is another project's
         const created = loadConfig(abs)
         const projectKernel = new Kernel(storage.events)
         await adoptCwd(projectKernel, created, origin)
@@ -468,23 +354,19 @@ export function buildOrcActions(deps: {
       if (!plugin?.storage) throw new Error('purging needs a project context')
       await refuseWhileSupervised(plugin.storage, 'purge')
       const warnings: string[] = []
-      // read before the wipe, which removes workspace_created; the restore keeps the checkout's id
-      // the REASON travels with the miss: "no workspace is recorded" is only one of the ways this
-      // can fail (an unreadable log, a fold that threw), and reporting that sentence for all of them
-      // sends an operator to re-adopt a checkout that was never the problem
+      // read before the wipe removes workspace_created; the miss carries its reason, not one sentence
       interface HomeWorkspace { workspace: Workspace | null; reason: string | null }
       const home: HomeWorkspace = await cwdWorkspace(kernel, plugin.config.dir)
         .then((workspace): HomeWorkspace => ({ workspace, reason: null }))
         .catch((err: unknown): HomeWorkspace => ({ workspace: null, reason: errorMessage(err) }))
-      // 1. stop the engine: truncating the DBOS system db erases pending workflows (crashed
-      //    runs included) WITHOUT launching the runtime — a launch would start recovering
-      //    exactly the workflows we are deleting. Statuses need no stamping: the log goes next.
+      const loggedName = await kernel.state().then(s => s.project?.name, () => undefined)
+      // stop the engine first: a DBOS launch would start recovering the workflows being deleted
       try {
         await resetSystemDatabase(plugin.config.systemDatabaseUrl)
       } catch (err) {
         warnings.push(`durable-execution state not reset (${errorMessage(err)}) — restart orc before the next run`)
       }
-      // 2. the history: every event + journal row, one locked transaction
+      // the history: every event + journal row, one locked transaction
       const counts = await plugin.storage.purge()
       if (home.workspace === null) {
         warnings.push(`workspace not restored (${home.reason}) — run any orc command from the project checkout to restore it`)
@@ -496,13 +378,13 @@ export function buildOrcActions(deps: {
         }
       }
       try {
-        await kernel.identifyProject({ name: plugin.config.projectName, dir: plugin.config.dir }, origin)
+        await kernel.identifyProject({ name: loggedName ?? plugin.config.projectName, dir: plugin.config.dir }, origin)
       } catch (err) {
         warnings.push(`project identity not re-seeded (${errorMessage(err)})`)
       }
-      // 3. vault task traces: dead task folders would linger — drop them, re-render the index
+      // vault task traces: dead task folders would linger — drop them, re-render the index
       try {
-        rmSync(path.join(plugin.config.vaultDir, 'tasks'), { recursive: true, force: true })
+        rmSync(path.join(plugin.config.vaultDir, VAULT_TASKS_DIR), { recursive: true, force: true })
         await createVaultProjector({ log: plugin.log, config: plugin.config }).renderAll()
       } catch (err) {
         warnings.push(`vault trace not cleared (${errorMessage(err)})`)
@@ -512,16 +394,10 @@ export function buildOrcActions(deps: {
 
     async deleteProject(projectId, origin) {
       if (!plugin) throw new Error('deleting projects needs a project context')
-      // only the HOME project's supervisor is visible from here — deleting a foreign project cannot
-      // check its runtime, and does not need to: this guard exists for the tree you are sitting in
+      // only the HOME project's supervisor is visible from here; a foreign runtime cannot be checked
       if (plugin.storage && projectId === plugin.config.projectId) await refuseWhileSupervised(plugin.storage, 'delete')
       const warnings: string[] = []
-      // stop-then-wipe, same order as purge; no identity re-seed — deletion IS the point.
-      // Deleting the HOME project is allowed too: full wipe, though it stays listed (empty)
-      // while this server runs from it.
-      // DROP, not truncate: purge keeps the chat and so needs the schema, but a deleted project has
-      // no runtime left to hold one. Truncating left an empty database object per deleted project
-      // that nothing ever collected.
+      // DROP, not truncate: a deleted project has no runtime left to hold the schema
       try {
         await dropSystemDatabase(deriveSystemUrl(plugin.config.databaseUrl, projectId))
       } catch (err) {
@@ -530,12 +406,10 @@ export function buildOrcActions(deps: {
       const storage = await openStorage(plugin.config.databaseUrl, { projectId })
       try {
         const counts = await storage.purge()
-        // The rendered trace goes only for the HOME project: its vault path comes from config and
-        // is trusted, while a foreign project's vault lives in ITS directory, which this server has
-        // no business deleting from — so that case is reported rather than guessed at.
+        // only the HOME project's rendered trace goes: a foreign vault lives in its own directory
         if (projectId === plugin.config.projectId) {
           try {
-            rmSync(path.join(plugin.config.vaultDir, 'tasks'), { recursive: true, force: true })
+            rmSync(path.join(plugin.config.vaultDir, VAULT_TASKS_DIR), { recursive: true, force: true })
           } catch (err) {
             warnings.push(`vault trace not cleared (${errorMessage(err)})`)
           }
@@ -549,9 +423,7 @@ export function buildOrcActions(deps: {
     },
 
     async cancel(taskId, origin) {
-      // The append half only: stamping the subtree cancelled is what a client can do without a
-      // runtime, and the supervisor's router does the DBOS half off each cancelled status. With no
-      // supervisor up there is nothing running to cancel, and the next one to boot sweeps it.
+      // append half only: with no supervisor up nothing runs to cancel and the next boot sweeps it
       return { cancelled: await kernel.cancelSubtree(taskId, origin) }
     },
   }

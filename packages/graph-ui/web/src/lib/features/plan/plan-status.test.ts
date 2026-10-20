@@ -15,10 +15,6 @@ describe('waveState', () => {
     expect(waveState(['completed', 'running'])).toBe('running')
   })
 
-  /**
-   * Order matters here. A wave holding one failure AND one still-running step is RUNNING: the
-   * operator can still act on it, and calling it failed would announce it as over.
-   */
   it('reports running over failed while anything is still going', () => {
     expect(waveState(['failed', 'running'])).toBe('running')
     expect(waveState(['failed', 'pending'])).toBe('failed')

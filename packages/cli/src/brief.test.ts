@@ -66,8 +66,6 @@ describe('buildBrief', () => {
     expect(must(b.tasks[0], 'orphan task').workspaceTitle).toBeNull()
   })
 
-  // gatherBrief hands over archived workspaces for exactly this: a task outlives the archiving of
-  // its workspace, and without the row its label would read as a log defect.
   it('a task in an archived workspace keeps its label', () => {
     const b = buildBrief(input({
       workspaces: [row(HERE, 'search', WORKSPACE_STATE.idle), row(OTHER, 'import', WORKSPACE_STATE.idle, {}, '2026-09-01T00:00:00.000Z')],

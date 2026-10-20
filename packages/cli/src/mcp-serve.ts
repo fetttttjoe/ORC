@@ -1,22 +1,10 @@
-// orc mcp serve — door #2 of the two-doors model: an external agent (Claude Code, any MCP
-// client) uses the substrate BEHIND the flow over stdio — event-sourced state, plans,
-// transcripts, knowledge, and (this slice) mutations under an explicit autonomy dial.
-//
-// Autonomy is a LAUNCH-TIME choice, never the agent's (P2's lesson, structurally):
-//   --autonomy gated (default): everything except approve; the human gate stays human.
-//   --autonomy full: the client may approve — every approval is attributed `approvedBy: mcp`.
-//
-// stdout discipline, two layers:
-//   1. bin.ts rebinds console log/info/debug → stderr BEFORE any boot code runs.
-//   2. Here, the transport gets the REAL stdout and process.stdout.write is rerouted to
-//      stderr — so when a mutation lazily boots DBOS, winston (which writes to
-//      process.stdout directly, past console) cannot corrupt the protocol channel.
+// autonomy is a launch-time choice, never the agent's: --autonomy gated (default) or full
 import { Writable } from 'node:stream'
 import { z } from 'zod'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { ApprovedBy, Door, errorMessage, NO_CHAT, toolError, type MemoryAuthor, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
+import { ApprovedBy, Door, errorMessage, NO_CHAT, toolError, type Author, type ResolvedTool, type SupervisorHealth } from '@orc/contracts'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
 import { knowledgeAccess, openKnowledge } from './knowledge-open'
 import { KNOWLEDGE_HEALTH_TTL_MS } from './knowledge-health-of'
@@ -26,14 +14,10 @@ import { asResolvedTools, buildCopilotTools, createProjectSessions, type OrcActi
 
 export type Autonomy = 'gated' | 'full'
 
-// The zod twin of the advertised JSON inputSchema below. The input crosses a trust boundary —
-// any MCP client can send any shape — and a typecast here once let a non-string taskId ride
-// straight into actions.approve; the advertised schema is documentation, never enforcement.
+// the zod twin of the advertised inputSchema, which is documentation, never enforcement
 const ApproveInput = z.object({ taskId: z.string().min(1), version: z.number().int().min(1).optional() })
 
-// The ONE approve tool for door #2 — exported for tests. Under `gated` it refuses with the
-// path forward; under `full` it approves with source attribution. It exists as a separate
-// tool (not in the copilot set) because the two doors differ EXACTLY here, by design.
+// separate from the copilot set because the two doors differ exactly at approve
 export function mcpApproveTool(actions: OrcActions, autonomy: Autonomy): ResolvedTool {
   return {
     ref: 'orc/approve', name: 'approve',
@@ -65,7 +49,7 @@ export function mcpApproveTool(actions: OrcActions, autonomy: Autonomy): Resolve
 const MCP_ORIGIN = NO_CHAT(Door.mcp)
 
 export function serveHealth(
-  knowledge: Parameters<typeof knowledgeHealth>[0], author: MemoryAuthor, supervisor?: () => Promise<SupervisorHealth>,
+  knowledge: Parameters<typeof knowledgeHealth>[0], author: Author, supervisor?: () => Promise<SupervisorHealth>,
 ) {
   const knowledgeOf = memoizeFor(KNOWLEDGE_HEALTH_TTL_MS, () => knowledgeHealth(knowledge, author))
   return async () => ({
@@ -85,14 +69,10 @@ export function buildServeTools(deps: {
   listWorkspaces?: Parameters<typeof buildCopilotTools>[0]['listWorkspaces']
 }): ResolvedTool[] {
   return [
-    // one tool definition, two doors: the copilot set (read + mutate-without-approve, P2).
-    // listModels is wired here too — this door drives agents that must never invent a model ref,
-    // and the catalog is one more view over the read model this door already holds. An empty
-    // catalog, never a 404: a project with no discovery yet has no models to name.
+    // listModels is wired here too: an agent that cannot name a model would invent one
     ...asResolvedTools(buildCopilotTools({
       sessions: deps.sessions, actions: deps.actions, projectId: deps.projectId, origin: MCP_ORIGIN,
-      // ONE core, two doors, no flag: it discovers here too — an agent answered { refs: [] } on a
-      // project with no catalog yet cannot name a model. The stall is bounded inside discovery.
+      // no flag: it discovers here too, bounded inside discovery
       listModels: async () => deps.actions ? deps.actions.listModels() : [],
       ...(deps.health && { health: deps.health }),
       ...(deps.listWorkspaces && { listWorkspaces: deps.listWorkspaces }),
@@ -102,7 +82,7 @@ export function buildServeTools(deps: {
   ]
 }
 
-// The `executor` main.ts stamps on the author of this door's knowledge reads; shared so the name is spelled once.
+// the `executor` main.ts names on this door's knowledge-read author, spelled once
 export const MCP_SERVE_EXECUTOR = 'mcp-serve'
 
 export async function startMcpServe(opts: {
@@ -110,21 +90,16 @@ export async function startMcpServe(opts: {
   log: EventLog
   actions: OrcActions | null // null = read-only server (no port factory available)
   autonomy: Autonomy
-  // "is anything driving?" for project_status — injected because the heartbeat table and pid
-  // file live behind the caller's storage; absent = the field is omitted, never fabricated
+  // absent = the field is omitted, never fabricated
   supervisor?: () => Promise<SupervisorHealth>
-  // "which checkout is this task in, and is it still going anywhere?" for project_status —
-  // injected for the same reason supervisor is: this module holds a log and a sessions store,
-  // never a kernel, and the health half also needs a filesystem probe and the note read model.
-  // Typed off buildCopilotTools so this door and the console cannot drift on the shape.
+  // typed off buildCopilotTools so this door and the console cannot drift on the shape
   listWorkspaces?: Parameters<typeof buildCopilotTools>[0]['listWorkspaces']
-  // Authors the knowledge_delivered evidence of this door's knowledge reads; built by main.ts, which holds the kernel.
-  memoryAuthor: MemoryAuthor
+  // authors this door's knowledge_delivered evidence; built by main.ts, which holds the kernel
+  author: Author
 }): Promise<void> {
-  const { config, log, actions, autonomy, supervisor, listWorkspaces, memoryAuthor } = opts
+  const { config, log, actions, autonomy, supervisor, listWorkspaces, author } = opts
 
-  // stdout hardening layer 2: the transport keeps the real stdout; everything else — winston
-  // when DBOS boots for run/retry/cancel, any stray library print — lands on stderr.
+  // transport keeps the real stdout; stray prints (winston under DBOS boot) land on stderr
   const realWrite = process.stdout.write.bind(process.stdout)
   const transportOut = new Writable({
     write(chunk, _enc, cb) { realWrite(chunk as Uint8Array); cb() },
@@ -139,9 +114,9 @@ export async function startMcpServe(opts: {
   const knowledge = knowledgeAccess(openKnowledge(config), log, config.dir)
   const tools = buildServeTools({
     sessions, projectId: config.projectId, actions, autonomy,
-    knowledgeTools: knowledgeTools(knowledge, memoryAuthor, KNOWLEDGE_READ_TOOLS),
+    knowledgeTools: knowledgeTools(knowledge, author, KNOWLEDGE_READ_TOOLS),
     ...(listWorkspaces && { listWorkspaces }),
-    health: serveHealth(knowledge, memoryAuthor, supervisor),
+    health: serveHealth(knowledge, author, supervisor),
   })
   const byName = new Map(tools.map(t => [t.name, t]))
 

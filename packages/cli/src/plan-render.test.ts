@@ -35,9 +35,6 @@ describe('renderPlanHuman', () => {
   })
 })
 
-// Reproduced live 2026-07-26: the plan agent's prose said "verify depends on draft"; the verify
-// plan-note had links: []. finalize_plan froze dependsOn: [] and the two raced. The plan hash binds
-// the human's approval to the note graph — which they were never shown.
 describe('renderDerivedPlan', () => {
   const step = (id: string, dependsOn: string[] = [], zone: string[] = []) =>
     ({ id, role: 'implementer', title: id, instructions: 'x', dependsOn, skillRefs: [], toolRefs: [], zone })

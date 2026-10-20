@@ -6,17 +6,7 @@
   import { linkRefusal, linkSteps, type EditableStep } from './plan-edit'
   import { DEFAULT_GEOMETRY } from './plan-geometry'
 
-  /**
-   * The plan as a DAG, in waves. Answers what the rail cannot: which step gates which.
-   *
-   * Thin ON PURPOSE — it composes plan-flow (adapter), FlowCanvas (renderer) and plan-edit (rules),
-   * and holds no logic of its own. Everything a test would want to assert lives in one of those
-   * three, none of which needs a browser.
-   *
-   * `onlink` is the pre-approval editor's seam: pass it and the canvas grows connection handles,
-   * the cycle guard runs, and the caller receives the NEW step array to persist through the `edit`
-   * action. Leave it off and this is a read-only picture. Nothing else changes between the two.
-   */
+  // The plan as a DAG in waves; thin on purpose: logic lives in plan-flow, FlowCanvas and plan-edit
   interface Props {
     steps: readonly (FlowStep & EditableStep)[]
     /** run status per step id; anything missing is pending */
@@ -33,9 +23,7 @@
 
   const flow = $derived(planToFlow(steps, { statusOf, editable: onlink !== undefined }))
 
-  // Inline, the canvas is sized to its own drawing and bounded, so a wide plan cannot push the
-  // rest of the inspector off the pane. Expanded, it fills whatever box the caller gives it —
-  // the dialog owns the height there, because only it knows the viewport.
+  // Inline the canvas is bounded to its drawing; expanded it fills the box the dialog gives it
   const height = $derived(
     expanded ? '100%' : `${Math.min(460, Math.max(180, flow.height + DEFAULT_GEOMETRY.padTop * 2))}px`,
   )

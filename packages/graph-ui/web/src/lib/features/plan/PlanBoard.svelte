@@ -7,15 +7,7 @@
   import { STEP_STATUS, waveState } from './plan-status'
   import type { WaveStep } from '$lib/api/types'
 
-  /**
-   * A plan as it EXECUTES: waves down the page, the steps of a wave side by side because they run
-   * side by side, and a rail whose colour says how far the run has got. The old chip rows said
-   * what the steps were called but not what the shape meant — which wave gates which, what is
-   * running now, what is left.
-   *
-   * Deliberately not a node-link diagram: a frozen plan is a sequence of parallel waves, and
-   * drawing it as one loses the only structure that matters at a glance.
-   */
+  // A plan as it EXECUTES: waves down the page, a wave's parallel steps side by side, a progress rail
   let {
     taskId,
     waves,

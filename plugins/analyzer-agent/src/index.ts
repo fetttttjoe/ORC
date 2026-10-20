@@ -3,8 +3,7 @@ import { STEP_ID, STEP_ROLE, IsolationTier, type Analyzer, type PlanStep } from 
 export function agentAnalyzer(): Analyzer {
   return {
     id: 'agent-analyzer',
-    // Amendment A: the analyze phase is a normal scout step running the codebase-analysis skill.
-    // ast-analyzer (deferred) returns a different step (or structural routine) behind this seam.
+    // analyze is a scout step running the codebase-analysis skill; another analyzer swaps in here
     analysisStep: ({ modelRef }): PlanStep => ({
       id: STEP_ID.analyze, role: STEP_ROLE.scout, title: 'Analyze the codebase',
       instructions: 'Ground the plan per the codebase-analysis skill.',

@@ -1,6 +1,4 @@
-// Shared CLI-test scaffolding: a `Command`-per-call CLI runner and the throwing stubs the
-// served-tool surface is built from. One spelling of each, so the CLI test files that need them
-// cannot drift against each other.
+// shared CLI-test scaffolding: a Command-per-call runner and throwing stubs for the served tools
 import { spyOn } from 'bun:test'
 import type { Command } from 'commander'
 import type { EventRecord, ExecutionPort } from '@orc/contracts'
@@ -12,10 +10,7 @@ import { buildProgram } from './main'
 
 type PluginContext = { host: PluginHost; hub: McpHub; config: ProjectConfig; log: EventLog; storage?: Storage }
 
-// exitOverride must reach NESTED subcommands too (e.g. `ws ls`): commander only copies
-// the setting to children created AFTER the call, and buildProgram builds every subcommand up
-// front — so an option error on one would call process.exit(1) and kill the whole test process
-// mid-suite instead of rejecting.
+// exitOverride must reach nested subcommands: commander copies it only to children created after
 function overrideExits(program: Command): Command {
   const walk = (c: Command): void => {
     c.exitOverride()
@@ -25,10 +20,7 @@ function overrideExits(program: Command): Command {
   return program
 }
 
-// One console.log spy per CLI under test, and `run()` hands back only the lines ITS OWN
-// invocation printed (never the accumulated buffer): a cumulative array makes assertions
-// unfalsifiable, since lines an earlier call in the same test printed already carry whatever the
-// next call would too.
+// run() returns only its own lines: a cumulative buffer makes assertions unfalsifiable
 export function cli(kernel: Kernel | null, port?: () => Promise<ExecutionPort>, plugin?: PluginContext) {
   const lines: string[] = []
   spyOn(console, 'log').mockImplementation((...a: unknown[]) => { lines.push(a.join(' ')) })
@@ -41,12 +33,7 @@ export function cli(kernel: Kernel | null, port?: () => Promise<ExecutionPort>, 
   return { run, lines }
 }
 
-// Honest stubs for the ui-core ports buildServeTools/mcpApproveTool take: every member throws unless
-// overridden, so an unexercised call surfaces instead of a cast lying about completeness. Shared
-// because two suites build the served tool surface — the MCP door's own tests, and the check that
-// the Claude Code plugin's skills name only tools that door serves.
-// ponytail: mirrors the unsupported() helper in packages/ui-core/src/copilot.test.ts; one home for
-// both would have to be production source in ui-core.
+// honest stubs: every member throws unless overridden, so no cast lies about completeness
 export const unsupported = (name: string) => async (): Promise<never> => { throw new Error(`${name} not available in this test`) }
 export const sessionsStub = (over: Partial<ProjectSessions> = {}): ProjectSessions => ({
   projects: unsupported('projects'), model: unsupported('model'), snapshot: unsupported('snapshot'), subscribe: unsupported('subscribe'),
@@ -54,8 +41,7 @@ export const sessionsStub = (over: Partial<ProjectSessions> = {}): ProjectSessio
   since: unsupported('since'), reset: unsupported('reset'), close: unsupported('close'), ...over,
 })
 
-// A session answering every read from these EVENTS: the served tools read through the view
-// registry, so a test hands them a log rather than one canned method per tool.
+// answers every read from these EVENTS: the served tools read through the view registry
 export const sessionsOf = (events: EventRecord[], over: Partial<ProjectSessions> = {}): ProjectSessions =>
   sessionsStub({ model: async () => modelOf(events), ...over })
 export const actionsStub = (over: Partial<OrcActions> = {}): OrcActions => ({

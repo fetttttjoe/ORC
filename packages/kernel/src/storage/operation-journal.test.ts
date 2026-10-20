@@ -24,8 +24,7 @@ const CONTEXT = {
 const SPEC: OperationSpec = { operationId: 'step:t1:s1:a1:model:1', kind: OperationKind.model, name: 'fake/m', before: {} }
 
 describe('OperationJournal envelope', () => {
-  // the journal appends on four paths; one that spelled its own envelope would drop the chat the
-  // operation ran in, and the events would be unattributable to the interaction that caused them
+  // one path spelling its own envelope would drop the chat the operation ran in
   it('stamps every transition it appends with the context origin', async () => {
     const { events: log, operations: journal } = await freshStorage()
     await journal.beginOperation(CONTEXT, SPEC)

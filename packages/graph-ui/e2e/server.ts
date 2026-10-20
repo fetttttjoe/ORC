@@ -1,7 +1,6 @@
-// E2E fixture server (run by playwright's webServer): real Postgres test db, seeded state,
-// scripted copilot, kernel-backed newTask — everything else read-only-stubbed.
+// E2E fixture server: real Postgres test db, seeded state, scripted copilot, kernel-backed newTask
 import { MockLanguageModelV4 } from 'ai/test'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, FailureClass, KnowledgeHealthState, NO_CHAT, STEP_ID, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, FailureClass, KnowledgeHealthState, NO_CHAT, STEP_ID, SupervisorHealthState, TASK_STATUS, WORKSPACE_KIND } from '@orc/contracts'
 import { TEST_WORKSPACE_ID, stepFixture } from '@orc/contracts/fixtures'
 import { draftFixture } from '@orc/contracts/fixtures'
 
@@ -16,26 +15,17 @@ import { startGraphUi } from '../src/server'
 
 export const E2E_PORT = 7911
 
-// The two origins this fixture speaks as: the operator seeding through the terminal, and the
-// supervisor stamping what a running step produced.
 const SEED = NO_CHAT(Door.cli)
 const AGENT = NO_CHAT(Door.supervisor)
 
 const db = await createTestDb()
 const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
 const kernel = new Kernel(storage.events)
-// Every task names a workspace, so the fixture adopts one before it seeds anything — the same
-// thing a real boot does for the checkout it runs in.
 const { workspace } = await kernel.ensureWorkspace({ cwd: '/e2e', branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true }, SEED)
 const seeded = await kernel.createTask({ workspaceId: workspace.id, title: 'hello world request', spec: 'write hello.txt' }, SEED)
 await kernel.proposePlan(seeded.id, draftFixture(), SEED)
-// approved, so the projection emits STEP nodes: without them the contract test can only ever
-// see one node kind, and the step/artifact shapes go unchecked
 await kernel.approvePlan(seeded.id, undefined, undefined, SEED)
 
-// The approval-gate scenario, on its own task so the seeded request's journey stays untouched:
-// a plan-step question is OPEN, so the pane offers the one-click approve. Answering it drives
-// the reply action below, which reproduces the failure this fixture exists to prove is visible.
 const GATE_RUN_TOKEN = 'e2e-gate-run'
 const gated = await kernel.createTask({ workspaceId: workspace.id, title: 'gated plan request', spec: 'decompose something' }, SEED)
 const gateEnvelope = { ...AGENT, taskId: gated.id, stepId: STEP_ID.plan, runToken: GATE_RUN_TOKEN }
@@ -44,12 +34,6 @@ await storage.events.append({
   payload: { topic: 'plan-gate', question: 'approve this plan?' },
 })
 
-// The FINISH step's own question, on its own task. The kernel appends a finish step to every root
-// plan and it asks once before the task completes, so this is the gate an operator meets most —
-// and it reads the same approval word the plan gate does, which is why GateCard offers one-click
-// approve for it too. Seeded SEPARATELY from the plan gate above because that affordance is keyed
-// on the STEP ID: with only a plan gate in the fixture, "the button is on the plan step" and "the
-// button is on every open question" are indistinguishable.
 const FINISH_GATE_QUESTION = 'SUMMARY: 2 notes kept, 1 rewritten, no decision. Reply approve to finish.'
 const finishing = await kernel.createTask({ workspaceId: workspace.id, title: 'finishing request', spec: 'work that is done and being summarised' }, SEED)
 await storage.events.append({
@@ -57,10 +41,6 @@ await storage.events.append({
   payload: { topic: 'finish', question: FINISH_GATE_QUESTION },
 })
 
-// TWO open questions on ONE task, different topics, neither answered. operatorState's
-// openQuestions is keyed by (taskId, topic) — task-only would collapse this pair into one entry,
-// and a `{#each}` keyed on taskId alone would then render one gate card where the operator is
-// actually owed two answers.
 const MULTI_Q_TOPIC_A = 'grounding-model'
 const MULTI_Q_TOPIC_B = 'grounding-cwd'
 const MULTI_Q_QUESTION_A = 'which model should analyze this?'
@@ -75,11 +55,6 @@ await storage.events.append({
   payload: { topic: MULTI_Q_TOPIC_B, question: MULTI_Q_QUESTION_B },
 })
 
-// A copilot exchange, then 450 tool_call events with no exchange among them. The copilot pane
-// used to restore history from a fixed-size tail of the WHOLE project log (api.log's `limit`); a
-// burst of agent-loop noise after the one exchange it needs to find pushed it out of that window
-// entirely — reproduced here, not hypothesised. The view-registry fix filters by KIND before
-// slicing (timeline.ts), so the exchange is found regardless of what runs after it.
 const BURIED_EXCHANGE_USER = 'what happened while I was away?'
 const BURIED_EXCHANGE_ASSISTANT = 'a step failed and was retried; the retry is running now'
 const buried = copilotChat({ chatId: null, taskId: null, workspaceId: null, title: chatTitleOf(BURIED_EXCHANGE_USER) }, () => 'e2e-buried-chat')
@@ -94,10 +69,7 @@ for (let i = 1; i <= 450; i++) {
   })
 }
 
-// The log tab's pin-to-bottom is only observable when the inspector actually overflows — a
-// handful of seeded lifecycle events all fit the 900px viewport, so "pinned" would be trivially
-// true. Enough tool calls that the panel scrolls; tool_call adds no graph nodes and rides the
-// conversation's one-line ticker, so no other scenario's assertions see them.
+// Enough tool calls that the inspector overflows, or pinned-to-bottom is trivially true
 for (let i = 1; i <= 60; i++) {
   await storage.events.append({
     ...AGENT, taskId: seeded.id, stepId: STEP_ID.analyze, runToken: 'e2e-log-run', kind: EVENT_KIND.tool_call,
@@ -105,9 +77,6 @@ for (let i = 1; i <= 60; i++) {
   })
 }
 
-// A gate whose question is a whole plan. Tall on purpose: an unbounded gate block used to grow
-// past the pane and paint over the copilot beneath it, and the layout test needs its own task so
-// the answer-refusal scenario above cannot retire it first.
 const tall = await kernel.createTask({ workspaceId: workspace.id, title: 'tall gate request', spec: 'a plan with many waves' }, SEED)
 await storage.events.append({
   ...AGENT, taskId: tall.id, stepId: STEP_ID.plan, runToken: 'e2e-tall-run', kind: EVENT_KIND.feedback_requested,
@@ -117,9 +86,6 @@ await storage.events.append({
   },
 })
 
-// A plan with REAL topology: a diamond over three waves (analyze -> left ∥ right -> join). The
-// single-step draftFixture cannot exercise the dependency graph's subflows at all — one wave, one
-// node, no edges — so multi-wave rendering shipped unproven until this existed.
 const shaped = await kernel.createTask({ workspaceId: workspace.id, title: 'shaped plan request', spec: 'a diamond plan' }, SEED)
 await kernel.proposePlan(shaped.id, draftFixture([
   stepFixture({ id: 'analyze', title: 'analyze', dependsOn: [] }),
@@ -129,10 +95,6 @@ await kernel.proposePlan(shaped.id, draftFixture([
 ]), SEED)
 await kernel.approvePlan(shaped.id, undefined, undefined, SEED)
 
-// A task mid-run. The run monitor only exists while something executes, so without a seeded
-// running step it would ship unexercised — and a panel that renders nothing is exactly the
-// failure mode the wire-shape bugs took four rounds to surface. Iteration 4 of a ceiling of 5
-// also puts the bar in its near-ceiling branch.
 const LIVE_RUN_TOKEN = 'e2e-live-run'
 const live = await kernel.createTask({ workspaceId: workspace.id, title: 'live run request', spec: 'work that is still going' }, SEED)
 await kernel.proposePlan(live.id, draftFixture(), SEED)
@@ -151,10 +113,6 @@ await storage.events.append({
   payload: { stepId: LIVE_STEP_ID, runToken: LIVE_RUN_TOKEN, iteration: 4, request: {}, response: {} },
 })
 
-// A run an AUDITOR REJECTED. The pane must offer replan, never retry: retry re-runs only what did
-// not complete, so the rejecting step would meet the same completed siblings and reach the same
-// verdict. Seeded because nothing else in this fixture produces a `rejected` failure, and the
-// affordance shipped once as a button that silently did nothing.
 const REJECT_RUN_TOKEN = 'e2e-reject-run'
 const REJECT_STEP_ID = stepFixture().id
 const rejected = await kernel.createTask({ workspaceId: workspace.id, title: 'rejected plan request', spec: 'work an auditor judged unacceptable' }, SEED)
@@ -215,11 +173,7 @@ const unsupported = (name: string) => async (): Promise<never> => { throw new Er
 const actions: OrcActions = {
   newTask: async (input, origin) => ({ taskId: (await kernel.createTask({ workspaceId: workspace.id, title: input.title, spec: input.spec ?? '' }, origin)).id }),
   propose: unsupported('propose'),
-  // kernel-backed, not stubbed: `edit` is the documented repair path for a BLOCKED task
-  // (kernel.editPlan stamps blocked -> awaiting_approval), and the console's reopen button is its
-  // only caller. Stubbing it unsupported would let that button be tested without being exercised.
-  // A template edit needs the strategy runner this fixture has no supervisor for; only the
-  // console's reopen path (a concrete draft) is exercised here.
+  // kernel-backed so the reopen button is exercised; template edits need a supervisor
   edit: async (taskId, draft, origin) => {
     if ('template' in draft) throw new Error('template edit not available in e2e fixture')
     return { version: (await kernel.editPlan(taskId, draft.draft, origin)).version }
@@ -229,9 +183,6 @@ const actions: OrcActions = {
   }),
   run: unsupported('run'),
   listModels: unsupported('listModels'),
-  // The measured bug, scripted: the answer lands, and then finalize_plan rejects it. Before this
-  // fix the pane rendered the receipt and nothing else, so eight approvals in a row read as the
-  // system running in circles.
   reply: async (taskId, text, _projectId, origin) => {
     await storage.events.append({
       ...gateEnvelope, ...origin, taskId, kind: EVENT_KIND.feedback_provided,
@@ -279,7 +230,7 @@ startGraphUi({
   copilot: { resolveModel: () => copilotModel, defaultModelRef: 'mock/e2e', price: () => 0.0001 },
   defaultCwd: '/tmp',
   // no supervisor runs behind the fixture, and the console must SAY that rather than look idle
-  health: async () => ({ knowledge: { state: KnowledgeHealthState.ok, claims: 1, suspect: 0 }, supervisor: { state: 'none' as const } }),
+  health: async () => ({ knowledge: { state: KnowledgeHealthState.ok, claims: 1, suspect: 0 }, supervisor: { state: SupervisorHealthState.none } }),
   appendExchange: async x => appendCopilotExchange(storage.events, x, Door.web),
 })
 console.log(`e2e server on http://127.0.0.1:${E2E_PORT}`)

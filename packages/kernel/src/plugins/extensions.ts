@@ -12,16 +12,12 @@ const ExtensionManifestShape = z.object({
   activate: z.custom<ExtensionManifest['activate']>(v => typeof v === 'function'),
 })
 
-// A type predicate over safeParse, not the parsed value itself: z.object() strips keys the
-// schema doesn't declare, and the caller stores the ORIGINAL module object (so an untyped
-// `deactivate` on it still gets called at shutdown).
+// predicate, not the parsed value: z.object strips keys, and the original module is stored
 const isManifest = (v: unknown): v is ExtensionManifest => ExtensionManifestShape.safeParse(v).success
 
 export interface LoadedExtension { path: string; manifest: ExtensionManifest }
 
-// T2 loader: full-access in-process code, gated by the local trust store. Reload is
-// cache-eviction by directory prefix — evicting only the entry file would re-bind it
-// to stale cached deps (spike 2026-07-17), so the whole extension dir is evicted.
+// reload evicts the whole extension dir: evicting only the entry file keeps stale cached deps
 export class ExtensionHost {
   loaded: LoadedExtension[] = []
   private declarations: Array<{ declared: string; path: string }> = []

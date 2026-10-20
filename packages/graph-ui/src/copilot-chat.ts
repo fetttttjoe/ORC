@@ -1,7 +1,6 @@
 import { ChatKind, chatOpenedKey, type ChatOpenedPayload } from '@orc/contracts'
 
-// Which chat one copilot exchange belongs to, and the chat_opened that opens it. Pure: no server,
-// no log, no clock — the door supplies the id source and appends what this returns.
+// Pure: no server, log or clock; the door supplies the id source and appends the result
 
 export interface CopilotChatOpen {
   idempotencyKey: string
@@ -10,8 +9,7 @@ export interface CopilotChatOpen {
 
 export interface CopilotChat {
   chatId: string
-  // null when the client echoed an id: a second chat_opened for a live conversation would fork one
-  // interaction into two chats and double every digest read over it
+  // null when the client echoed an id: a second chat_opened would fork one conversation
   opened: CopilotChatOpen | null
 }
 

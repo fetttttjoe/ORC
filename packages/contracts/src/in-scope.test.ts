@@ -7,8 +7,7 @@ import { inScope } from './in-scope'
 import { CheckVerdict } from './knowledge'
 import { Scope, type ScopeIndex } from './scope'
 
-// t1 and t1-child both live in TEST_WORKSPACE_ID; t9 is a task the caller knows nothing about, so
-// the index answers null rather than guessing.
+// t9 is unknown to the caller, so the index answers null rather than guessing
 const index: ScopeIndex = {
   workspaceOfTask: (taskId) => (taskId === 't1' || taskId === 't1-child' ? TEST_WORKSPACE_ID : null),
   inSubtree: (taskId, rootId) => taskId === rootId || taskId.startsWith(`${rootId}-`),

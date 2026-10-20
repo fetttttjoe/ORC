@@ -2,7 +2,7 @@ import { z } from 'zod'
 import {
   CheckVerdict, DecisionSlug, DeliveryMode, EntityPath, KNOWLEDGE_DEFAULTS, KNOWLEDGE_LIMITS, KNOWLEDGE_REFUSAL, KnowledgeChange,
   KnowledgeCheckFields, KnowledgeDraft, KnowledgeId, KnowledgePage, KnowledgeToolName, toolError, toolSchemaOf,
-  type KnowledgeAccess, type KnowledgePort, type MemoryAuthor, type ResolvedTool,
+  type KnowledgeAccess, type KnowledgePort, type Author, type ResolvedTool,
 } from '@orc/contracts'
 
 export const KNOWLEDGE_STEP_TOOLS = [KnowledgeToolName.card, KnowledgeToolName.search, KnowledgeToolName.write] as const
@@ -21,16 +21,16 @@ const WriteInput = z.object({
 })
 const CheckInput = KnowledgeCheckFields.extend({ patch: WriteInput.omit({ why: true }).optional() })
 
-export const knowledgeIdempotencyKey = (author: MemoryAuthor, toolCallId: string | undefined): string | null =>
+export const knowledgeIdempotencyKey = (author: Author, toolCallId: string | undefined): string | null =>
   author.runToken && toolCallId ? `${author.runToken}:tool:${toolCallId}:knowledge` : null
 
 export interface ToolSpec {
   description: string
   input: z.ZodType
-  run(port: KnowledgePort, author: MemoryAuthor, input: unknown, toolCallId: string | undefined): Promise<unknown>
+  run(port: KnowledgePort, author: Author, input: unknown, toolCallId: string | undefined): Promise<unknown>
 }
 
-const read = (author: MemoryAuthor, toolCallId: string | undefined, mode: DeliveryMode) =>
+const read = (author: Author, toolCallId: string | undefined, mode: DeliveryMode) =>
   ({ author, idempotencyKey: knowledgeIdempotencyKey(author, toolCallId), mode })
 
 const SPECS: Record<KnowledgeStepToolName, ToolSpec> = {
@@ -69,7 +69,7 @@ const SPECS: Record<KnowledgeStepToolName, ToolSpec> = {
   },
 }
 
-export function resolveKnowledgeTool(name: KnowledgeToolName, spec: ToolSpec, access: KnowledgeAccess, author: MemoryAuthor): ResolvedTool {
+export function resolveKnowledgeTool(name: KnowledgeToolName, spec: ToolSpec, access: KnowledgeAccess, author: Author): ResolvedTool {
   return {
     ref: `knowledge/${name}`, name, description: spec.description, inputSchema: toolSchemaOf(spec.input),
     execute: async (input: unknown, toolCallId?: string) => {
@@ -79,6 +79,6 @@ export function resolveKnowledgeTool(name: KnowledgeToolName, spec: ToolSpec, ac
   }
 }
 
-export function knowledgeTools(access: KnowledgeAccess, author: MemoryAuthor, names: readonly KnowledgeStepToolName[]): ResolvedTool[] {
+export function knowledgeTools(access: KnowledgeAccess, author: Author, names: readonly KnowledgeStepToolName[]): ResolvedTool[] {
   return names.map(name => resolveKnowledgeTool(name, SPECS[name], access, author))
 }

@@ -2,7 +2,7 @@
 
 const NON_PROSE = 'script, style, noscript, template, textarea, svg'
 
-// Not a full entity table: an unresolved `&eacute;` still reads; the regex this replaced deleted it.
+// Not a full entity table: an unresolved `&eacute;` still reads
 const NAMED_REF: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' }
 
 const decodeRefs = (s: string): string =>
@@ -14,14 +14,13 @@ const decodeRefs = (s: string): string =>
     return NAMED_REF[ref.toLowerCase()] ?? whole
   })
 
-// A parser, not a regex: `<[^>]+>` stopped at the `>` inside `data-x="a>b"` and leaked `b">`.
+// A parser, not a regex: `<[^>]+>` stops at the `>` inside an attribute value
 export async function stripHtml(html: string): Promise<string> {
   const chunks: string[] = []
   let insideNonProse = 0
   await new HTMLRewriter()
     .on(NON_PROSE, { element(el) { insideNonProse++; el.onEndTag(() => { insideNonProse-- }) } })
-    // onDocument, not .on('*'): an element selector never sees text outside an element, and a
-    // search snippet is a bare fragment — '*' returned '' for plain text.
+    // onDocument, not .on('*'): '*' never sees text outside an element, e.g. a bare search snippet
     .onDocument({ text(t) { if (insideNonProse === 0) chunks.push(t.text) } })
     .transform(new Response(html))
     .text()

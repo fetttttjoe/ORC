@@ -87,8 +87,7 @@ describe('assertInZone (write-fence)', () => {
 describe('resolveInWorkspace (trust boundary)', () => {
   it('rejects .. traversal and absolute escapes; resolves relative paths', () => {
     const dir = ws()
-    // the error names the path convention: an agent that assumed file-relative paths (../plugins
-    // from inside packages/cli, observed live as #31863) must learn the rule from the refusal
+    // the error names the path convention agents must learn from the refusal
     expect(() => resolveInWorkspace(dir, '../outside.txt')).toThrow(/relative to the workspace root/)
     expect(() => resolveInWorkspace(dir, '/etc/passwd')).toThrow(/escapes workspace/)
     expect(resolveInWorkspace(dir, 'sub/file.txt')).toBe(path.join(dir, 'sub', 'file.txt'))

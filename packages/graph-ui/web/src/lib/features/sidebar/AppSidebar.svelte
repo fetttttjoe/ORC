@@ -29,14 +29,7 @@
 
   const gated = $derived(new Set(operator.state.openQuestions.map(g => g.taskId)))
 
-  // Requests grouped by what they need from the operator. Split children stay out of the top
-  // level — they render inside their parent's request view.
-  /**
-   * Grouped by what the request wants from the operator, not by raw status. Anything that CANNOT
-   * move without a human — an open question, a plan awaiting approval, a blocked or failed run —
-   * sits at the top; a fresh draft is open work, not settled history (it landed in the collapsed
-   * settled pile once, which is how a just-created request went missing).
-   */
+  // Grouped by what the request needs from the operator; a fresh draft is open work, not settled
   const groups = $derived.by(() => {
     const needsYou: GraphNode[] = []
     const running: GraphNode[] = []

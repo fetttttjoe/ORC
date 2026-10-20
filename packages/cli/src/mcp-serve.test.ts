@@ -5,7 +5,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { ApprovedBy, Door, EVENT_KIND, KnowledgeHealthState, ModelsDiscoveredPayload, NO_CHAT, isRecord } from '@orc/contracts'
 import { authorFixture, must } from '@orc/contracts/fixtures'
-import { createKnowledgePort, createMemoryBackend, KNOWLEDGE_READ_TOOLS, knowledgeHealth, knowledgeTools, NO_STRUCTURE } from '@orc/knowledge-core'
+import { createKnowledgePort, createInMemoryBackend, KNOWLEDGE_READ_TOOLS, knowledgeHealth, knowledgeTools, NO_STRUCTURE } from '@orc/knowledge-core'
 import { buildCopilotTools } from '@orc/ui-core'
 import { openStorage } from '@orc/kernel'
 import { createTestDb, testConfig, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
@@ -16,9 +16,7 @@ import { actionsStub, sessionsStub } from './test-helpers'
 // every tool this door serves names the MCP door; the tests assert that literal, never a default
 const MCP = NO_CHAT(Door.mcp)
 
-// P7 prerequisite acceptance: under `mcp serve`, stdout carries ONLY JSON-RPC frames — one
-// stray boot print corrupts the channel. This drives a real spawned `orc mcp serve` through
-// initialize → tools/list → tools/call and asserts every stdout line parses as JSON-RPC.
+// under `mcp serve` stdout carries only JSON-RPC frames: one stray boot print corrupts it
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
 // stand-in provider daemons: stopped with their connections, or a pending fetch outlives the file
@@ -30,8 +28,7 @@ afterAll(async () => {
 
 const frame = (o: unknown): string => JSON.stringify(o) + '\n'
 
-// --- JSON-RPC / MCP wire shapes read off a spawned subprocess's stdout: hand-narrowed with
-// isRecord ON PURPOSE, so the pinned shape stays this test's own and cannot drift with a schema ---
+// wire shapes narrowed with isRecord on purpose, so the pinned shape cannot drift with a schema
 interface RpcFrame { jsonrpc?: string; id?: number; result?: unknown }
 const asRpcFrame = (line: string): RpcFrame => {
   const v: unknown = JSON.parse(line)
@@ -101,8 +98,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     let out = ''
     const deadline = Date.now() + 25_000
     const reader = proc.stdout.getReader()
-    // responses may arrive OUT OF ORDER (the SDK dispatches handlers concurrently) — wait
-    // until every expected id has answered, not just the last one sent
+    // responses may arrive out of order: wait until every expected id has answered
     const allIn = (): boolean => [1, 2, 3, 4, 5].every(id => out.includes(`"id":${id}`))
     while (Date.now() < deadline && !allIn()) {
       const chunk = await Promise.race([
@@ -120,11 +116,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     const parsed = lines.map(asRpcFrame)
     for (const p of parsed) expect(p.jsonrpc).toBe('2.0')
 
-    // The EXACT wire surface, not a subset: a `toContain` loop cannot see a tool that appeared —
-    // and the one thing this door's design rests on is that `record_decision` is the ONLY
-    // authoring tool it serves. A set, because tools/list order is the composition's, not a
-    // promise. Spelled out here rather than derived from buildCopilotTools on purpose: the parity
-    // test below proves the composition, this one proves what actually reached the client.
+    // the exact wire surface, not a subset: a toContain loop cannot see a tool that appeared
     const frame2 = must(parsed.find(p => p.id === 2), 'tools/list response frame')
     const names = toolNames(frame2.result)
     expect(new Set(names)).toEqual(new Set([
@@ -134,8 +126,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
       'new_request', 'workspace_list', 'workspace_new', 'record_decision',
       'propose', 'run', 'reply', 'retry', 'cancel', 'annotate', 'revise', 'approve',
     ]))
-    // the ONE knowledge write this door gets is the decision above: a decision has a fixed body
-    // layout and a lifecycle, a free note has neither — agents inside plans write those
+    // record_decision is the one knowledge write this door gets: a decision has a fixed layout
     expect(names).not.toContain('memory_write')
     expect(names).not.toContain('knowledge_write')
 
@@ -162,19 +153,14 @@ describe('orc mcp serve (stdio, read slice)', () => {
   }, 40_000)
 
   it('door parity is mechanical: every copilot tool is served, no memory tool is', () => {
-    // if this fails, the doors drifted — a copilot tool was added/renamed without the MCP
-    // surface following (it follows automatically; this test proves it)
+    // if this fails the doors drifted: a copilot tool was added or renamed without the MCP surface
     const sessions = sessionsStub()
     const actions = actionsStub()
     const served = buildServeTools({
       sessions, projectId: 'p1', actions, autonomy: 'gated',
       knowledgeTools: knowledgeTools({ unavailable: 'parity-check' }, authorFixture(), KNOWLEDGE_READ_TOOLS),
     }).map(t => t.name)
-    // A per-name `toContain` could not see a tool the composition GAINED — and "record_decision is
-    // the only authoring tool" is a claim about what is absent.
-    // listModels is passed because buildServeTools always wires it (from the models view), so the
-    // copilot set it composes carries available_models; omitting it here would compare the served
-    // surface against a set the door never builds.
+    // a per-name toContain cannot see a tool the composition gained
     const copilot = Object.keys(buildCopilotTools({ sessions, actions, projectId: 'p1', origin: MCP, listModels: async () => [] }))
     expect(new Set(served)).toEqual(new Set([...copilot, ...KNOWLEDGE_READ_TOOLS, 'approve']))
   })
@@ -193,7 +179,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
   it('project_status computes knowledge health once within the TTL', async () => {
     let probes = 0
     const port = createKnowledgePort({
-      backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }),
+      backend: createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }),
       checkoutOf: async () => { probes += 1; return '/checkout' },
       append: async () => {},
       warn: () => {},
@@ -211,11 +197,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     expect(probes).toBe(afterFirst)
   })
 
-  // The serve door drives agents over MCP that must never invent a model ref (the copilot system
-  // prompt says as much). available_models goes through the SAME flagless listModels core as the
-  // web door: it DISCOVERS, because an agent handed { refs: [] } cannot name a model at all.
-  // A stand-in ollama daemon gives discovery one provider that certainly answers, so the
-  // assertions are about the door and not about what the machine running the test can reach.
+  // a stand-in ollama daemon gives discovery one provider that certainly answers
   async function modelDoor(seed: Array<{ providerId: string; models: string[] }>, live = ['llama3.2:3b']) {
     const db = await createTestDb()
     dbs.push(db)
@@ -277,9 +259,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     expect(calls).toEqual([['t1', { version: 2, approvedBy: ApprovedBy.mcp }, MCP]])
   })
 
-  // The input crosses a trust boundary: an external MCP client can send ANY shape, and the
-  // advertised JSON inputSchema is documentation, not enforcement. A typecast here once let a
-  // non-string taskId ride straight into actions.approve.
+  // the input crosses a trust boundary: a typecast once let a non-string taskId into approve
   it('mcpApproveTool: malformed client input is a clean error, never a call into actions', async () => {
     const calls: unknown[] = []
     const actions = actionsStub({ approve: async (id, opts, origin) => { calls.push([id, opts, origin]); return { version: opts.version ?? 1 } } })
@@ -292,10 +272,7 @@ describe('orc mcp serve (stdio, read slice)', () => {
     expect(calls).toHaveLength(0)
   })
 
-  // The same trust boundary as approve, but for the copilot-bridge tools (P1 of the foundation
-  // audit): asResolvedTools wraps `run`'s execute, which destructures { taskId, cwd } assuming
-  // parsed args — a numeric taskId rode straight into actions.run unvalidated before the bridge
-  // safeParsed against the tool's own zod inputSchema.
+  // same trust boundary for the copilot bridge: a numeric taskId once rode into actions.run
   it('bridged mutating tool (run): malformed client input is a clean error, never a call into actions', async () => {
     const calls: unknown[] = []
     const actions = actionsStub({ run: async (id, cwd, origin) => { calls.push([id, cwd, origin]); return { requested: true, since: 0 } } })

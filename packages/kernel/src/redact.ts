@@ -1,14 +1,5 @@
-// The ONE storage-boundary normalizer: strips NUL (Postgres jsonb rejects \u0000 inside
-// strings, 22P05) and redacts secrets — once, at append/operation storage, after contract
-// validation. Every projection downstream sees only redacted data.
 
-// values under these keys are dropped wherever they appear (case/format-insensitive:
-// apiKey, api_key, API-KEY all match)
-// A bare 'token' suffix is NOT listed, deliberately: `runToken` normalizes to `runtoken`, which
-// would match, and runToken is a required field in most PAYLOAD_SCHEMAS — which are validated
-// AFTER redaction (event-log.ts), so every such event would fail to append. The token-shaped
-// names below are enumerated instead. Secrets minted during a run (a tool returning a freshly
-// created credential) are caught only by key, never by value: value-matching sees process.env.
+// no bare 'token' suffix: runToken would match, and payloads validate after redaction
 const SENSITIVE_KEY_SUFFIXES = [
   'authorization', 'apikey', 'password', 'secret', 'privatekey', 'credentials', 'cookie',
   'accesstoken', 'refreshtoken', 'authtoken', 'bearertoken', 'sessiontoken', 'apitoken', 'idtoken',
@@ -26,7 +17,6 @@ const MIN_SECRET_LENGTH = 8
 
 export interface Redactor {
   (record: Record<string, unknown>): Record<string, unknown>
-  /** The same walk over ANY value. Shape-preserving: arrays stay arrays, primitives stay primitives. */
   value<T>(v: T): T
 }
 
@@ -43,8 +33,7 @@ export function buildRedactor(env: Record<string, string | undefined>, extraName
     return out
   }
 
-  // keys are cleaned too: a secret or NUL inside a JSON key (URL-keyed maps, header names)
-  // must not reach storage any more than one inside a value
+  // JSON keys are cleaned too: URL-keyed maps and header names can carry secrets
   const entry = ([k, v]: [string, unknown]): [string, unknown] =>
     [cleanString(k), isSensitiveKey(k) ? '[REDACTED]' : value(v)]
 
@@ -56,7 +45,6 @@ export function buildRedactor(env: Record<string, string | undefined>, extraName
 
   const redactor = (r: Record<string, unknown>): Record<string, unknown> =>
     Object.fromEntries(Object.entries(r).map(entry))
-  // the walk is shape-preserving by construction (see `value` above), so the cast states a fact
-  // the type system cannot follow through Object.entries
+  // the walk is shape-preserving, so the cast is a fact the type system cannot follow
   return Object.assign(redactor, { value: <T>(v: T): T => value(v) as T })
 }

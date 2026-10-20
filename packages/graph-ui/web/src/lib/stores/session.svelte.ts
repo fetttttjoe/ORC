@@ -57,20 +57,12 @@ class SessionStore {
     location.hash = p.toString()
   }
 
-  /**
-   * EXECUTING (run/approve/retry/propose/edit) needs the runtime that lives in the project this
-   * server was started in — from a foreign chat it would be a silent cross-project write, and the
-   * server refuses it.
-   */
+  // EXECUTING needs the runtime in the project this server started in; a foreign chat is refused
   canAct(): boolean {
     return this.info.actions && this.sel.project === this.info.projectId
   }
 
-  /**
-   * ANSWERING is a pure append to whichever project asked, so it is allowed from any chat this
-   * server can write at all. Kept separate from canAct deliberately: fencing replies to the home
-   * project shows the operator a live question and then refuses to let them answer it.
-   */
+  // ANSWERING is a pure append to whichever project asked, so any chat this server can write may
   canAnswer(): boolean {
     return this.info.actions
   }

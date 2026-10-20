@@ -2,8 +2,7 @@
   import { TASK_STATUS } from '@orc/contracts/task'
   import { cn } from '$lib/utils'
 
-  // where a task stands on the one path every task walks — past stages read settled, the current
-  // stage reads live, the rest stay quiet
+  // The path every task walks: past stages settled, the current one live, the rest quiet
   const STAGES = [
     { key: 'plan', label: 'plan' },
     { key: 'approve', label: 'approve' },

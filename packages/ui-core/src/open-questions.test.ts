@@ -7,21 +7,16 @@ const ev = (seq: number, kind: EventRecord['kind'], taskId: string | null, paylo
   eventFixture({ seq, kind, taskId, payload })
 
 const ask = (seq: number, task: string, topic: string, q = 'q?') => ev(seq, EVENT_KIND.feedback_requested, task, { question: q, topic })
-// A reply carries a full MemoryAuthor — workspaceId and origin are both required, so a bare
-// `{ source }` does not parse and the answer would silently fail to close its topic.
+// a reply carries a full Author: a bare { source } does not parse and would not close its topic
 const answer = (seq: number, task: string, topic: string) =>
   ev(seq, EVENT_KIND.feedback_provided, task, { topic, text: 'a', author: authorFixture({ source: AUTHOR_SOURCE.human }) })
 const never = () => false
 
 describe('open questions', () => {
-  // Keyed by (task, topic), which is what openFeedbackTopics keys on: a task can be parked on two
-  // questions at once, and a task-only key retires both the moment either is answered.
   it('two topics on one task are two open questions', () => {
     expect(openQuestions([ask(1, 't', 'cwd'), ask(2, 't', 'scope')], never).map(q => q.topic)).toEqual(['cwd', 'scope'])
   })
 
-  // Folded over the whole log rather than a tail window: an operator who let the feed run past a
-  // question still has to answer it.
   it('a question 1000 events back is still open', () => {
     const noise = Array.from({ length: 1000 }, (_, i) => ev(i + 2, EVENT_KIND.tool_call, 't', { toolName: 'x', input: {} }))
     expect(openQuestions([ask(1, 't', 'cwd'), ...noise], never)).toHaveLength(1)
@@ -32,9 +27,7 @@ describe('open questions', () => {
     expect(s).toEqual([{ taskId: 't', topic: 'cwd', stepId: null, question: 'new', seq: 3 }])
   })
 
-  // The list is a queue: the question nobody has spoken to in longest sits at the top, and a re-ask
-  // is a fresh ask that goes to the back. Insertion order cannot express that — a Map keeps a
-  // re-asked key in its ORIGINAL position, so the re-ask would jump the queue it just joined.
+  // a queue: a re-ask goes to the back; a Map keeps a re-asked key in its original position
   it('orders by the newest ask, so the longest-waiting question comes first', () => {
     const s = openQuestions([ask(1, 't', 'cwd', 'old'), ask(2, 't', 'scope'), answer(3, 't', 'cwd'), ask(4, 't', 'cwd', 'again')], never)
     expect(s.map(q => [q.topic, q.seq])).toEqual([['scope', 2], ['cwd', 4]])

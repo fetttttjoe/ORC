@@ -3,23 +3,23 @@ import { ZodError } from 'zod'
 import {
   AUTHOR_SOURCE, CheckVerdict, ClaimClass, ClaimState, DECISION_REFUSAL, DecisionStatus, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_LIMITS,
   KNOWLEDGE_REFUSAL, KnowledgeDeliveredPayload, KnowledgeWrittenPayload, knowledgeIdFrom, PreloadArm, preloadLine, sha256,
-  type Decision, type DecisionInputRaw, type EventInput, type KnowledgeBackend, type MemoryAuthor,
+  type Decision, type DecisionInputRaw, type EventInput, type KnowledgeBackend, type Author,
 } from '@orc/contracts'
 import { directoryDigest } from './anchor-digest'
 import { planDecisionRecord } from './decision-record'
 import { BASIS_EVIDENCE_KINDS, type EvidenceRecord } from './evidence-events'
 import { createEvidenceReader } from './evidence-reader'
 import { emptyEvidence } from './evidence'
-import { createMemoryBackend, NO_STRUCTURE } from './memory-backend'
+import { createInMemoryBackend, NO_STRUCTURE } from './in-memory-backend'
 import { tokensOf } from './preload'
 import { ASSERTION_NOT_READ, createKnowledgePort, EVIDENCE_NOT_READ, EVIDENCE_NOT_RECORDED, type KnowledgePortDeps } from './port'
 
-const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'chat-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
+const author: Author = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'chat-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
 const setup = (append: (e: EventInput) => Promise<void> = async () => {}, over: Partial<KnowledgePortDeps> = {}) => {
   const events: EventInput[] = []
   const warned: string[] = []
   const port = createKnowledgePort({
-    backend: createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }),
+    backend: createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }),
     checkoutOf: async () => '/checkout',
     append: async e => { events.push(e); await append(e) },
     warn: line => warned.push(line),
@@ -31,7 +31,7 @@ const adr = (title: string, over: Partial<DecisionInputRaw> = {}): DecisionInput
 const fileBackedDecisions = (): KnowledgeBackend => {
   const held = new Map<string, Decision>()
   return {
-    ...createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }),
+    ...createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null }),
     decisions: async () => [...held.values()],
     decision: async (_checkout, id) => held.get(id) ?? null,
     recordDecision: async (_checkout, draft) => {
@@ -112,7 +112,7 @@ describe('the knowledge port on replay and failure', () => {
   })
   it('caps the page and search sizes it asks the backend for', async () => {
     const seen: number[] = []
-    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    const inner = createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const port = createKnowledgePort({
       backend: {
         ...inner,
@@ -143,7 +143,7 @@ describe('the knowledge port get', () => {
   })
   it('refuses more ids than one delivery carries, and a malformed id, without asking the backend', async () => {
     const asked: (readonly string[])[] = []
-    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    const inner = createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const port = createKnowledgePort({
       backend: { ...inner, get: (checkout, ids) => { asked.push(ids); return inner.get(checkout, ids) } },
       checkoutOf: async () => '/checkout',
@@ -158,7 +158,7 @@ describe('the knowledge port get', () => {
 
 describe('the knowledge port on decisions', () => {
   it('a record appends exactly one knowledge_written carrying the refs, the files and the envelope', async () => {
-    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    const inner = createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const { port, events } = setup(async () => {}, {
       backend: { ...inner, recordDecision: async (checkout, draft) => ({ ...(await inner.recordDecision(checkout, draft)), files: [`docs/decisions/${draft.id}.md`] }) },
     })
@@ -223,7 +223,7 @@ describe('the knowledge port on decisions', () => {
   })
   it('a superseded input status is refused before the backend is called', async () => {
     const asked: string[] = []
-    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    const inner = createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const { port } = setup(async () => {}, { backend: { ...inner, recordDecision: (checkout, draft) => { asked.push(draft.id); return inner.recordDecision(checkout, draft) } } })
     await expect(port.recordDecision(write(), adr('Gone', { status: DecisionStatus.superseded }))).rejects.toThrow(ZodError)
     expect(asked).toEqual([])
@@ -245,7 +245,7 @@ describe('the knowledge port on claim state and checks', () => {
       earliestSeq: async () => records[0]?.seq ?? 0,
     }, BASIS_EVIDENCE_KINDS)
     const port = createKnowledgePort({
-      backend: createMemoryBackend({ exists: (_c, path) => sources.has(path), structure: NO_STRUCTURE, read: (_c, path) => sources.get(path) ?? null }),
+      backend: createInMemoryBackend({ exists: (_c, path) => sources.has(path), structure: NO_STRUCTURE, read: (_c, path) => sources.get(path) ?? null }),
       checkoutOf: async () => '/checkout',
       append: async e => { events.push(e); records.push({ seq: records.length + 1, kind: e.kind, runToken: e.runToken ?? null, payload: e.payload }) },
       evidence: () => reader.read(),
@@ -397,7 +397,7 @@ describe('the knowledge port on claim state and checks', () => {
   })
 
   it('a write whose anchors cannot be read after it still lands, asserts nothing and says so', async () => {
-    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    const inner = createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const { port, events, assertedBy } = checking({ backend: { ...inner, readings: async () => { throw new Error('tree unreadable') } } })
     const result = await port.write(write(), { add: [fact('a writes the store')] })
     expect(result.warnings).toEqual([ASSERTION_NOT_READ('tree unreadable')])
@@ -406,7 +406,7 @@ describe('the knowledge port on claim state and checks', () => {
   })
 
   it('a restating write still lands and asserts every restating change when the held claims cannot be read first', async () => {
-    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    const inner = createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     let armed = false
     const { port, events, assertedBy } = checking({ backend: { ...inner, get: async (checkout, ids) => { if (armed) throw new Error('index locked'); return inner.get(checkout, ids) } } })
     const id = await claimOn(port)
@@ -437,7 +437,7 @@ describe('the knowledge port preload', () => {
   })
   it('reads a pushed claim through its readings alone, never a second time', async () => {
     const asked: string[] = []
-    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    const inner = createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const { port } = setup(async () => {}, { backend: { ...inner, get: (c, ids) => { asked.push('get'); return inner.get(c, ids) }, readings: (c, f) => { asked.push('readings'); return inner.readings(c, f) } } })
     const [first, second] = await idsOf(port, at('first', 'src/a.ts'), at('second', 'lib/b.ts'))
     asked.splice(0)
@@ -475,7 +475,7 @@ describe('the knowledge port preload', () => {
   })
   it('an empty request or a zero budget delivers nothing, appends nothing and reads nothing', async () => {
     const asked: string[] = []
-    const inner = createMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
+    const inner = createInMemoryBackend({ exists: () => true, structure: NO_STRUCTURE, read: () => null })
     const { port, events } = setup(async () => {}, {
       backend: { ...inner, readings: (c, f) => { asked.push('readings'); return inner.readings(c, f) }, search: (c, q, l) => { asked.push('search'); return inner.search(c, q, l) } },
       evidence: async () => { asked.push('evidence'); return emptyEvidence() },
@@ -507,7 +507,7 @@ describe('the knowledge port preload', () => {
   })
   it('costs a claim at the token count of the line the step is shown, a clean one without its state', async () => {
     const sources = new Map([['src/a.ts', 'v1'], ['src/b.ts', 'b']])
-    const { port } = setup(async () => {}, { backend: createMemoryBackend({ exists: (_c, path) => sources.has(path), structure: NO_STRUCTURE, read: (_c, path) => sources.get(path) ?? null }) })
+    const { port } = setup(async () => {}, { backend: createInMemoryBackend({ exists: (_c, path) => sources.has(path), structure: NO_STRUCTURE, read: (_c, path) => sources.get(path) ?? null }) })
     const [moved, kept] = await idsOf(port, at('a holds', 'src/a.ts'), at('b holds', 'src/b.ts'))
     sources.set('src/a.ts', 'v2')
     const ask = (budget: number) => port.preload(write(), { pushed: [moved ?? '', kept ?? ''], paths: [], query: '', budget })
@@ -519,7 +519,7 @@ describe('the knowledge port preload', () => {
   })
   it('a claim whose code changed since it was written is delivered suspect, behind a clean one', async () => {
     const sources = new Map([['src/a.ts', 'v1'], ['src/b.ts', 'b']])
-    const { port } = setup(async () => {}, { backend: createMemoryBackend({ exists: (_c, path) => sources.has(path), structure: NO_STRUCTURE, read: (_c, path) => sources.get(path) ?? null }) })
+    const { port } = setup(async () => {}, { backend: createInMemoryBackend({ exists: (_c, path) => sources.has(path), structure: NO_STRUCTURE, read: (_c, path) => sources.get(path) ?? null }) })
     const [moved, kept] = await idsOf(port, at('a holds', 'src/a.ts'), at('b holds', 'src/b.ts'))
     sources.set('src/a.ts', 'v2')
     const got = await port.preload(write(), { pushed: [moved ?? '', kept ?? ''], paths: [], query: '', budget: 1_000 })

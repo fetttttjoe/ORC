@@ -6,8 +6,6 @@ import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { copilotChat } from './copilot-chat'
 import { appendCopilotExchange, type CopilotExchangeRecord } from './copilot-journal'
 
-// One database for the file; each case owns its own chat id, so a read filtered by chat is as
-// isolated as a fresh log and costs no CREATE DATABASE.
 const db = await createTestDb()
 const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
 afterAll(async () => {
@@ -44,8 +42,6 @@ describe('appendCopilotExchange', () => {
 
   it('appends neither when the exchange is refused', async () => {
     const chatId = 'chat-refused'
-    // modelRef '' fails the payload schema at the log boundary: the exchange append throws AFTER
-    // the chat_opened one, which is exactly the half-write the transaction exists to prevent
     await expect(appendCopilotExchange(storage.events, recordOf(chatId, true, payloadOf({ modelRef: '' })), Door.web)).rejects.toThrow()
     expect(await inChat(chatId)).toEqual([])
   })

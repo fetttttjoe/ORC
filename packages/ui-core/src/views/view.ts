@@ -4,9 +4,7 @@ import type { State } from '@orc/kernel'
 import type { Graph } from '../graph'
 import type { TouchableName, ViewName, WIRE } from '../wire'
 
-// The narrow face of the read cache. A view sees folded state and the events behind it — never
-// storage, never subscribers — so it can be tested against a hand-built model and answered from
-// any door without that door knowing how the cache is kept.
+// narrow face of the read cache: no storage or subscribers, so a hand-built model can test a view
 export interface ReadModel {
   readonly seq: number
   readonly events: ReadonlyArray<EventRecord>
@@ -14,8 +12,7 @@ export interface ReadModel {
   readonly graph: Graph
 }
 
-// Params and result are the WIRE's, inferred rather than re-declared: a read that returns a shape
-// the browser's schema would reject then fails the build here instead of parsing to nothing there.
+// inferred from the wire: a read the browser's schema would reject fails the build here
 export type ViewParams<N extends ViewName> = z.infer<(typeof WIRE)[N]['params']>
 export type ViewResult<N extends ViewName> = z.infer<(typeof WIRE)[N]['result']>
 

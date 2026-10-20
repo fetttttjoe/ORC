@@ -5,12 +5,7 @@
 @import '@fontsource/ibm-plex-mono/400.css';
 @import '@fontsource/ibm-plex-mono/500.css';
 
-/*
- * The two-temperature system: everything AUTONOMOUS is cool (machine/steel on ink), everything
- * that waits on a HUMAN is warm (amber). Temperature is semantics, not decoration — an operator
- * should know from across the room whether the system needs them. The ledger's material is mono
- * (seqs, kinds, hashes); prose and controls are Plex Sans on warm paper-white.
- */
+/* Two temperatures: AUTONOMOUS is cool (machine/steel on ink), waiting on a HUMAN is warm (amber) */
 @theme {
   --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
@@ -33,17 +28,10 @@
   --color-machine: #6fa8b5; /* autonomous activity, running */
   --color-moss: #7fa65a; /* done / ok */
   --color-rust: #c4573b; /* failed / blocked / stale */
-  /* the WORKER that ran a step — outside the two-temperature axis, like a note: it carries no
-     lifecycle, it is an actor. Was --color-mist, i.e. the same grey as chrome, so the thing
-     actually doing the work sank into the background of the graph. */
+  /* the WORKER that ran a step: outside the two-temperature axis, it carries no lifecycle */
   --color-worker: #bd82a8;
 
-  /* The sidebar's own token set. shadcn's sidebar primitives style themselves entirely through
-     these (bg-sidebar, data-active:bg-sidebar-accent, ring-sidebar-ring). None of them existed
-     here, so every one resolved to nothing: the rail only had a background because AppSidebar
-     passes bg-bureau by hand, and the SELECTED request row set data-active="true" and then
-     rendered identically to every other row. Mapped onto the palette above rather than invented,
-     so the rail cannot drift away from the rest of the console. */
+  /* shadcn's sidebar primitives style themselves through these; mapped onto the palette above */
   --color-sidebar: var(--color-bureau);
   --color-sidebar-foreground: var(--color-mist);
   --color-sidebar-accent: var(--color-desk);
@@ -56,15 +44,13 @@
   --radius-card: 6px;
   --radius-chip: 4px;
 
-  /* the type scale, named. Hand-spelled sizes had drifted into four near-identical values;
-     these three cover everything: a label, the body of a dense row, and a payload/mono line. */
+  /* the type scale, named: a label, the body of a dense row, and a payload/mono line */
   --text-label: 9.5px;
   --text-label--line-height: 1.4;
   --text-row: 11px;
   --text-row--line-height: 1.45;
 
-  /* shadcn semantic layer, mapped onto the palette above — vendored components read ONLY these,
-   * so restyling stays a token edit, never a component edit */
+  /* shadcn semantic layer: vendored components read ONLY these, so restyling stays a token edit */
   --color-background: var(--color-ink);
   --color-foreground: var(--color-paper);
   --color-card: var(--color-bureau);
@@ -90,10 +76,7 @@
   --radius-xl: 12px;
 }
 
-/* The base size lives on BODY, never on html: every rem-based utility (w-72, h-8, gap-2, the
- * whole spacing scale) is anchored to the ROOT font size, so shrinking html silently scaled the
- * entire layout to 84% — which is why panes measured narrower than declared and their contents
- * spilled out. */
+/* The base size lives on BODY, never on html: rem utilities are anchored to the root font size */
 html {
   height: 100%;
   background: var(--color-ink);
@@ -145,11 +128,7 @@ body {
   }
 }
 
-/* Scrollbars, themed and always visible on a scrollable pane.
-   The rail, the ledger and the inspector all scroll, but with the platform's overlay scrollbar
-   there was nothing to say so: a request rail holding 20+ settled items read as a list that had
-   simply been cut off, and the way back was invisible. A thin permanent track costs 8px and tells
-   the truth. `scrollbar-gutter: stable` keeps content from shifting as it appears. */
+/* Scrollbars, themed and always visible: an overlay scrollbar hid that a pane scrolls */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-rule) transparent;

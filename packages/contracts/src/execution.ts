@@ -6,16 +6,10 @@ import type { OperationSpec } from './operations'
 import type { LoadedSkill, ResolvedTool } from './plugins'
 import type { Origin } from './origin'
 import { KnowledgeRef } from './knowledge-ref'
-// kept type-only and separate from KnowledgeRef above: knowledge.ts pulls node:crypto, and only a fully-`type` import is erased before graph-ui's bundle (browser-leaves.test.ts)
+// type-only: knowledge.ts pulls node:crypto, which graph-ui's bundle must not include
 import type { KnowledgeClaim, PreloadedClaim } from './knowledge'
 
-// Whether anything can DRIVE a run right now — the question every silent project raises first.
-// Derived from the supervisor heartbeat row plus the pid file the serve process writes only once
-// its runtime is ready: heartbeat+pidfile = ready, heartbeat alone = booting (projection catch-up
-// beats through boot since 601bca7), a stale row = it died without cleanup, no row = nothing will
-// run until `orc serve`. Lives in contracts because the CLI derives it and both UI doors render it.
-// [derived: 2026-08-01 live session — every incident began as "is anything actually driving?"]
-export { KnowledgeHealth, KnowledgeHealthState, SUPERVISOR_HEALTH, type SupervisorHealth, type SupervisorHealthState } from './health'
+export { KnowledgeHealth, KnowledgeHealthState, SupervisorHealthState, type SupervisorHealth } from './health'
 
 export const Usage = z.object({
   inputTokens: z.number().int().nonnegative(),
@@ -53,8 +47,6 @@ export const ModelCost = z.object({
 })
 export type ModelCost = z.infer<typeof ModelCost>
 
-// A model the operator can actually select, with what it costs. Discovery (live list ∪ priced
-// catalog) produces these; the plan step and the CLI renderer both consume them.
 export interface ModelOption { ref: string; cost: ModelCost | null }
 
 // null = unpriced, so callers render the ref bare rather than inventing a rate.
@@ -86,26 +78,15 @@ export function costUSDFor(
   ) / 1_000_000
 }
 
-// `partial` is the honest third state exhaustion used to hide: the step is neither done nor
-// broken — the agent ran out of iterations mid-job and REPORTS what remains instead of dying as
-// an agent_error whose retry forgets everything but the workspace. The AGENT only ever reports;
-// the RUNTIME grants: continuation rounds are auto-granted while budget and the round cap allow,
-// then escalate to the human gate (feedback_requested — the ask_human machinery). An agent asked
-// "do you want more budget" always says yes, which is why there is no request_iterations tool.
 export enum SignalOutcome {
   success = 'success',
   failure = 'failure',
   partial = 'partial',
 }
 
-// Auto-granted continuation rounds per step attempt before the human gate takes over. The USD
-// budget stays the true ceiling (checked per grant); this cap only bounds how long a step can
-// re-run itself when NO budget is configured. [conjecture — no corpus of partial-signalling
-// steps exists yet; revisit against real runs, and make it a config knob if one size proves wrong]
+// caps self-re-runs when no budget is set; the USD budget stays the real ceiling
 export const MAX_AUTO_CONTINUATIONS = 3
 
-// ONE spelling of the continuation gate's feedback topic: the port's ask, the recv it parks on,
-// and any reader tracing a feedback event back to its round all derive it here.
 export const continuationTopic = (stepId: string, round: number): string => `continue:${stepId}:${round}`
 
 export const Signal = z.object({
@@ -118,18 +99,7 @@ export const Signal = z.object({
 })
 export type Signal = z.infer<typeof Signal>
 
-/**
- * Why a step stopped. Every class but `rejected` is a MALFUNCTION — something went wrong, and
- * running it again may well work.
- *
- * `rejected` is the odd one and the reason this enum grew: the step ran correctly and CONCLUDED
- * that the work is not acceptable (an auditor signalling `failure`, a verifier refusing a result).
- * That used to be filed as `agent_error`, which made a considered verdict indistinguishable from a
- * crash — so the operator was offered a retry. But a retry only re-runs what did not complete
- * (see completedStepIds), so the rejecting step re-ran over identical sibling outputs and
- * reproduced the identical verdict, forever. Measured: three consecutive audit passes, same three
- * defects, same failure. A verdict is answered by changing the PLAN, never by repeating the step.
- */
+// every class but `rejected` is a malfunction a rerun may clear
 export enum FailureClass {
   provider_error = 'provider_error',
   agent_error = 'agent_error',
@@ -151,24 +121,18 @@ export enum RunOutcome {
   cancelled = 'cancelled',
 }
 
-// What a finished run looked like, read off the task it drove. Shared because two callers derive
-// it — the router composing a split result, and the CLI watch that no longer holds a run handle to
-// ask — and a second copy could disagree about a status the first has not seen. `failed` and every
-// non-terminal status surface as blocked: RunOutcome has no 'failed', and to a caller both mean the
-// same thing, the work stopped short of done.
+// failed and every non-terminal status map to blocked: RunOutcome has no 'failed'
 export function runOutcomeFor(status: TaskStatus | undefined): RunOutcome {
   if (status === TASK_STATUS.done) return RunOutcome.done
   if (status === TASK_STATUS.cancelled) return RunOutcome.cancelled
   return RunOutcome.blocked
 }
 
-// The thin join payload (spec D5): what a parent gets back from a resolved split.
-// Also THE split_resolved event payload schema (PAYLOAD_SCHEMAS composes it) — a re-spelled
-// copy there had already been one field-comment away from drifting.
+// also the split_resolved event payload schema (PAYLOAD_SCHEMAS composes it)
 export const SplitResult = z.object({
   splitId: z.string().min(1),
   childTaskId: z.string().min(1),
-  outcome: z.enum(RunOutcome), // done | blocked | cancelled — NOT SignalOutcome (spec D5)
+  outcome: z.enum(RunOutcome), // done | blocked | cancelled — NOT SignalOutcome
   summary: z.string(),
   claims: z.array(KnowledgeRef),
 })
@@ -208,23 +172,11 @@ export type UnifiedEvent = z.infer<typeof UnifiedEvent>
 export interface ModelProvider<LM = unknown> {
   costs: Record<string, ModelCost>
   languageModel(modelId: string): LM
-  // live model discovery, plugin-driven: each provider queries its own API. Optional — callers
-  // fall back to the cost-table keys. An implementation REJECTS when it cannot answer — network
-  // failure, bad status, unparseable body, missing credentials; [] means it ANSWERED and nothing
-  // usable exists. The split is load-bearing for discovery's append-on-change, which must tell
-  // "positively empty" from silence: with [] meaning both, an emptied catalog could never be
-  // recorded (ollama's embedding filter left retired encoders in the served catalog, observed
-  // 2026-08-03), and a swallowed openai blip would append models: [] over the real catalog.
-  // Callers isolate the rejection per provider — buildModelDiscovery already does, marking the
-  // provider reachable: false and keeping its last recorded catalog.
+  // rejects when it cannot answer; [] means it answered and nothing usable exists
   listModels?(): Promise<string[]>
 }
 
-// the ONE parse of a provider's model-list JSON — the providers differed only in the list key
-// ('data' vs 'models') and the id key ('id' vs 'name'), and the extraction was spelled three
-// times. A malformed ENTRY degrades to fewer ids (the API answered; one odd row is not silence),
-// but a body without the list array THROWS: per the listModels contract above, an unparseable
-// body is a failure to answer, not an empty catalog.
+// a malformed entry yields fewer ids; a body without the list array throws
 export function modelIdsFrom(body: unknown, listKey: string, idKey: string): string[] {
   const parsed = z.record(z.string(), z.unknown()).safeParse(body)
   const list = z.array(z.unknown()).safeParse(parsed.success ? parsed.data[listKey] : undefined)
@@ -256,15 +208,11 @@ export function resolveModel<LM>(
   return { provider, modelId, model: provider.languageModel(modelId) }
 }
 
-// Retry protocol between checkpoint implementations (the port) and checkpoint callers
-// (executors): a fn that throws terminalError() is NOT re-run; any other throw is treated
-// as transient and may be retried with backoff.
+// a fn that throws terminalError() is not re-run; any other throw is retryable
 export function terminalError(message: string): Error {
   return Object.assign(new Error(message), { terminal: true })
 }
-// Deterministic environment failures: retrying cannot change a permission or a missing path,
-// so these fail on attempt 1 instead of burning the retry budget (observed live: 4 workspace
-// retries on one EACCES). Transient codes (EBUSY, EAGAIN, EMFILE, …) stay retryable.
+// retrying cannot fix these, so they fail on attempt 1
 const PERMANENT_FS_CODES = new Set(['EACCES', 'EPERM', 'ENOENT', 'EROFS', 'ENOTDIR', 'EISDIR'])
 export function isTerminalError(err: unknown): boolean {
   if (typeof err !== 'object' || err === null) return false
@@ -272,8 +220,6 @@ export function isTerminalError(err: unknown): boolean {
   return 'code' in err && typeof err.code === 'string' && PERMANENT_FS_CODES.has(err.code)
 }
 
-// terminal error that also names its failure class (e.g. validation_error at step init) —
-// finishFailed maps it to the right step_failed class instead of defaulting to agent_error.
 export function classifiedError(cls: FailureClass, message: string): Error {
   return Object.assign(new Error(message), { terminal: true, failureClass: cls })
 }
@@ -285,9 +231,7 @@ export function failureClassOf(err: unknown): FailureClass | null {
 
 export type Checkpoint = <T>(name: string, fn: () => Promise<T>, toEvents?: (result: T) => EventDraft[]) => Promise<T>
 
-// the enforced before/after wrapper for external model/tool effects: the journal records
-// the spec before fn runs and its result (or failure) after — see OperationSpec.
-// attempt: the journal's 1-based count for this operationId — a checkpoint nested in fn keys by it
+// attempt: the journal's 1-based count for this operationId; nested checkpoints key by it
 export type OperationCheckpoint = <T>(
   spec: OperationSpec,
   fn: (attempt: number) => Promise<T>,
@@ -302,31 +246,23 @@ export interface ExecutorContext<LM = unknown> {
   extraTools: ResolvedTool[]
   model: LM
   runToken: string
-  // The interaction this step runs inside — the RUN's chat, so every event a step appends
-  // correlates with the run that started it. Required: a step that cannot name its chat writes
-  // events no transcript can assemble.
+  // the run's chat: a step that cannot name its chat writes events no transcript can assemble
   origin: Origin
   workspaceDir: string
   checkpoint: Checkpoint
   operation: OperationCheckpoint
   budgetRemainingUSD: () => Promise<number | null>
-  // Optional, additive runtime knobs (no config→executor path existed before these — maxIterations
-  // reaches the loop as a frozen PlanStep field, wrong for a runtime knob). Optional so every
-  // existing ctx constructor (tests, fixtures) keeps compiling untouched.
   taskId?: string // the plan this step belongs to — absent in bare test ctxs
   knowledgePreloadTokens?: number
   knowledge?: StepKnowledge
   // set by the port on a retry: what the previous attempt of this step failed with
   priorFailure?: { attempt: number; class: FailureClass; message: string }
-  // Set by the port on a continuation round (a previous round signalled `partial`): the previous
-  // round's summary IS the handoff — the same "your summary is the only output downstream sees"
-  // seam, pointed at your own successor. The loop renders it into the first prompt; nothing else
-  // changes shape, so round 0 constructors (tests, fixtures) keep compiling untouched.
+  // set on a continuation round: the previous round's summary is the handoff into the first prompt
   continuation?: { round: number; summary: string }
   isCancelled?: () => Promise<boolean>
 }
 
-/** The step's own knowledge claims: what its first prompt is handed, and what an edited path puts at risk. */
+/** the step's own claims: handed to its first prompt, put at risk by an edited path */
 export interface StepKnowledge {
   claimsAt(paths: readonly string[]): Promise<KnowledgeClaim[]>
   preload(budget: number, round: number): Promise<PreloadedClaim[]>
@@ -345,7 +281,5 @@ export interface RunHandle {
 export interface ExecutionPort {
   startRun(taskId: string, opts?: { cwd?: string }): Promise<RunHandle>
   retry(taskId: string, opts?: { cwd?: string }): Promise<RunHandle>
-  // origin: a cancel is an interaction like any other — the canceller's door is stamped on every
-  // status the subtree sweep appends, so the log says who stopped the run.
   cancelRun(taskId: string, origin: Origin): Promise<void>
 }

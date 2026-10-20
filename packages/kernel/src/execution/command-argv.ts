@@ -1,16 +1,5 @@
-// One allowlisted command string → the argv it spawns with. Pure and zero-import.
-//
-// Splitting on whitespace made a quoted argument inexpressible: `grep -n "export const X" f.ts`
-// spawned grep with `const` and `X"` as FILENAMES, which it reported as missing files. Measured
-// live — an agent burned six of thirty iterations rephrasing a valid command, and a later run
-// reported grep "non-functional throughout" and left a question unanswered.
-//
-// This adds QUOTING, not a shell. There is still no pipe, no redirection, no chaining, no glob and
-// no substitution: `|`, `;`, `&&`, `$(…)` and `*` remain ordinary characters inside a token, so the
-// trust model is unchanged — the operator's allowlist is still matched against the raw string
-// before this runs, and the target program still receives inert argv.
+// One allowlisted command string → argv. Quoting, not a shell: |, ;, && and $(…) stay literal.
 
-/** Quote characters that group; a single quote takes its content literally, as in POSIX. */
 const QUOTES = new Set(['"', "'"])
 
 export type ArgvResult = { argv: string[]; error?: undefined } | { argv?: undefined; error: string }
@@ -18,14 +7,13 @@ export type ArgvResult = { argv: string[]; error?: undefined } | { argv?: undefi
 export function commandArgv(command: string): ArgvResult {
   const argv: string[] = []
   let token = ''
-  // Tracked separately from `token !== ''` so an EMPTY quoted argument survives: `echo "" tail`
-  // must pass two arguments, and whitespace-splitting could not express that at all.
+  // Separate from token !== '' so an empty quoted argument survives.
   let started = false
   let quote: string | null = null
 
   for (let i = 0; i < command.length; i += 1) {
     const c = command[i]
-    if (c === undefined) continue // unreachable (i bounded by command.length above) — satisfies noUncheckedIndexedAccess without `!`
+    if (c === undefined) continue // unreachable; satisfies noUncheckedIndexedAccess
     if (quote !== null) {
       // a backslash escapes inside DOUBLE quotes only — single quotes are literal, as in POSIX
       if (c === '\\' && quote === '"' && i + 1 < command.length) { token += command[++i]; continue }
@@ -43,8 +31,7 @@ export function commandArgv(command: string): ArgvResult {
     started = true
   }
 
-  // Refused by NAME rather than guessed at: a half-quoted command is a typo the model can fix in
-  // one iteration, where silently splitting it reproduces the very failure this file removes.
+  // A half-quoted command is refused by name: silently splitting it would repeat the old failure.
   if (quote !== null)
     return { error: `unterminated ${quote === '"' ? 'double' : 'single'} quote — close it, or drop the quotes if the argument has no spaces` }
   if (started) argv.push(token)

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import path from 'node:path'
 import { initializeProject, loadConfig, requireProject } from '@orc/kernel'
 import { tmpGitRepo } from '@orc/kernel/test-helpers'
-import { servePidFile, serveLogFile } from './main'
+import { servePidFile, serveLogFile } from './serve-paths'
 
 describe('project-scoped files live in the main checkout', () => {
   it('pid file and serve log resolve under projectRoot from a worktree', () => {

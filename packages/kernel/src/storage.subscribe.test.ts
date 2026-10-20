@@ -12,26 +12,18 @@ const dbs: Array<{ drop: () => Promise<void> }> = []
 afterEach(async () => { for (const d of dbs.splice(0)) await d.drop() })
 
 const task = (id: string): TaskNode => taskFixture({ id, title: id, createdAt: '2026-07-17T00:00:00.000Z' })
-// These appends exercise the notification pump, not a conversation, so they name the cli door and
-// no chat — spelled at each call site rather than defaulted in by the helper.
 const CLI: Origin = NO_CHAT(Door.cli)
 const appendCreated = (log: EventLog, id: string) =>
   log.append({ ...CLI, taskId: id, stepId: null, runToken: null, kind: EVENT_KIND.task_created, payload: { task: task(id) } })
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 describe('EventLog.subscribe', () => {
-  // A dropped database is permanent: the reconnect loop cannot retry it into working, and left
-  // running it spins at the 3s backoff ceiling forever. Measured on CI — one file dropped its
-  // database and the orphaned loop logged into every LATER test file's output, burying real
-  // failures in noise.
   it('stops reconnecting once the database is gone for good', async () => {
     const db = await createTestDb()
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
     await appendCreated(log, 'a')
     const seen: number[] = []
-    // the handler for seq 2 stalls so the pump is mid-flight when the database vanishes: the next
-    // notification sets wakeAgain, the loop's next SELECT then fails, and the 250 ms pump retry is
-    // armed — the second loop that must stop with the reconnect loop, not spin for the process's life
+    // stall seq 2 so the pump is mid-flight when the database vanishes and the 250 ms retry arms
     const unsub = await log.subscribe({ fromSeq: 0 }, async e => { seen.push(e.seq); if (e.seq === 2) await sleep(400) })
     await sleep(50)
     expect(seen.length).toBe(1)
@@ -51,17 +43,13 @@ describe('EventLog.subscribe', () => {
     // it gives up ONCE, rather than logging a fresh failure on every backoff tick
     expect(warnings.filter(w => w.includes('event stream stopped')).length).toBe(1)
     expect(warnings.filter(w => w.includes('reconnect failed')).length).toBe(0)
-    // the pump retry quiesces with it: one failure plus at most the retry already armed, never one
-    // every 250 ms for the rest of the process
+    // the pump retry quiesces: one failure plus the retry already armed, not one per 250 ms
     expect(warnings.filter(w => w.includes('pump failed')).length).toBeLessThanOrEqual(2)
     await unsub()
     await log.close().catch(() => {})
   }, 15000)
 
-  // A throw during the INITIAL catch-up rejects subscribe(), so the caller never receives a
-  // disposer — and `closed` lives only inside that disposer. Meanwhile ending the client fires the
-  // 'end' handler, which schedules a reconnect. Nothing could ever stop it: the subscription
-  // reconnected and re-pumped forever, invisibly, against a caller that believed it had failed.
+  // the disposer never reaches the caller, yet 'end' schedules a reconnect nothing could stop
   it('a handler throwing during initial catch-up leaves nothing running', async () => {
     const db = await createTestDb(); dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events
@@ -73,8 +61,7 @@ describe('EventLog.subscribe', () => {
       .rejects.toThrow('handler boom')
     const afterFailure = calls
 
-    // longer than PUMP_RETRY_MS (250) and the first reconnect delays (100/200/400): a still-armed
-    // loop would have re-delivered by now
+    // longer than PUMP_RETRY_MS and the first reconnect delays: a still-armed loop would have fired
     await appendCreated(log, 'b')
     await sleep(900)
     expect(calls).toBe(afterFailure)
@@ -159,10 +146,7 @@ describe('EventLog.subscribe', () => {
     expect(seen).toEqual([])
   })
 
-  // A cursor outlives the log it came from: `docker compose down -v`, a restore, a repointed
-  // database. Every catch-up query is `seq > cursor`, so the new log's rows all sort BELOW it and
-  // the stream goes silent forever with no error and no dropped connection to notice — a live
-  // graph UI served a two-runs-old snapshot until someone restarted the process.
+  // catch-up is `seq > cursor`: a replaced log sorts below it and the stream goes silent
   it('rewinds and announces a reset when the log no longer reaches its cursor', async () => {
     const db = await createTestDb(); dbs.push(db)
     const log = (await openStorage(db.url, { projectId: TEST_PROJECT_ID })).events

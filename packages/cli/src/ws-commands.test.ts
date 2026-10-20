@@ -14,18 +14,14 @@ const CLI = NO_CHAT(Door.cli)
 import { renderWorkspaceList, WS_NEEDS_PROJECT } from './ws-commands'
 import { ARCHIVE_WITHOUT_REMOVE, WORKSPACE_BRANCH_PREFIX, WORKTREES_DIR } from './workspace-ops'
 
-// What git itself says survived a rolled-back `ws new`. Real git, like the rest of this file and
-// like git.test.ts — spelled again here rather than imported, per the no-cross-package-test-import
-// convention.
+// what git says survived a rolled-back `ws new`: real git, spelled here, not imported
 const branches = (repo: string): string[] => {
   const r = Bun.spawnSync(['git', '-C', repo, 'branch', '--format=%(refname:short)'], { stdout: 'pipe', stderr: 'pipe' })
   return new TextDecoder().decode(r.stdout).split('\n').filter(l => l !== '')
 }
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-// Unconditional teardown: a real plugin host and an MCP hub are process-scoped, and a bare
-// shutdown after the assertions is SKIPPED when one throws — which leaks the host into every later
-// test file in the process. Registered at creation, drained LIFO, before the databases go away.
+// registered teardown: a bare shutdown is skipped when an assertion throws
 const cleanup: Array<() => Promise<void> | void> = []
 afterAll(async () => {
   for (const c of cleanup.reverse()) await c()
@@ -33,20 +29,12 @@ afterAll(async () => {
 }, 30_000)
 afterEach(() => mock.restore())
 
-// `orc ws` needs a project context (a real checkout with a projectRoot to hang worktrees off), so
-// this is makeCli from main.test.ts plus a throwaway git repo: a tmpGitRepo() main initialized with
-// `orc init`, a per-test Postgres database, and the plugin buildProgram wants. host/hub come from
-// buildPlugins — the production helper main.test.ts and runtime.test.ts already use for exactly
-// this — rather than a stub object, which would need the casts this repo forbids.
 async function makeWsCli() {
   const db = await createTestDb()
   dbs.push(db)
   const { main, worktree } = tmpGitRepo()
   initializeProject(main, 'ws-test')
-  // A real project gitignores .orc/ — orc's identity file, its settings and the worktrees `ws new`
-  // creates all live there. Without it every checkout that has ever run orc reads as dirty, and
-  // `ws merge` (which refuses to merge into a dirty trunk) would fail on orc's own files instead of
-  // on what the test is about.
+  // a real project gitignores .orc/, or orc's own files make every checkout read as dirty
   writeFileSync(path.join(main, '.gitignore'), '.orc/\n')
   sh(main, 'add', '.gitignore')
   sh(main, 'commit', '-q', '-m', 'ignore .orc')
@@ -55,13 +43,8 @@ async function makeWsCli() {
   db.onClose(() => storage.close())
   const { host, hub } = await buildPlugins(config)
   cleanup.push(() => hub.close(), () => host.shutdown())
-  // bin.ts adopts the checkout it boots in on EVERY command; these tests drive buildProgram
-  // directly, so seed the same record here — `ws current` and a task bound to this directory both
-  // read it, and without it they would report a project state no real invocation can produce.
+  // bin.ts adopts at every boot but these tests call buildProgram: seed the same record here
   await adoptCwd(kernel, config, CLI)
-  // `ws current`'s only check is that the output contains the workspace id, which the retitle and
-  // restore lines printed earlier in the same test already did — so only the per-invocation lines
-  // cli() hands back are returned, never the buffer.
   const { run } = cli(kernel, undefined, { host, hub, config, log })
   return { run, kernel, log, main, worktree, config }
 }
@@ -84,9 +67,6 @@ describe('orc ws', () => {
     await run('ws', 'new', 'Spike', '--no-task', '--base', 'main')
     expect((await kernel.listTasks()).length).toBe(0)
     expect((await kernel.listWorkspaces()).find(w => w.managed)?.baseBranch).toBe('main')
-    // The line above cannot tell --base from the default: this checkout is ON main, so both
-    // readings answer 'main'. tmpGitRepo also leaves a `feature` branch, which only the flag can
-    // reach — without this, dropping --base entirely would still pass.
     await run('ws', 'new', 'Off trunk', '--no-task', '--base', 'feature')
     expect((await kernel.listWorkspaces()).find(w => w.title === 'Off trunk')?.baseBranch).toBe('feature')
   }, 30_000)
@@ -99,17 +79,14 @@ describe('orc ws', () => {
     expect((await run('ws', 'ls', '--all')).join('\n')).toContain('Old')
   }, 30_000)
 
-  // The health table reaches the terminal here. The STATES themselves are pinned in the kernel's
-  // pure table test; what this checks is that `ls` renders the verdict rather than re-deriving one,
-  // and that it leads with what needs a human.
+  // `ls` renders the verdict rather than re-deriving one, and leads with what needs a human
   it('ls names each workspace\'s state and dates it, attention first and archived last', async () => {
     const { run, kernel } = await makeWsCli()
     await run('ws', 'new', 'Abandoned', '--no-task')
     await run('ws', 'new', 'Live', '--no-task')
     const abandoned = (await kernel.listWorkspaces()).find(w => w.title === 'Abandoned')
     if (!abandoned) throw new Error('no workspace')
-    // the checkout removed behind orc's back — the exact shape of an abandoned request: a branch
-    // that will never land and a directory that is not there
+    // the checkout removed behind orc's back: an abandoned request, a branch that will never land
     rmSync(abandoned.cwd, { recursive: true, force: true })
     const old = await kernel.createWorkspace({ title: 'Old', cwd: '/old', branch: 'x', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false }, CLI)
     await kernel.setWorkspaceArchived(old.id, true, CLI)
@@ -135,25 +112,17 @@ describe('orc ws', () => {
     rmSync(path.join(ws.cwd, 'wip.txt'))
     const removed = (await run('ws', 'archive', ws.id, '--remove')).join('\n')
     expect(existsSync(ws.cwd)).toBe(false)
-    // `git worktree remove` deletes the tree and KEEPS the branch, and orc must not delete it — an
-    // unmerged orc/<slug> is the only copy of whatever was committed in there. So the leftover is
-    // named, with the command that drops it, and the operator decides. (Observed on a live probe:
-    // the directory went, the branch stayed, and nothing said so.)
+    // `git worktree remove` keeps the branch and orc must not delete it: the leftover is named
     expect(branches(main)).toContain(`${WORKSPACE_BRANCH_PREFIX}req`)
     expect(removed).toContain(`git branch -D ${WORKSPACE_BRANCH_PREFIX}req`)
     expect((await kernel.listWorkspaces({ includeArchived: true })).find(w => w.id === ws.id)?.archivedAt).not.toBeNull()
-    // …and a --remove whose directory is already gone says what to do about it. git answers "is
-    // not a git worktree", which names no way out; the way out is the unmanaged one.
+    // a --remove on a vanished directory names the way out; git's own message names none
     await expect(run('ws', 'archive', ws.id, '--remove')).rejects.toThrow(ARCHIVE_WITHOUT_REMOVE)
     const adopted = await kernel.ensureWorkspace({ cwd: realpathSync(main), branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true }, CLI)
     await expect(run('ws', 'archive', adopted.workspace.id, '--remove')).rejects.toThrow(/not managed by orc/)
   }, 30_000)
 
-  // Act-then-record has a real window: git creates the tree before there is anything to record. A
-  // record refused after that used to leave the worktree and its orc/<slug> branch behind with
-  // nothing pointing at them, and the retry then died on "<dest> already exists — archive the old
-  // workspace", naming a workspace that never existed. No mocks: a live record already sitting at
-  // the destination cwd is what makes the kernel refuse.
+  // act-then-record has a real window: a record refused after git made the tree must roll back
   it('a refused record rolls back the worktree and the branch it created, so a retry is not blocked by git leftovers', async () => {
     const { run, kernel, main } = await makeWsCli()
     const slug = 'blocked'
@@ -189,8 +158,7 @@ describe('orc ws', () => {
     expect(lines.join('\n')).toContain(merge?.mergeCommit ?? 'no merge recorded')
     // the task drafted in it stays in the log: a merged workspace is archived, never unwound
     expect((await kernel.listTasks()).some(t => t.workspaceId === ws.id)).toBe(true)
-    // and the record is what refuses the second merge — before git is asked to do anything, since
-    // git's own answer would be a silent "Already up to date" naming the FIRST merge's commit
+    // the record refuses the second merge before git is asked: git would say 'Already up to date'
     await expect(run('ws', 'merge', ws.id)).rejects.toThrow(/already merged/)
   }, 30_000)
 
@@ -205,8 +173,6 @@ describe('orc ws', () => {
     const trunkHead = sh(main, 'rev-parse', 'HEAD')
     writeFileSync(path.join(ws.cwd, 'wip.txt'), 'x')
 
-    // the commit above is the point: the branch HAS something to land, so the refusal can only be
-    // about the uncommitted file — and it names it, because that is the work that would be lost
     await expect(run('ws', 'merge', ws.id)).rejects.toThrow(/wip\.txt/)
     const state = await kernel.state()
     expect(state.workspaceMerges.has(ws.id)).toBe(false)
@@ -215,9 +181,7 @@ describe('orc ws', () => {
     expect(sh(main, 'rev-parse', 'HEAD')).toBe(trunkHead) // git was never asked
   }, 30_000)
 
-  // The order claim in the merge handler, and the only test that can falsify it: git fails LAST
-  // here, after every refusal the command makes on its own, so a handler that recorded first would
-  // leave a workspace_merged naming a merge that never happened — a fact no reader could disprove.
+  // git fails LAST here, so a handler that recorded first would log a merge that never happened
   it('merge records nothing when git itself refuses the merge, and leaves the conflict for the operator', async () => {
     const { run, kernel, main } = await makeWsCli()
     await run('ws', 'new', 'Req', '--no-task')
@@ -236,11 +200,7 @@ describe('orc ws', () => {
     expect(existsSync(path.join(main, '.git', 'MERGE_HEAD'))).toBe(true) // git's tree, not orc's to undo
   }, 30_000)
 
-  // The window between "git merged" and "the fact is recorded" is real: an append that fails after
-  // a successful merge leaves the branch on trunk with nothing recorded. The retry then meets git's
-  // "already contained — nothing to record", which is true and useless. This is that state, reached
-  // the way an operator reaches it (a merge made by hand), and the point is that the refusal names
-  // the door that DOES work — and that walking through it records the merge.
+  // a merge made by hand: the refusal names the door that works, and walking it records the merge
   it('merge sends an already-landed branch to finalize instead of dead-ending on "nothing to record"', async () => {
     const { run, kernel, main } = await makeWsCli()
     await run('ws', 'new', 'Req', '--no-task')
@@ -264,8 +224,7 @@ describe('orc ws', () => {
     sh(worktree, 'add', 'g.txt')
     sh(worktree, 'commit', '-q', '-m', 'g')
 
-    // the REFUSAL, not just the branch name: the branch appears in half the messages this command
-    // can print, so matching on it alone cannot tell "not merged yet" from "no such branch"
+    // the REFUSAL, not the branch name: the branch appears in half the messages
     await expect(run('ws', 'finalize', workspace.id)).rejects.toThrow(/not contained/)
     expect((await kernel.state()).workspaceMerges.has(workspace.id)).toBe(false)
 
@@ -273,8 +232,7 @@ describe('orc ws', () => {
     const tip = sh(worktree, 'rev-parse', 'HEAD')
     const lines = await run('ws', 'finalize', workspace.id)
     const state = await kernel.state()
-    // the TIP is the commit that landed: once it is an ancestor of trunk, the merge-base of the
-    // two IS the tip, so there is nothing else to compute
+    // the TIP is the commit that landed: the merge-base of tip and trunk IS the tip
     expect(state.workspaceMerges.get(workspace.id)).toMatchObject({ mergeCommit: tip, trunk: 'main' })
     expect(state.workspaces.get(workspace.id)?.archivedAt).not.toBeNull()
     expect(lines.join('\n')).toContain(tip)
@@ -312,25 +270,18 @@ describe('orc ws', () => {
     const { workspace } = await kernel.ensureWorkspace({ cwd: realpathSync(main), branch: 'main', kind: WORKSPACE_KIND.checkout, onTrunk: true }, CLI)
     await run('ws', 'retitle', workspace.id, 'Main line')
     await run('ws', 'archive', workspace.id)
-    // the adopted checkout was this project's only workspace, so the listing is now empty — and
-    // says so, rather than printing nothing at all
+    // the adopted checkout was the only workspace: the empty listing says so
     expect(await run('ws', 'ls')).toEqual(['_no workspaces_'])
     await run('ws', 'restore', workspace.id)
     expect((await kernel.listWorkspaces())[0]).toMatchObject({ title: 'Main line', archivedAt: null })
-    // the RENDER, not just the id: the id alone is printed by half the commands in this file, so
-    // an assertion on it cannot tell `current` apart from the lines above it
+    // the RENDER, not just the id: half the commands print the id
     const current = (await run('ws', 'current')).join('\n')
     expect(current).toContain(workspace.id)
     expect(current).toContain('Main line')
     expect(current).toContain(`(${WORKSPACE_KIND.checkout}, main)`)
   }, 30_000)
 
-  // Re-adoption mints a record, and a mint knows only what it can DERIVE from the directory. Two
-  // facts about an orc-created worktree are not derivable — `managed` (orc made this tree, so orc
-  // may delete it) and `baseBranch` (what it was cut from) — and losing them silently DEMOTES the
-  // workspace: `archive --remove` then refuses "not managed by orc" for a tree orc itself created,
-  // and `ws merge` leaves it on disk. The prior record is the only source of both, which is exactly
-  // why the caller that has one hands them back.
+  // a mint derives only from the directory: `managed` and `baseBranch` come from the prior record
   it('a branch switch inside an orc-created worktree keeps it managed, so --remove still works', async () => {
     const { run, kernel, config } = await makeWsCli()
     await run('ws', 'new', 'Req', '--no-task')
@@ -352,9 +303,7 @@ describe('orc ws', () => {
     expect(existsSync(after.cwd)).toBe(false)
   }, 30_000)
 
-  // The terminal half of the branch-change re-adoption. `ws current` reads the ACTIVE record at this
-  // cwd, so after a switch it must name the NEW one — the archived record is still at the same path
-  // and a lookup that matched it would report the branch this checkout is no longer on.
+  // `ws current` reads the ACTIVE record: after a switch it must name the NEW one
   it('current names the record minted by a branch switch, not the archived one it replaced', async () => {
     const { run, kernel, main, config } = await makeWsCli()
     const before = (await run('ws', 'current')).join('\n')
@@ -369,8 +318,7 @@ describe('orc ws', () => {
   }, 30_000)
 })
 
-// The rendering on its own, against health values no checkout on this machine could produce: a merge
-// whose state column says something else. Pure, so it needs none of the harness above.
+// the rendering alone, against health values no local checkout could produce
 describe('renderWorkspaceList', () => {
   const NOW = new Date('2026-09-14T12:00:00.000Z')
   const w = (extra: Partial<Workspace> = {}): Workspace => ({
@@ -384,15 +332,13 @@ describe('renderWorkspaceList', () => {
   })
   const render = (rows: WorkspaceWithHealth[]): string => renderWorkspaceList(rows, NOW).join('\n')
 
-  // The flag, not the state column: `ws merge` archives the record and every rung above `merged`
-  // shadows the state, so `[merged]` is the only place "this work landed" survives to the terminal.
+  // the flag, not the state column: every rung above `merged` shadows that state
   it('flags a merged workspace beside archived and dirty, even when the state column says otherwise', () => {
     expect(render([{ workspace: w(), health: h({ merged: true, state: WORKSPACE_STATE.active }) }]))
       .toContain('[merged]')
     const all = render([{ workspace: w({ archivedAt: '2026-09-14T11:30:00.000Z' }), health: h({ merged: true, clean: false }) }])
     for (const flag of ['[archived]', '[dirty]', '[merged]']) expect(all).toContain(flag)
-    // and an unmerged workspace carries no flag at all — otherwise the assertion above would pass
-    // for a renderer that printed it unconditionally
+    // an unmerged workspace carries no flag, or a renderer printing it always would pass
     expect(render([{ workspace: w(), health: h() }])).not.toContain('[merged]')
   })
 })

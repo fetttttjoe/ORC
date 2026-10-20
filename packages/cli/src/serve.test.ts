@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { liveSupervisors, openStorage, supervisors, SUPERVISOR_STALE_MS } from '@orc/kernel'
 import { must } from '@orc/contracts/fixtures'
+import { SupervisorHealthState } from '@orc/contracts'
 import { createTestDb, TEST_PROJECT_ID } from '@orc/kernel/test-helpers'
 import { claimSlot, nextIdle, startBootHeartbeat, supervisorHealth } from './serve'
 
@@ -41,10 +42,7 @@ describe('claimSlot (admission IS slot claiming, not a second rule)', () => {
     expect(await claimSlot(storage, 1)).toBe('supervisor-1')
   })
 
-  // The property the whole stable-slot design rests on: a restarted supervisor gets the SAME executor id
-  // back by reclaiming its OWN row, not by racing a fresh INSERT next to a stale leftover. At
-  // maxSlots: 1 the id alone can't tell a genuine upsert from any other implementation that
-  // happens to also return 'supervisor-1' — the row count and the rewritten startedAt can.
+  // a restarted supervisor reclaims its OWN row: the row count and rewritten startedAt prove it
   it('a restarted supervisor reclaims its OWN row: same id, no second row, startedAt genuinely advances', async () => {
     const storage = await fresh()
 
@@ -96,38 +94,32 @@ describe('startBootHeartbeat (the slot stays live while buildRuntime blocks on c
 describe('supervisorHealth (the "is anything driving?" classifier)', () => {
   const row = { executorId: 'supervisor-1', pid: 42, host: 'h', startedAt: 't0', lastSeenAt: 't1' }
   it('heartbeat + pid file = ready; heartbeat alone = booting', () => {
-    expect(supervisorHealth([row], [], true)).toEqual({ state: 'ready', pid: 42, lastSeenAt: 't1' })
-    expect(supervisorHealth([row], [], false)).toEqual({ state: 'booting', pid: 42, lastSeenAt: 't1' })
+    expect(supervisorHealth([row], [], true)).toEqual({ state: SupervisorHealthState.ready, pid: 42, lastSeenAt: 't1' })
+    expect(supervisorHealth([row], [], false)).toEqual({ state: SupervisorHealthState.booting, pid: 42, lastSeenAt: 't1' })
   })
   it('a stale row is a crash, not a boot; nothing at all means nothing will run', () => {
-    expect(supervisorHealth([], [row], false)).toEqual({ state: 'stale', pid: 42, lastSeenAt: 't1' })
-    expect(supervisorHealth([], [], false)).toEqual({ state: 'none' })
+    expect(supervisorHealth([], [row], false)).toEqual({ state: SupervisorHealthState.stale, pid: 42, lastSeenAt: 't1' })
+    expect(supervisorHealth([], [], false)).toEqual({ state: SupervisorHealthState.none })
     // the pid file alone proves nothing — liveness is the heartbeat row, never the file
-    expect(supervisorHealth([], [], true)).toEqual({ state: 'none' })
+    expect(supervisorHealth([], [], true)).toEqual({ state: SupervisorHealthState.none })
   })
 
-  /**
-   * The heartbeat answers "is a SUPERVISOR beating"; the runtime lock answers "is anything
-   * DRIVING" — which may be a `--no-daemon` command or the graph server. Reporting `none` on the
-   * absence of the first alone told the operator "nothing will run" while a task was running:
-   * observed live during the memory A/B, where arm B ran under --no-daemon and the console showed
-   * the supervisor offline throughout.
-   */
+  // the lock answers 'is anything driving', which may be a --no-daemon command or the graph server
   it('a held runtime lock with no supervisor is a client driving, not nothing', () => {
-    expect(supervisorHealth([], [], false, true)).toEqual({ state: 'client' })
+    expect(supervisorHealth([], [], false, true)).toEqual({ state: SupervisorHealthState.client })
   })
 
   it('a live supervisor still reports as itself — it holds the lock too', () => {
-    expect(supervisorHealth([row], [], true, true)).toEqual({ state: 'ready', pid: 42, lastSeenAt: 't1' })
+    expect(supervisorHealth([row], [], true, true)).toEqual({ state: SupervisorHealthState.ready, pid: 42, lastSeenAt: 't1' })
   })
 
   it('a held lock outranks a stale row — something IS driving, whatever died earlier', () => {
-    expect(supervisorHealth([], [row], false, true)).toEqual({ state: 'client' })
+    expect(supervisorHealth([], [row], false, true)).toEqual({ state: SupervisorHealthState.client })
   })
 
   it('defaults to the old answer when the lock could not be read', () => {
     // an unreadable lock must never manufacture a driver
-    expect(supervisorHealth([], [], false)).toEqual({ state: 'none' })
+    expect(supervisorHealth([], [], false)).toEqual({ state: SupervisorHealthState.none })
   })
 })
 

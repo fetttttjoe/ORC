@@ -1,11 +1,11 @@
 import { Command } from 'commander'
 import {
   AUTHOR_SOURCE, CheckVerdict, ClaimClass, ClaimState, Door, errorMessage, KNOWLEDGE_DEFAULTS, KNOWLEDGE_REFUSAL, KnowledgePatch, NO_CHAT,
-  type ClaimDrift, type KnowledgeAccess, type KnowledgeClaim, type KnowledgeProblem, type MemoryAuthor,
+  type ClaimDrift, type KnowledgeAccess, type KnowledgeClaim, type KnowledgeProblem, type Author,
 } from '@orc/contracts'
 import { ALL_EVIDENCE_KINDS, BASIS_EVIDENCE_KINDS, driftCounts, type Evidence } from '@orc/knowledge-core'
 import type { EventLog, ProjectConfig } from '@orc/kernel'
-import { knowledgeAuthor, type WorkspaceFold } from './cwd-workspace'
+import { cliAuthor, type WorkspaceFold } from './cwd-workspace'
 import { enumArg } from './enum-arg'
 import { parsePositiveInteger } from './int-arg'
 import { CommandFailure, NO_PROJECT_ERROR } from './exit'
@@ -18,7 +18,7 @@ export const ANCHOR_ARG_SEPARATOR = '#'
 export const NO_LOG_OPEN = 'the event log is not reachable'
 export const DRIFT_WITHOUT_LOG = (reason: string): string => `drift read without the event log (${reason}): claim states come from git blame alone`
 export const VERIFY_REFUSAL = { correction: (id: string): string => `a false check of '${id}' takes exactly one of --retire or --text, not both` } as const
-const NO_WORKSPACE_AUTHOR: MemoryAuthor = { source: AUTHOR_SOURCE.cli, workspaceId: '', origin: NO_CHAT(Door.cli) }
+const NO_WORKSPACE_AUTHOR: Author = { source: AUTHOR_SOURCE.cli, workspaceId: '', origin: NO_CHAT(Door.cli) }
 const parseClass = enumArg<ClaimClass>('class', Object.values(ClaimClass))
 const parseVerdict = enumArg<CheckVerdict>('verdict', Object.values(CheckVerdict))
 
@@ -82,12 +82,12 @@ export function addPatch(o: AddOptions): KnowledgePatch {
   })
 }
 
-export async function runAdd(access: KnowledgeAccess, author: MemoryAuthor, o: AddOptions): Promise<string[]> {
+export async function runAdd(access: KnowledgeAccess, author: Author, o: AddOptions): Promise<string[]> {
   const result = await requirePort(access).write({ author, idempotencyKey: null }, addPatch(o))
   return [...result.added.map(r => `added ${r.id} → ${r.location}`), ...result.warnings]
 }
 
-export async function runRetire(access: KnowledgeAccess, author: MemoryAuthor, ids: string[], why: string): Promise<string[]> {
+export async function runRetire(access: KnowledgeAccess, author: Author, ids: string[], why: string): Promise<string[]> {
   const result = await requirePort(access).write({ author, idempotencyKey: null }, KnowledgePatch.parse({ retire: ids, why }))
   return [...result.retired.map(r => `retired ${r.id} from ${r.location}`), ...result.warnings]
 }
@@ -102,7 +102,7 @@ export const driftRows = (drifts: readonly ClaimDrift[]): DriftRow[] =>
     anchors: d.anchors.filter(a => a.state !== ClaimState.clean).map(a => ({ path: a.path, symbol: a.symbol, state: a.state })),
   }))
 
-export async function runDrift(access: KnowledgeAccess, author: MemoryAuthor, paths: string[], json: boolean, withoutLog: string | null = null): Promise<string[]> {
+export async function runDrift(access: KnowledgeAccess, author: Author, paths: string[], json: boolean, withoutLog: string | null = null): Promise<string[]> {
   const drifts = await requirePort(access).drift({ author, idempotencyKey: null }, paths.length === 0 ? {} : { paths })
   const rows = driftRows(drifts)
   const counts = driftCounts(drifts)
@@ -118,7 +118,7 @@ export async function runDrift(access: KnowledgeAccess, author: MemoryAuthor, pa
 export interface StatsOptions { top: number; json: boolean }
 
 export async function runStats(
-  access: KnowledgeAccess, author: MemoryAuthor, readEvidence: () => Promise<Evidence>, o: StatsOptions,
+  access: KnowledgeAccess, author: Author, readEvidence: () => Promise<Evidence>, o: StatsOptions,
 ): Promise<string[]> {
   const drifts = await requirePort(access).drift({ author, idempotencyKey: null }, {})
   const stats = knowledgeStats(await readEvidence(), drifts, o.top)
@@ -127,7 +127,7 @@ export async function runStats(
 
 export interface VerifyOptions { why: string; retire?: boolean; text?: string }
 
-export async function runVerify(access: KnowledgeAccess, author: MemoryAuthor, id: string, verdict: CheckVerdict, o: VerifyOptions): Promise<CheckOutcome> {
+export async function runVerify(access: KnowledgeAccess, author: Author, id: string, verdict: CheckVerdict, o: VerifyOptions): Promise<CheckOutcome> {
   const corrections = [o.retire === true, o.text !== undefined].filter(Boolean).length
   if (verdict === CheckVerdict.false && corrections !== 1)
     return { lines: [corrections === 0 ? KNOWLEDGE_REFUSAL.checkNeedsPatch(id) : VERIFY_REFUSAL.correction(id)], failed: true }
@@ -154,20 +154,20 @@ export function knowledgeCommand(deps: { requireKernel: () => WorkspaceFold; pro
   const print = (lines: readonly string[]): void => { for (const line of lines) console.log(line) }
   const backend = () => openKnowledge(needProject().config)
 
-  const author = () => { const { config } = needProject(); return knowledgeAuthor(deps.requireKernel(), config.dir) }
+  const author = () => { const { config } = needProject(); return cliAuthor(deps.requireKernel(), config.dir) }
   const needLog = () => {
     const project = needProject()
     if (!project.log) throw project.logUnreachable?.error ?? new Error(NO_LOG_OPEN)
     return { config: project.config, log: project.log }
   }
   const port = () => { const { config, log } = needLog(); return knowledgeAccess(openKnowledge(config), log, config.dir) }
-  const driftContext = async (): Promise<{ access: KnowledgeAccess; author: MemoryAuthor; withoutLog: string | null }> => {
+  const driftContext = async (): Promise<{ access: KnowledgeAccess; author: Author; withoutLog: string | null }> => {
     const { config, log, logUnreachable } = needProject()
     const withoutLog = (reason: string) => ({ access: knowledgeAccessWithoutEvidence(openKnowledge(config), config.dir), author: NO_WORKSPACE_AUTHOR, withoutLog: reason })
     if (!log) return withoutLog(logUnreachable?.reason ?? NO_LOG_OPEN)
     const evidence = evidenceOnce(log, BASIS_EVIDENCE_KINDS)
     try { await evidence() } catch (err) { return withoutLog(errorMessage(err)) }
-    return { access: knowledgeAccess(openKnowledge(config), log, config.dir, evidence), author: await knowledgeAuthor(deps.requireKernel(), config.dir), withoutLog: null }
+    return { access: knowledgeAccess(openKnowledge(config), log, config.dir, evidence), author: await cliAuthor(deps.requireKernel(), config.dir), withoutLog: null }
   }
 
   knowledge.command(`${KNOWLEDGE_SUBCOMMAND.card} <path>`).description('the claims anchored at or under a path')

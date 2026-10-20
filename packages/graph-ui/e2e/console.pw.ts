@@ -1,15 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import { must } from '@orc/contracts/fixtures'
 
-/**
- * What an operator must be able to do, proven end to end against the fixture server (real kernel,
- * real Postgres, scripted copilot — see e2e/server.ts).
- *
- * One test per capability that would ruin someone's day if it broke, and nothing else: a suite
- * asserting every rendered string costs more to maintain than the bugs it catches. Selectors are
- * landmarks, roles and visible text — never CSS classes, which is why the previous suite died
- * with the markup it was pinned to.
- */
+// One test per must-have capability; selectors are roles and visible text, never CSS classes
 
 const SEEDED_REQUEST = 'hello world request'
 
@@ -18,11 +10,7 @@ const ledger = (page: Page) => page.getByRole('region', { name: 'ledger' })
 const inspector = (page: Page) => page.getByRole('complementary', { name: 'inspector' })
 const copilot = (page: Page) => page.getByRole('region', { name: 'copilot' })
 
-// A node is only truly on screen when its CENTER lands inside the canvas box: toBeVisible is
-// satisfied by any non-zero box, including one the canvas transform has pushed outside the
-// clipped container — the empty-box-until-manual-fit failure renders every node "visible" while
-// the operator sees nothing. Shared by every flow-canvas test so each drawing carries the same
-// guarantee, not only the one that caught the bug.
+// The center must land inside the canvas box: toBeVisible passes for boxes pushed outside the clip
 type Boxed = { boundingBox(): Promise<{ x: number; y: number; width: number; height: number } | null> }
 async function expectCenteredInside(canvas: Boxed, node: Boxed): Promise<void> {
   await expect(async () => {
@@ -57,9 +45,6 @@ test('an open question is unmissable, verbatim, and answerable in one click', as
 
 test('the finish step\'s question is answerable in one click too', async ({ page }) => {
   await open(page)
-  // The kernel-appended finish step reads the same approval word as the plan gate — "record the
-  // decision (if any) and finish" — so the one-click button must be there. It is keyed on the step
-  // id, and a fixture with only a plan gate cannot tell that rule from "every gate gets a button".
   const gate = page.getByRole('region', { name: 'open question' }).filter({ hasText: 'Reply approve to finish' })
   await expect(gate).toContainText('Reply approve to finish')
   await expect(gate.getByRole('button', { name: 'approve' })).toBeVisible()
@@ -67,17 +52,12 @@ test('the finish step\'s question is answerable in one click too', async ({ page
 
 test('two open questions on one task render as two gate cards, not one', async ({ page }) => {
   await open(page)
-  // operatorState.openQuestions is keyed by (taskId, topic); a task-only `{#each}` key used to
-  // collapse this pair into one DOM node — the fixture's multi-question task carries two distinct
-  // topics on the same task specifically to catch that regression.
   await expect(page.getByRole('region', { name: 'open question' }).filter({ hasText: 'which model should analyze this?' })).toBeVisible()
   await expect(page.getByRole('region', { name: 'open question' }).filter({ hasText: 'which checkout should this run in?' })).toBeVisible()
 })
 
 test('an answer the kernel then REFUSES is shown, never swallowed', async ({ page }) => {
   await open(page)
-  // The fixture scripts the measured failure: the reply lands, finalize_plan rejects it. Before
-  // the failure card, eight approvals in a row read as the system looping with no reason given.
   await page.getByRole('region', { name: 'open question' }).filter({ hasText: 'approve this plan?' }).getByRole('button', { name: 'approve' }).click()
   await expect(ledger(page).getByText('finalize_plan refused')).toBeVisible({ timeout: 15_000 })
   await expect(ledger(page).getByText('not approved: the plan graph changed since the approval', { exact: true })).toBeVisible()
@@ -118,22 +98,12 @@ test('the copilot streams an answer and reports what it cost', async ({ page }) 
   await expect(copilot(page).getByText('e2e copilot reply').first()).toBeVisible({ timeout: 15_000 })
   await expect(copilot(page).getByText(/\d+ in ·/)).toBeVisible({ timeout: 15_000 })
 
-  // ONE copy, not two. The pane renders the journaled history plus the optimistic rows of the turn
-  // in flight; when the post-send refetch pulled the exchange back, nothing dropped the optimistic
-  // copy, so every question and answer sat on screen twice — permanently, measured at 2 copies
-  // still there 3s later. It surfaced as an intermittent strict-mode violation on the assertion
-  // above (whether the refetch beat the assertion decided it), which read as a flaky test rather
-  // than the user-visible duplication it was.
   await expect(copilot(page).getByText('what is going on?')).toHaveCount(1)
   await expect(copilot(page).getByText('e2e copilot reply')).toHaveCount(1)
 })
 
 test('a copilot exchange survives 450 events of agent-loop noise after it', async ({ page }) => {
   await open(page)
-  // The copilot pane used to restore history from a fixed-size tail of the whole project log; the
-  // fixture's 450 tool_call rows after the one seeded exchange pushed it out of a 400-row window
-  // entirely (observed, not hypothesised — see e2e/server.ts). The view registry's timeline read
-  // filters by kind BEFORE slicing, so the exchange is found regardless of what ran after it.
   await expect(copilot(page).getByText('a step failed and was retried; the retry is running now')).toBeVisible()
 })
 
@@ -150,8 +120,7 @@ test('the transcript renders tool payloads as readable JSON, not [object Object]
 
 test('the rail measures what it declares and keeps its controls inside', async ({ page }) => {
   await open(page)
-  // rem-based sizing is anchored to the ROOT font size: setting it on html once scaled the whole
-  // layout to 84%, so panes rendered narrower than declared and their contents spilled out.
+  // rem sizing follows the ROOT font size; shrinking html shrinks every pane
   const railBox = must(await rail(page).boundingBox(), 'rail bounding box')
   expect(railBox.width).toBe(288)
   const compose = must(await rail(page).getByRole('button', { name: /new request/ }).boundingBox(), 'new request bounding box')
@@ -163,8 +132,6 @@ test('a tall gate question never pushes the panes over each other', async ({ pag
   const gate = page.getByRole('region', { name: 'open question' }).filter({ hasText: 'wave 1' })
   await expect(gate).toBeVisible()
 
-  // the ledger and the copilot must remain stacked, not overlapping: an unbounded gate block
-  // grew past the pane and painted over the composer below it
   const ledgerBox = must(await ledger(page).boundingBox(), 'ledger bounding box')
   const copilotBox = must(await copilot(page).boundingBox(), 'copilot bounding box')
   expect(ledgerBox.y + ledgerBox.height).toBeLessThanOrEqual(copilotBox.y + 1)
@@ -191,12 +158,6 @@ test('a live run says how far it has got and how close to its ceiling', async ({
   await expect(monitor.getByTitle(/ceiling this step was frozen with/)).toHaveText('4/5')
 })
 
-/**
- * The plan's dependency graph actually DRAWS. Asserting the toggle exists would have passed while
- * the canvas rendered nothing — Svelte Flow needs a sized container and resolves parentId against
- * node order, and both fail silently into an empty box. So this reaches inside the canvas for a
- * step's own title and for its wave container.
- */
 test('the plan graph draws its steps inside wave containers, and collapses on demand', async ({ page }) => {
   await open(page)
   await rail(page).getByRole('button', { name: new RegExp(SEEDED_REQUEST) }).click()
@@ -205,8 +166,6 @@ test('the plan graph draws its steps inside wave containers, and collapses on de
   await expect(graph).toBeVisible()
   // a wave container: the subflow, not just a node sitting in a column
   await expect(graph.getByText(/^wave 1$/)).toBeVisible()
-  // and the seeded plan's step drawn INSIDE it — proof the child resolved against its parent
-  // rather than landing at the canvas origin, which is how a broken subflow fails
   const step = graph.getByText('s1', { exact: true }).first()
   await expect(step).toBeVisible()
   // ...and inside the viewport once the initial fit settles — see expectCenteredInside
@@ -219,15 +178,7 @@ test('the plan graph draws its steps inside wave containers, and collapses on de
   await expect(graph).toBeVisible()
 })
 
-/**
- * The rail must stay usable once a project has history. It renders every request in four groups;
- * with the settled pile expanded that overflows any laptop viewport, and a rail that grows instead
- * of scrolling puts "new request" and the live work off-screen with no way back.
- */
 test('the request rail scrolls instead of growing, and keeps the selection highlighted', async ({ page }) => {
-  // A short viewport reproduces what 20+ settled requests do on a normal one: content taller than
-  // the rail's own box. The bug this pins is a rail that GROWS to fit — pushing "new request" and
-  // the live work off-screen with no scrollbar to get back.
   await page.setViewportSize({ width: 1440, height: 420 })
   await open(page)
   const nav = rail(page)
@@ -256,20 +207,12 @@ test('the request rail scrolls instead of growing, and keeps the selection highl
   await inspector(page).getByRole('group', { name: 'plan dependency graph' }).getByText('s1', { exact: true }).first().click()
   await expect(row).toHaveAttribute('data-active', 'true')
 
-  // ...and the selection must be VISIBLE, not merely attributed. data-active was set correctly all
-  // along while --color-sidebar-accent was undefined, so the styled row rendered identically to
-  // every other one — an assertion on the attribute alone passed straight through that.
+  // data-active alone passes while --color-sidebar-accent is undefined; assert the visible style
   const other = nav.getByRole('button', { name: /gated plan request/ })
   const bgOf = (l: typeof row) => l.evaluate(el => getComputedStyle(el).backgroundColor)
   expect(await bgOf(row)).not.toBe(await bgOf(other))
 })
 
-/**
- * Multi-wave topology, which the single-step fixture cannot reach: three wave containers, four
- * steps distributed across them, and the two parallel steps sharing a container. A subflow that
- * fails to resolve its children drops them all at the canvas origin — visible here as steps
- * appearing outside their wave, or wave 2 holding the wrong count.
- */
 test('the plan graph draws a diamond across three wave containers', async ({ page }) => {
   await open(page)
   await rail(page).getByRole('button', { name: /shaped plan request/ }).click()
@@ -290,11 +233,6 @@ test('the plan graph draws a diamond across three wave containers', async ({ pag
   }
 })
 
-/**
- * The expanded canvas. It renders the SAME PlanGraph in a bigger box — so the assertion that
- * matters is that the dialog's canvas actually draws the plan, not merely that a dialog opened.
- * This is where plan editing will live, and an empty full-size canvas would be worse than none.
- */
 test('the plan graph opens full size and draws the same plan', async ({ page }) => {
   await open(page)
   await rail(page).getByRole('button', { name: /shaped plan request/ }).click()
@@ -317,11 +255,6 @@ test('the plan graph opens full size and draws the same plan', async ({ page }) 
   await expect(inspector(page).getByRole('group', { name: 'plan dependency graph' })).toBeVisible()
 })
 
-/**
- * A log scrolls in TIME, never sideways. One long id or summary used to widen the whole column,
- * and the horizontal scrollbar that appeared moved the seq spine — the thing the ledger is read by
- * — off screen. Checked at a narrow viewport because that is where it showed up.
- */
 test('the ledger never scrolls horizontally, however narrow the pane', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 800 })
   await open(page)
@@ -334,15 +267,7 @@ test('the ledger never scrolls horizontally, however narrow the pane', async ({ 
   await expect(scroller.or(ledger(page))).toBeVisible()
 })
 
-/**
- * A REJECTED run offers replan, never retry. Retry re-runs only what did not complete, so the
- * rejecting auditor would meet the same completed siblings and reach the same verdict — the loop
- * that ran three identical audit passes before the failure class existed.
- *
- * The whole click-path is exercised because the first attempt at this affordance shipped a button
- * wired to `revise`, which resumes an open feedback gate; a finished run has none, so it succeeded
- * silently and did nothing. Asserting the control exists would have passed against that.
- */
+// retry re-runs only what did not complete, so a rejected run offers replan, never retry
 test('a rejected run offers a replan and no retry, and reopening yields a new version', async ({ page }) => {
   await open(page)
   await rail(page).getByRole('button', { name: /rejected plan request/ }).click()
@@ -355,6 +280,6 @@ test('a rejected run offers a replan and no retry, and reopening yields a new ve
   await expect(reopen).toBeVisible()
   await reopen.click()
 
-  // edit appends a NEW plan version and stamps blocked -> awaiting_approval (kernel.editPlan)
+  // edit appends a NEW plan version and moves blocked -> awaiting_approval (kernel.editPlan)
   await expect(inspector(page).getByRole('button', { name: /^v2/ })).toBeVisible({ timeout: 10_000 })
 })

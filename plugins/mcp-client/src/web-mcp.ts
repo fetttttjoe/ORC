@@ -1,5 +1,4 @@
-// Web-research MCP server for the simulation — composition root only. Run: `bun web-mcp.ts`.
-// Sibling of fixture-server.ts so it resolves @modelcontextprotocol/sdk + zod from the workspace.
+// Composition root; sits beside fixture-server.ts to resolve the workspace's MCP SDK and zod
 import { errorMessage } from '@orc/contracts'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -41,8 +40,7 @@ server.registerTool(
   async ({ url }) => {
     try {
       const r = await fetchPublic(url) // SSRF guard: protocol, credentials, private ranges, every redirect hop
-      // A 404 body still reads like the page — Wikipedia's even carries the title — so returning it
-      // as content invites a citation to something that does not exist.
+      // a 404 body reads like the page and would invite a citation to something that does not exist
       if (!r.ok) return { content: [{ type: 'text', text: `fetch failed: HTTP ${r.status} for ${url} — no content` }], isError: true }
       const text = (await stripHtml(await r.text())).slice(0, PAGE_TEXT_LIMIT)
       return { content: [{ type: 'text', text: `URL: ${url}\nHTTP ${r.status}\n\n${text}` }] }

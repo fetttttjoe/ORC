@@ -20,11 +20,7 @@ import { seedShippedSkills } from './shipped-skills'
 import { openKnowledge } from './knowledge-open'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-// Registered the moment each resource exists, drained LIFO BEFORE the databases go. A bare
-// `await port.shutdown()` as the last statement of an it() is SKIPPED when an assertion above it
-// throws, leaking a launched DBOS runtime into every later test file in the process — that is
-// what turned one failed assertion on this branch into a 22-failure mystery, and it is why the
-// db.drop() below got skipped and left orc_test_* databases behind.
+// registered at creation, drained LIFO before the databases: a bare shutdown is skipped on a throw
 const cleanup: Array<() => Promise<void> | void> = []
 afterAll(async () => {
   for (const c of cleanup.reverse()) await c()
@@ -34,11 +30,8 @@ afterEach(() => mock.restore())
 
 // records the extraTools names each step actually receives, keyed by step id
 const toolNamesByStep: Record<string, string[]> = {}
-// whether the port forwarded ctx.knowledge (dbos-port.ts's `...(stepKnowledge && { knowledge })`,
-// fed by runtime.ts's stepTools returning `knowledge: stepKnowledge.knowledge`), keyed by step id
 const knowledgePresentByStep: Record<string, boolean> = {}
-// scoped_changes' own execute() result per step — proves runtime.ts actually wired
-// stepKnowledge.citing into scopedChangesTool's claimsAt, not just that the tool exists
+// scoped_changes' own result per step: proves claimsAt is wired, not just that the tool exists
 const scopedChangesByStep: Record<string, { isError: boolean; output: unknown }> = {}
 const ScopedChangesOutput = z.object({ citingClaims: z.array(z.unknown()).nullable(), degraded: z.array(z.string()).optional() })
 const toolNameExecutor: AgentExecutor<unknown> = {
@@ -58,9 +51,7 @@ const toolNameExecutor: AgentExecutor<unknown> = {
 
 const AUDITOR_STEP_NAMED_FOR_ITS_JOB = 'heal'
 
-// The boot line must account for the storage open, and on the real `orc serve` path bin.ts opens
-// storage BEFORE buildRuntime — so buildRuntime's own bootPhase('storage', ...) never runs there
-// and the phase silently vanished from the line. Seeding is the fix; these pin the rule.
+// bin.ts opens storage before buildRuntime, so buildRuntime's own 'storage' phase never runs
 describe('seedPhases (the boot line accounts for a storage open it did not perform)', () => {
   it("leads with 'storage' when the caller opened it and timed it", () => {
     expect(seedPhases(true, 1360)).toEqual([['storage', 1360]])
@@ -69,8 +60,7 @@ describe('seedPhases (the boot line accounts for a storage open it did not perfo
   it('stays empty when buildRuntime will time its own open — no invented phase', () => {
     // no shared storage: buildRuntime opens it itself and bootPhase records the real duration
     expect(seedPhases(false, undefined)).toEqual([])
-    // shared storage but the caller did not time it: reporting a number nobody measured is worse
-    // than omitting the phase, so absence wins over a fabricated zero
+    // shared storage the caller did not time: absence wins over a fabricated zero
     expect(seedPhases(true, undefined)).toEqual([])
     // a duration with no shared storage is not this path's business — buildRuntime times its own
     expect(seedPhases(false, 1360)).toEqual([])
@@ -83,11 +73,7 @@ describe('stepTools knowledge surfaces per step', () => {
     dbs.push(db)
     const vaultDir = mkdtempSync(path.join(tmpdir(), 'orc-rt-verify-'))
     const config = testConfig(db.url, { vaultDir, skillsDir: path.join(vaultDir, 'skills') })
-    // Seeded the way `orc init` seeds a real project: the kernel appends a finish step declaring
-    // ROLE_SKILL.finisher to every root plan, and a temp skills dir that nothing seeds fails the
-    // run at step init with "unknown skill 'role-finisher'". ONE seeder (shipped-skills.ts) — a
-    // harness pointing at the repo's own vault instead would hide exactly the case where orc ships
-    // a skill no project has yet.
+    // seeded like `orc init`: an unseeded skills dir fails at step init on role-finisher
     seedShippedSkills(config.skillsDir)
     const storage = await openStorage(db.url, { projectId: TEST_PROJECT_ID })
     const log = storage.events
@@ -98,7 +84,7 @@ describe('stepTools knowledge surfaces per step', () => {
     host.providers.set('fake', fakeProvider)
     host.executors.set('api-loop', toolNameExecutor)
     const port = await buildRuntime({ host, hub, config, storage, kernel })
-    // torn down HERE, in `finally`: DBOS launch is process-global and the next test builds its own runtime
+    // torn down HERE, in `finally`: DBOS launch is process-global; the next test builds its own
     try {
       const verifyTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'verify step', spec: 'audits' }, CLI)
       await kernel.proposePlan(verifyTask.id, draftFixture([stepFixture({ id: VERIFY_STEP_ID, role: STEP_ROLE.auditor })]), CLI)
@@ -115,10 +101,7 @@ describe('stepTools knowledge surfaces per step', () => {
       await kernel.approvePlan(healTask.id, undefined, undefined, CLI)
       expect(await (await port.startRun(healTask.id)).wait()).toBe(RunOutcome.done)
 
-      // The finish step is APPENDED by the kernel to every root plan, and proposePlan
-      // REFUSES a draft that names it — so the fixture is a plain one-step draft and the step under
-      // test is the one the kernel added. That is the only shape this step ever has in production; a
-      // hand-authored 'finish' step could not reach the port at all.
+      // the kernel appends the finish step and proposePlan refuses a draft naming it
       const finishTask = await kernel.createTask({ workspaceId: TEST_WORKSPACE_ID, title: 'finish step', spec: 'reconciles' }, CLI)
       await kernel.proposePlan(finishTask.id, draftFixture([stepFixture({ id: 'lead', role: STEP_ROLE.worker })]), CLI)
       await kernel.approvePlan(finishTask.id, undefined, undefined, CLI)
@@ -153,8 +136,7 @@ describe('stepTools knowledge surfaces per step', () => {
       // the port forwards ctx.knowledge to every step, not only the ones that get task_claims
       expect(knowledgePresentByStep['s1']).toBe(true)
       expect(knowledgePresentByStep[FINISH_STEP_ID]).toBe(true)
-      // scoped_changes' claimsAt is actually wired to stepKnowledge.citing — an empty array is
-      // fine (nothing was written), but null (the no-callback degraded path) is not
+      // an empty array is fine (nothing written); null (the degraded no-callback path) is not
       const scopedOut = ScopedChangesOutput.parse(scopedChangesByStep[VERIFY_STEP_ID]?.output)
       expect(scopedOut.citingClaims).not.toBeNull()
       expect(scopedOut).not.toHaveProperty('degraded')
@@ -302,11 +284,7 @@ describe('a step writes knowledge into the directory it runs in', () => {
   }, 60_000)
 })
 
-// The kernel APPENDS steps a planner never authored — the finish step declares
-// ROLE_SKILL.finisher, the commit step ROLE_SKILL.committer — so a checkout whose skills dir was
-// never seeded is already broken before anyone asks it to do anything. It used to say so only at
-// proposePlan ("unknown skill 'role-finisher'"), which is correct but arrives when a human is
-// already trying to start work. buildRuntime names it once per missing skill at boot instead.
+// buildRuntime names each missing kernel-appended role skill once at boot, not at proposePlan
 describe('buildRuntime role-skill pre-flight', () => {
   it('warns at boot for a skills dir nothing seeded, naming the skill and the fix — and still boots', async () => {
     const db = await createTestDb()
@@ -324,17 +302,14 @@ describe('buildRuntime role-skill pre-flight', () => {
     const warns: string[] = []
     spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { warns.push(a.join(' ')) })
     const port = await buildRuntime({ host, hub, config, storage, kernel })
-    // shut down HERE, in `finally`: DBOS launch is process-global and the next test builds its own runtime
+    // shut down HERE, in `finally`: DBOS launch is process-global; the next test builds its own
     try {
       const named = warns.filter(w => w.includes(ROLE_SKILL.finisher))
       // ONE line, not one per caller of the index: a repeated warning reads as a repeated fault
       expect(named).toHaveLength(1)
-      // the skill, where it was looked for, and the command that fixes it — a warning an operator
-      // cannot act on is one they learn to scroll past
+      // the skill, where it was looked for, and the command that fixes it
       expect(named[0]).toContain(config.skillsDir)
       expect(named[0]).toContain('orc init')
-      // every shipped role skill is missing here, so each gets its own line — the finish step is
-      // not the only kernel-appended step that declares one
       for (const skill of Object.values(ROLE_SKILL)) expect(warns.some(w => w.includes(skill))).toBe(true)
     } finally {
       await port.shutdown()

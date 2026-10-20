@@ -42,9 +42,7 @@ describe('orc bin bootstrap', () => {
     }
   }, 15_000)
 
-  // A caller that runs orc in EVERY repository (a session hook installed at user scope) has to tell
-  // "this directory is not an orc project" from "orc is broken here" without parsing a sentence:
-  // the first is silence, the second is worth a line.
+  // silence means not an orc project; a line means orc is broken here
   it('a directory that is no orc project exits with its own code, not the generic failure', async () => {
     const cwd = mkdtempSync(path.join(tmpdir(), 'orc-bin-noproject-'))
     // an unreachable port: the refusal must come BEFORE any connection is attempted
@@ -63,8 +61,6 @@ describe('orc bin bootstrap', () => {
 
     const result = await runBin(cwd, ['new', ''], env)
     expect(result.exitCode).toBe(1)
-    // the shared errorMessage/prettifyError rendering: the message and the offending path,
-    // never ZodError's raw issue-JSON dump (which starts with '[')
     expect(result.stderr).toContain('Too small')
     expect(result.stderr).toContain('at task.title')
     expect(result.stderr.trimStart().startsWith('[')).toBe(false)
@@ -105,8 +101,7 @@ export default {
     const { main } = tmpGitRepo()
     const env = { ORC_DATABASE_URL: database.url }
     expect((await runBin(main, ['init', '--name', 'demo'], env)).exitCode).toBe(0)
-    // two ordinary read commands: adoption is a boot-time fact, so the SECOND boot must find the
-    // record the first one wrote rather than mint a second workspace at the same path
+    // adoption is a boot-time fact: the second boot must find the first one's record
     expect((await runBin(main, ['tasks'], env)).exitCode).toBe(0)
     expect((await runBin(main, ['tasks'], env)).exitCode).toBe(0)
 

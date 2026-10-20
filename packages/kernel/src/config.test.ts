@@ -104,9 +104,7 @@ describe('loadConfig', () => {
     expect(loadConfig(dir).skillsDir).toBe(path.resolve(dir, 'custom/skills'))
   })
   it('trunkBranch is unset unless the settings file names one — unset means "ask git"', () => {
-    // No `.default('main')` on purpose: the trunk is resolved at workspace adoption (git's
-    // origin/HEAD first), and a default here would erase the "unset" state that lets a repo whose
-    // trunk is `master` or `develop` work without anyone writing it down.
+    // no .default('main'): unset keeps a master or develop trunk working unwritten
     expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).trunkBranch).toBeUndefined()
     expect(loadConfig(tmpProject({ trunkBranch: 'develop' })).trunkBranch).toBe('develop')
   })
@@ -122,8 +120,7 @@ describe('loadConfig', () => {
     expect(c.skillsDir).toBe(path.join(d, 'kb', 'skills'))
   })
   it('autoHealIterations defaults lean (15) and honors ORC_AUTO_HEAL_ITERATIONS', () => {
-    // deliberately far below maxIterations: the sweep is the one recurring auto-drafted spend,
-    // and a sweep that genuinely needs more signals 'partial' and continues under runtime grants
+    // far below maxIterations: the sweep is the one recurring auto-drafted spend
     expect(loadConfig(mkdtempSync(path.join(tmpdir(), 'orc-'))).autoHealIterations).toBe(15)
     withEnv({ ORC_AUTO_HEAL_ITERATIONS: '25' }, () => {
       expect(loadConfig('/tmp/x').autoHealIterations).toBe(25)
@@ -149,10 +146,10 @@ describe('loadConfig', () => {
     expect(() => loadConfig(tmpProject({ workspaceSetup: ['bun', ''] }))).toThrow()
   })
   it('execAllowlist reads from the config file — the operator trust boundary — and rejects empty entries', () => {
-    // the security-relevant path production uses: allowlist comes from .orc/config.json, not just the default
+    // the production path: the allowlist comes from .orc/config.json, not the default
     const dir = tmpProject({ execAllowlist: ['bun test', 'bun run typecheck'] })
     expect(loadConfig(dir).execAllowlist).toEqual(['bun test', 'bun run typecheck'])
-    // an empty entry would make the exec prefix check (`command.startsWith(' ')`) admit any spaced command
+    // an empty entry would make the exec prefix check admit any spaced command
     expect(() => loadConfig(tmpProject({ execAllowlist: ['bun test', ''] }))).toThrow()
   })
   it('seeds redactEnv with MCP $NAME secret refs so consented secrets get value-redacted', () => {
@@ -165,9 +162,7 @@ describe('loadConfig', () => {
     expect(c.redactEnv).toContain('NOTES_CREDENTIAL')  // $NAME ref harvested
     expect(c.redactEnv).not.toContain('PLAIN')         // literal env value is not a secret ref
   })
-  // Bun's own `.env` pickup is cwd-relative with no upward walk, so `orc` run from a subdirectory —
-  // or a supervisor spawned with a different cwd — used to lose every credential the project's .env
-  // holds, surfacing much later as `[provider_error] Anthropic API key is missing` inside a run.
+  // Bun's .env pickup is cwd-relative with no walk-up: a subdirectory run lost every credential
   it('loads the PROJECT dir .env, lets ORC_* in it reach config, and never overrides the real env', () => {
     const dir = tmpProject({})
     writeFileSync(path.join(dir, '.env'), '# a comment\nORC_ENVFILE_PROBE="from the file"\nORC_CONCURRENCY=9\n')
@@ -192,9 +187,7 @@ describe('loadConfig', () => {
     expect(c.maxDepth).toBe(3)
     expect(c.approvalPolicy).toEqual({ default: ApprovalMode.manual, rules: [] })
   })
-  // The default IS the invariant: only the cli door (which the web UI's reply also records as)
-  // satisfies the plan gate unless an operator edits this file. A project that never touches
-  // config must behave exactly as it did before the knob existed.
+  // the default IS the invariant: only the cli door satisfies the plan gate unless config says so
   it('groundedApprovalDoors defaults to [cli] and rejects a door the log never stamps', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-'))
     expect(loadConfig(dir).groundedApprovalDoors).toEqual([GroundedApprovalDoor.cli])
@@ -228,19 +221,11 @@ describe('loadConfig', () => {
     expect(requireProject(c).projectName).toBe('shared')
     // the vault is a projection of the PROJECT — one per repository, not one per checkout
     expect(c.vaultDir).toBe(path.join(main, 'vault'))
-    // …but vault/skills is TRACKED SOURCE, so it moves with the branch: flipped from the main
-    // checkout's path when a worktree on a branch that ADDS a role skill could not run its own
-    // plans (it read main's index and got "unknown skill 'role-finisher'").
+    // vault/skills is TRACKED SOURCE: a branch adding a role skill must find it in its own worktree
     expect(c.skillsDir).toBe(path.join(worktree, 'vault', 'skills'))
   })
 
-  // Re-rooting the vault's relative location only makes sense while the vault IS inside the
-  // repository. Measured: a vaultDir of '/srv/orc-vault' re-rooted to '<worktree>/srv/orc-vault',
-  // and '../shared-vault' to '<worktree>/../shared-vault' — two directories nobody named. A vault
-  // outside the repo is ONE directory for every checkout, and so are the skills in it.
-  // The worktree is NESTED here, not a sibling of the main checkout: at equal depth the escaping
-  // relative path happens to walk back to the same place, so a sibling fixture cannot see the bug.
-  // Unequal depth is the ordinary case anyway — a worktree pool lives wherever the operator put it.
+  // the worktree is NESTED: at equal depth the escaping relative path hides the bug
   it('a vaultDir outside the repository keeps its own skills dir — no re-rooting into the checkout', () => {
     const { main } = tmpGitRepo()
     initializeProject(main, 'shared')
@@ -280,11 +265,7 @@ describe('loadConfig', () => {
     expect(requireProject(loadConfig(worktree)).projectName).toBe('from-wt')
   })
   it('an unmarked subdirectory of a repo resolves to the repository toplevel, not to itself', () => {
-    // With no `.orc` anywhere the upward walk used to end at the starting directory, so orc
-    // answered about the subdirectory it was run in: the repository's `.env` went unread and a
-    // project minted at the resolved dir landed inside that subdirectory, invisible one level up.
-    // Git's toplevel is the honest answer for "which directory is this repo"; `start` remains the
-    // fallback outside a repository.
+    // no `.orc` anywhere: git's toplevel is the repo, `start` the fallback outside one
     const { main } = tmpGitRepo()
     const sub = path.join(main, 'sub')
     mkdirSync(sub, { recursive: true })
@@ -300,10 +281,7 @@ describe('loadConfig', () => {
     }
   })
   it('an orc project initialized in a subdirectory of a repo keeps its own identity', () => {
-    // naively re-rooting every dir inside a repo at the main checkout would lose this identity
-    // and `orc init` would mint a duplicate at the repo root (measured, 2026-09-14) — --git-dir
-    // equals --git-common-dir here (a main checkout, even from a subdirectory), which is the
-    // signal that this dir must NOT be re-rooted.
+    // --git-dir equals --git-common-dir here: a main checkout must NOT be re-rooted
     const { main } = tmpGitRepo()
     const nested = path.join(main, 'apps', 'x')
     mkdirSync(nested, { recursive: true })
@@ -318,9 +296,7 @@ describe('loadConfig', () => {
     initializeProject(main, 'shared')
     writeFileSync(path.join(main, '.env'), 'ORC_TEST_FROM_MAIN=1\nORC_TEST_SHARED=main\n')
     writeFileSync(path.join(worktree, '.env'), 'ORC_TEST_SHARED=worktree\n')
-    // a named function, not an inline `delete`, so TS's control-flow narrowing (which reads a
-    // bare `delete process.env.X` as proof the property stays `undefined`) doesn't fight the
-    // later assertions — same shape the sibling .env test above already uses.
+    // a named function: an inline `delete` narrows the property to `undefined` for later assertions
     const clear = (): void => { delete process.env.ORC_TEST_FROM_MAIN; delete process.env.ORC_TEST_SHARED }
     clear()
     try {

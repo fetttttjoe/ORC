@@ -27,62 +27,37 @@ export const PlanStep = z.object({
 })
 export type PlanStep = z.infer<typeof PlanStep>
 
-// matched values, never scattered literals: routing keys the runtime and M5a split path share.
-// `sweep` names the auto-heal reactor's machine-drafted maintenance plan (cli/auto-heal.ts). It is
-// its own strategy for exactly one reason: the kernel exempts it from the appended finish step
-// (FINISH_EXEMPT_STRATEGIES) — a plan nobody requested must never park on a human it never asked —
-// and nothing else in a one-step draft distinguishes it from an operator's quick task.
+// the sweep strategy skips the appended finish step (FINISH_EXEMPT_STRATEGIES)
 export const STRATEGY = { groundedPlan: 'grounded-plan', split: 'split', single: 'template:single', sweep: 'template:sweep' } as const
 
 // step-id vocabulary lives in step-ids.ts (zero-import: the browser and every plugin need it)
 export { STEP_ID, VERIFY_STEP_ID, COMMIT_STEP_ID, CHECKS_STEP_ID, CHECKS_EXECUTOR_REF, FINISH_STEP_ID, MASTERPLAN_NOTE_ID, type StepId } from './step-ids'
 import { STEP_ID, VERIFY_STEP_ID, MASTERPLAN_NOTE_ID } from './step-ids'
 
-// Step roles the system gives meaning to. `PlanStep.role` stays an open string on purpose — an
-// extension may introduce its own role — so this is the KNOWN set, not a closed enum.
+// the known set, not a closed enum: PlanStep.role stays an open string
 export const STEP_ROLE = {
   scout: 'scout', implementer: 'implementer', auditor: 'auditor', worker: 'worker',
-  // kernel-set only (withCommitStep): a planner note named 'commit' freezes as implementer, so the
-  // git_commit gate's role term keeps it unarmed.
+  // kernel-set only: a planner note named 'commit' freezes as implementer
   committer: 'committer',
-  // kernel-set only (withFinishStep), same reasoning as committer: it arms task_claims/record_decision
-  // on the appended finish step and nowhere a planner or split could claim it.
+  // kernel-set only (withFinishStep), same as committer
   finisher: 'finisher',
 } as const
 
-/**
- * May this step receive the `scoped_changes` list? Any auditor may, except the grounded planner,
- * which shares the role and has audited nothing — excluded by identity, not by the step id `verify`.
- */
+// the grounded planner shares the auditor role but has audited nothing
 export const stepMayVerify = (p: { stepId: string; role: string }): boolean =>
   p.role === STEP_ROLE.auditor && p.stepId !== STEP_ID.plan
 
 // The grounded plan step: it alone authors plan notes.
 export const stepMayPlan = (p: { stepId: string; role: string }): boolean => p.stepId === STEP_ID.plan && p.role === STEP_ROLE.auditor
 
-// The finish step's gate — BOTH terms, like the commit gate: the finisher role is kernel-set
-// (withFinishStep, enforced by proposeSplit's reserved-role refusal), so a planner-authored step
-// named 'finish' never arms task_claims/record_decision, and the role alone would arm them on a
-// step a split claimed. Shared by every gate that keys on the finish step so they cannot drift.
+// both terms: a planner-authored step named 'finish' must not arm the finish gate
 export const stepMayReconcile = (p: { stepId: string; role: string }): boolean =>
   p.stepId === STEP_ID.finish && p.role === STEP_ROLE.finisher
 
-// The shipped skills carrying each kernel-appended role contract: auditor+heal prose on the
-// verify step, the commit contract on the commit step, the finish contract on the finish step.
-// Named here because the freeze (kernel) appends the refs and `orc init` (cli) seeds the files —
-// a literal spelled twice would drift. The PROSE lives in vault/skills/<name>/SKILL.md,
-// operator-editable and audited via skill_loaded content-hash events; the kernel owns only WHICH
-// steps carry them, so a planner can neither author nor remove a role contract.
+// the freeze appends these refs, orc init seeds the files; the kernel owns who carries them
 export const ROLE_SKILL = { auditor: 'role-auditor', committer: 'role-committer', finisher: 'role-finisher' } as const
 
-// Which `author.source` values satisfy the grounded plan-approval gate (Kernel.approvedPlanHash).
-// OPERATOR-owned, and deliberately a file edit in .orc/config.json rather than anything a prompt
-// can reach: with 'mcp' accepted, the agent driving the MCP surface can approve the very plans it
-// authored — the same self-approval the toolset avoids structurally by shipping no approve tool.
-// The default keeps 'cli' alone, which is what the gate has always accepted.
-// There is deliberately NO 'web' member: a web-UI reply rides the actions layer's via-default and
-// is recorded as 'cli', so a 'web' entry would name a door the log never stamps. If that
-// attribution ever changes, this enum grows then — never before.
+// operator-owned file edit: accepting 'mcp' would let the driving agent approve its own plans
 export enum GroundedApprovalDoor {
   cli = 'cli',
   mcp = 'mcp',
@@ -92,7 +67,7 @@ export const Plan = z.object({
   taskId: z.string().min(1),
   version: z.number().int().positive(),
   strategyRef: z.string().min(1),
-  analyzerRef: z.string().min(1).optional(), // grounded-plan: which Analyzer seeds the graph (D2)
+  analyzerRef: z.string().min(1).optional(), // grounded-plan: which Analyzer seeds the graph
   costEstimateUSD: z.number().nonnegative().nullable(),
   steps: z.array(PlanStep).min(1),
 })
@@ -101,9 +76,7 @@ export type Plan = z.infer<typeof Plan>
 export const PlanDraft = Plan.omit({ taskId: true, version: true })
 export type PlanDraft = z.infer<typeof PlanDraft>
 
-// What the proposing agent authors in task_split (spec D3): a trimmed PlanDraft.
-// executorRef/modelRef/isolation/maxIterations are inherited from the parent step at expansion;
-// zone is the child's OWN declaration (write-fence for parallel siblings) — default unfenced.
+// task_split's trimmed PlanDraft; executor, model, isolation, maxIterations come from the parent
 export const ChildPlanStep = PlanStep.omit({
   executorRef: true, modelRef: true, isolation: true, zone: true, maxIterations: true,
 }).extend({
@@ -132,16 +105,11 @@ export function validatePlan(plan: Plan): { ok: true } | { ok: false; errors: st
     const v = planFieldViolations({ id: s.id, zone: s.zone })
     for (const msg of v.shape) errors.push(`step '${s.id}': ${msg}`)
   }
-  // A multi-step plan where EVERY step is parallel is a defect — it shipped twice in live testing,
-  // with verify auditing a file draft had not written yet because the two ran in one wave.
-  // Exempting plans that contain a '<VERIFY>' step does not work: that exemption is only reachable
-  // when the verify step is itself unordered, which is the very defect.
+  // an all-parallel multi-step plan is a defect: verify audited files draft had not yet written
   if (plan.steps.length > 1 && plan.steps.every(s => s.dependsOn.length === 0))
     errors.push(
       `malformed plan shape: ${plan.steps.length} steps, all parallel (every dependsOn empty) — declare dependencies between steps, e.g. a final '${VERIFY_STEP_ID}' step that dependsOn the work it checks`)
-  // Concurrent writers to one path are refused mechanically at execution (the zone write-fence), so
-  // a plan that schedules them is a defect the freeze can catch first. Ordering is what makes a
-  // shared zone safe: if neither step transitively depends on the other, they can land in one wave.
+  // concurrent writers are refused at execution; ordering is what makes a shared zone safe
   const dependsOnAll = new Map(plan.steps.map(s => [s.id, new Set(s.dependsOn)] as const))
   for (let changed = true; changed;) {
     changed = false

@@ -4,11 +4,7 @@
   import type { Snippet } from 'svelte'
   import type { Temperature } from '$lib/temperature'
 
-  /**
-   * The one labelled chip. Built on the registry Badge so overflow, focus and shape come from the
-   * design system; `temp` paints it with the two-temperature vocabulary, and the label truncates
-   * inside its own box — an unclipped chip used to spill across the row it belongs to.
-   */
+  // The one labelled chip: the label truncates inside its own box so it cannot spill the row
   let {
     temp = 'neutral',
     mono = false,

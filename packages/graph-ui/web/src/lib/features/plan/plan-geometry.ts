@@ -1,15 +1,4 @@
-/**
- * Ranks and lanes → pixel boxes, including one CONTAINER box per rank (the wave). Pure arithmetic,
- * zero imports (the topo.ts shape) — no renderer, no framework, no plan vocabulary.
- *
- * Split from plan-layout on purpose: layout answers "what depends on what" (graph theory, stable
- * forever), geometry answers "how big is a node" (presentation, changes with the design). Mixing
- * them meant a font-size decision could silently alter which column a step landed in.
- *
- * Child coordinates are RELATIVE TO THEIR CONTAINER. That is not a style choice — Svelte Flow
- * requires it of any node carrying a parentId, and a subflow whose children are absolutely placed
- * renders them stacked in the container's top-left corner.
- */
+// Ranks and lanes to pixel boxes; children are RELATIVE to their container, as Svelte Flow requires
 export interface PlacedStep {
   id: string
   rank: number
@@ -35,7 +24,7 @@ export const DEFAULT_GEOMETRY: GeometrySpec = {
 
 export interface Box { x: number; y: number; width: number; height: number }
 export interface GroupBox extends Box { id: string; rank: number; count: number }
-/** `x`/`y` are relative to the owning group — see the note above */
+/** `x`/`y` are relative to the owning group */
 export interface StepBox extends Box { id: string; groupId: string }
 
 export interface PlanGeometry {
@@ -55,9 +44,7 @@ export function planGeometry(placed: readonly PlacedStep[], spec: GeometrySpec =
   const steps: StepBox[] = []
   const groupW = spec.nodeW + spec.padX * 2
 
-  // Containers are laid out on a uniform pitch and every one is as TALL as the fullest wave, so a
-  // 1-step wave beside a 4-step wave still reads as one band rather than a ragged staircase. The
-  // steps inside a short wave are centred in it, which is what makes the diagonal read as flow.
+  // uniform pitch, every container as TALL as the fullest wave; short waves centre their steps
   const tallest = Math.max(0, ...[...byRank.values()].map(b => b.length))
   const groupH = spec.padTop + spec.padBottom + tallest * spec.nodeH + Math.max(0, tallest - 1) * spec.gapY
 

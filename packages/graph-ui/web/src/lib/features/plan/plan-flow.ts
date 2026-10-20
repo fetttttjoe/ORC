@@ -3,15 +3,7 @@ import { planLayout, type LayerableStep } from './plan-layout'
 import { DEFAULT_GEOMETRY, planGeometry, type GeometrySpec } from './plan-geometry'
 import { STEP_STATUS, waveState, type WaveState } from './plan-status'
 
-/**
- * The ONE adapter from a plan to a Svelte Flow graph. It is the only module in this feature that
- * knows Svelte Flow exists: layout is graph theory, geometry is arithmetic, editing is plan rules,
- * and all three stay usable if the renderer is ever swapped again (this is the third one).
- *
- * Waves become SUBFLOWS — a container node per rank with its steps as children (parentId +
- * extent:'parent'). That is what makes "these three run together" visible as a band instead of
- * something the reader has to infer from three nodes happening to share a column.
- */
+// The ONE adapter from a plan to Svelte Flow; waves become subflows (parentId + extent:'parent')
 export interface FlowStep extends LayerableStep {
   title: string
 }
@@ -54,9 +46,7 @@ export function planToFlow(steps: readonly FlowStep[], opts: PlanFlowOptions = {
   const inRank = Map.groupBy(layout.steps, p => p.rank)
   const statusesInRank = new Map([...inRank].map(([r, ps]) => [r, ps.map(p => status(p.id))]))
 
-  // Containers first. Svelte Flow resolves parentId against nodes EARLIER in the array, so a child
-  // listed before its group renders at the canvas origin instead of inside it — order is load-
-  // bearing here, not cosmetic.
+  // Containers first: Svelte Flow resolves parentId against EARLIER nodes, so order is load-bearing
   const groups: Node[] = geometry.groups.map(g => ({
     id: g.id,
     type: 'wave',
@@ -88,9 +78,7 @@ export function planToFlow(steps: readonly FlowStep[], opts: PlanFlowOptions = {
       source: e.from,
       target: e.to,
       type: 'smoothstep',
-      // The dashes move only on the edge FEEDING work that is happening now, so motion on the
-      // canvas always means "this is what the run is waiting on". Animating every edge would make
-      // a finished plan look busy and cost a repaint per frame for nothing.
+      // Dashes move only on the edge feeding running work, so motion means what the run waits on
       animated: status(e.to) === STEP_STATUS.running,
     })),
     height: geometry.height,

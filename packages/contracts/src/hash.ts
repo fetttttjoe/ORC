@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
 
-// The one content-hash used to fingerprint diffs (commit-tool's preview↔commit handshake) and
-// vault-projector's manifest — re-spelled twice as `sha256`/`sha` before this existed.
+// fingerprints diffs (commit-tool handshake) and the vault-projector manifest
 export const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex')

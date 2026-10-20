@@ -1,15 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 
-/**
- * A raw NUL byte in a source file makes it BINARY to grep and ripgrep: every search over that file
- * silently returns nothing, while it looks perfectly normal in an editor. That is how three of them
- * survived a commit in `exec-tool.ts`, and then a fourth in the very file written to fix those —
- * a unicode escape typed into a template literal can land as a literal byte instead.
- *
- * Scoped to non-test sources. When a SOURCE file needs that value at runtime, encode the parts
- * (JSON.stringify) rather than embedding the character — see tree-fingerprint.ts.
- */
+/** A raw NUL byte makes a file BINARY to grep, so searches over it silently return nothing */
 describe('source files stay searchable', () => {
   it('no non-test TypeScript or Svelte source contains a raw NUL byte', async () => {
     const tracked = (await Bun.$`git ls-files '*.ts' '*.svelte'`.text())

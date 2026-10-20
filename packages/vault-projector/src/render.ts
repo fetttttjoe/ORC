@@ -16,11 +16,9 @@ const statusClass = (s: StepState | undefined): 'done' | 'running' | 'failed' | 
     : s.status === StepRunStatus.failed ? 'failed'
     : 'running'
 
-// the one mermaid escaper lives in contracts (guards) — every producing view shares it
 const label = mermaidLabel
 
-// the status classDefs both step DAGs close with — one copy, so a colour tweak cannot
-// leave the index and execution views disagreeing about what "running" looks like
+// one copy: both step DAGs must agree on what "running" looks like
 const STEP_CLASS_DEFS = [
   '  classDef done fill:#1a7f37,color:#fff',
   '  classDef running fill:#bf8700,color:#fff',
@@ -28,13 +26,7 @@ const STEP_CLASS_DEFS = [
   '  classDef pending fill:#6e7781,color:#fff',
 ]
 
-// step nodes + dependency edges, shared by the index DAG and the execution graph — the two
-// views differ only in label text (and the extra nodes/classDefs a caller appends)
-// Mermaid node ids share ONE namespace per graph, and a plan step id is only constrained to
-// `^[\w-]+$` — so a step legitimately named `op0` collided with the first operation node: the two
-// merged into one box and the edge between them rendered as a self-loop. Prefixing BOTH families
-// makes the mapping injective, because a step named `op_0` becomes `s_op_0`, which nothing
-// generated here can spell.
+// step and operation node ids share one mermaid namespace; the s_/op_ prefixes keep them apart
 const stepNode = (stepId: string): string => `s_${stepId}`
 const opNode = (i: number): string => `op_${i}`
 const artNode = (i: number): string => `art_${i}`
@@ -61,16 +53,13 @@ function mermaidDag(plan: Plan, steps: Map<string, StepState> | undefined): stri
   return ['```mermaid', 'graph TD', ...nodes, ...STEP_CLASS_DEFS, '```'].join('\n')
 }
 
-// nullable cost renders as a single placeholder — pinned in the render suite; consistent
-// between per-step rows and the totals row so the same events always yield the same bytes.
+// a null cost renders as one placeholder, identical in step rows and totals
 const NO_COST = '—'
 const cost = (c: number | null): string => (c === null ? NO_COST : String(c))
 // per-step / totals row of the ## Usage table — numeric cells need no escaping
 const usageRow = (label: string, u: Usage): string =>
   `| ${label} | ${u.inputTokens} | ${u.outputTokens} | ${u.cacheReadTokens ?? 0} | ${cost(u.costUSD)} |`
 
-// fold-derived per-step usage table: one row per plan step in stored order (never Map
-// iteration — that is what keeps the render byte-identical), plus a totals row from taskUsage.
 function usageTable(task: TaskNode, plan: Plan, state: State): string {
   const header = '| Step | Input | Output | Cache Read | Cost USD |\n| --- | --- | --- | --- | --- |'
   const rows = plan.steps.map(st => usageRow(st.id, stepUsage(state, task.id, st.id)))
@@ -78,8 +67,6 @@ function usageTable(task: TaskNode, plan: Plan, state: State): string {
   return [header, ...rows, totals].join('\n')
 }
 
-// Plan topology plus live operation nodes: which effects ran, how many attempts, and
-// whether any node is still unresolved (started with no completion — the honest gap).
 function renderExecution(task: TaskNode, plan: Plan | undefined, state: State): string {
   const head = { type: 'execution', task: task.id }
   if (!plan) return fm(head, `# Execution: ${task.title}\n\n_no plan yet_`)
@@ -121,10 +108,7 @@ function renderTaskIndex(task: TaskNode, plan: Plan | undefined, steps: Map<stri
     '- [Log](log.md)',
     '- [Execution](execution.md)',
     '- [Lineage](lineage.md)',
-    // only steps that actually left events: a session file is written per step WITH events, so
-    // listing every plan step put a dead link in the index for each step that had not started —
-    // the vault is read in Obsidian, where a link to a missing file is indistinguishable from a
-    // link to an empty one
+    // link only steps with events: only those get a session file
     ...(plan?.steps ?? []).filter(s => sessions.has(s.id)).map(s => `- [Session: ${s.id}](sessions/${s.id}.md)`),
   ].filter(Boolean).join('\n')
   const dag = plan ? mermaidDag(plan, steps) : '_no plan yet_'
@@ -165,11 +149,13 @@ function renderSession(stepId: string, events: EventRecord[], step: StepState | 
   return fm({ type: 'session', step: stepId, status: step?.status ?? 'pending' }, `# Session: ${stepId}\n\n${parts.join('\n') || '_no activity yet_'}`)
 }
 
+export const VAULT_TASKS_DIR = 'tasks'
+
 export function renderTaskFiles(taskId: string, events: EventRecord[]): VaultFiles {
   const state = fold(events)
   const task = state.tasks.get(taskId)
   if (!task) return {}
-  const base = `tasks/${taskId}`
+  const base = `${VAULT_TASKS_DIR}/${taskId}`
   const plans = state.plans.get(taskId)
   const steps = state.steps.get(taskId)
   // folded BEFORE the index so the index can link only the session files this render actually emits
@@ -203,7 +189,7 @@ export function renderRootIndex(tasks: TaskNode[]): string {
   // one deterministic order for every section — the render must not depend on input order
   const sorted = [...tasks].sort((a, b) =>
     a.depth - b.depth || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
-  const link = (t: TaskNode, suffix: string): string => `- [${t.title}](tasks/${t.id}/index.md) — ${suffix}`
+  const link = (t: TaskNode, suffix: string): string => `- [${t.title}](${VAULT_TASKS_DIR}/${t.id}/index.md) — ${suffix}`
   const running = sorted.filter(t => t.status === TASK_STATUS.running)
   const active = running.length ? running.map(t => link(t, 'running')).join('\n') : '_none_'
   const all = sorted.length ? sorted.map(t => link(t, t.status)).join('\n') : '_no tasks_'

@@ -9,7 +9,6 @@ const TRANSIENT_CODE = new Set([
   'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
 ])
 
-// DOMException identifies a timeout only by `name`; its numeric `code` is a legacy constant, not a string
 // AbortError is excluded: a deliberate cancellation is not a fault to retry
 const TRANSIENT_NAME = new Set(['TimeoutError'])
 

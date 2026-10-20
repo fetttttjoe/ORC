@@ -5,7 +5,7 @@ import type { LogRow as WireLogRow } from './wire'
 // the row IS the wire schema the browser parses — two declarations drifted once (`failure`)
 export type LogRow = z.infer<typeof WireLogRow>
 
-// the one truncator — shared with copilot.ts (was duplicated there)
+// the one truncator, shared with copilot.ts
 export const snip = (v: unknown, n = 140): string => {
   const s = (typeof v === 'string' ? v : JSON.stringify(v) ?? '').replace(/\s+/g, ' ').trim()
   return s.length > n ? s.slice(0, n) + '…' : s
@@ -29,7 +29,7 @@ const decisionLine = (p: Pick<KnowledgeWrittenPayload, 'decisionsRecorded' | 'de
 type PartialRow = Partial<Pick<LogRow, 'line' | 'authorTaskId' | 'exchange'>>
 type Handler = (e: EventRecord) => PartialRow | null
 
-// the schema is an argument: indexing PAYLOAD_SCHEMAS by a type parameter widens payload to every kind (measured)
+// the schema is an argument: indexing PAYLOAD_SCHEMAS by a type parameter widens (measured)
 function entry<S extends z.ZodType>(
   schema: S,
   handle: (payload: z.infer<S>, e: EventRecord) => PartialRow,
@@ -166,7 +166,7 @@ const SUMMARIZE = {
   })),
 } satisfies Record<EventKind, Handler>
 
-// shared by the web log, `orc watch` and any TUI feed; a payload that fails its schema gets the generic snip
+// shared by the web log, orc watch and any TUI feed; an unparseable payload gets the generic snip
 export function summarizeEvent(e: EventRecord): LogRow {
   const r = SUMMARIZE[e.kind](e)
   return {

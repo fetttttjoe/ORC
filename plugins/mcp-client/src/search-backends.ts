@@ -1,5 +1,4 @@
-// The search seam, shaped like ModelProvider: adding Brave or Exa is a new
-// implementation plus a registry entry, not another branch in the server.
+// New backends are an implementation plus a registry entry, not a branch in the server
 import { z } from 'zod'
 import { stripHtml } from './html-text'
 import { USER_AGENT } from './net-guard'
@@ -16,7 +15,7 @@ export interface SearchProvider {
   search(query: string, limit: number): Promise<SearchHit[]>
 }
 
-// Parsed, never asserted: an upstream shape change must fail here, not surface as undefined in a note.
+// Parsed, never asserted: an upstream shape change must fail here, not surface as undefined later
 const WikiResponse = z.object({
   query: z.object({ search: z.array(z.object({ title: z.string(), snippet: z.string() })).default([]) }).optional(),
 })
@@ -72,9 +71,7 @@ export function createTavilySearch(apiKey: string): SearchProvider {
 
 export type SearchEnv = Readonly<Record<string, string | undefined>>
 
-// The composition root for this seam. Env arrives as a value so the choice is testable without
-// mutating a global. A broken key fails loudly rather than downgrading:
-// a run that silently changed corpus mid-way is worse than one that stops.
+// Env arrives as a value so the choice is testable; a broken key fails loudly, never downgrades
 export function selectSearchProvider(env: SearchEnv): SearchProvider {
   const key = env.TAVILY_API_KEY?.trim() ?? ''
   return key === '' ? createWikipediaSearch() : createTavilySearch(key)

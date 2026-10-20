@@ -36,17 +36,10 @@
     }
   }
 
-  /**
-   * The answer to a REJECTED run. `revise` would be wrong here and was: it resumes an open
-   * feedback gate, and a finished run has none — replyFeedback returns null and the click does
-   * nothing. `edit` is the documented repair path (see kernel.editPlan's `blocked` branch):
-   * it appends the current steps as a new version and stamps blocked → awaiting_approval, so the
-   * plan becomes editable and approvable instead of re-runnable.
-   */
+  // A rejected run reopens via edit: revise resumes an open gate, and a finished run has none
   async function reopen(): Promise<{ version: number }> {
     const draft = plan
-    // the template gates the control on `plan`, so this only fires if the prop went missing —
-    // a thrown message beats silently reopening an empty plan
+    // the template gates the control on plan; a thrown message beats reopening an empty plan
     if (!draft) throw new Error('no plan version on screen to reopen')
     return actions.edit(taskId, { strategyRef: draft.strategyRef, costEstimateUSD: draft.costEstimateUSD, steps: draft.steps })
   }
@@ -74,9 +67,7 @@
   {#if move.kind === 'retry' && canRun}
     <Button size="sm" variant="destructive" disabled={busy} onclick={() => void perform('retry started', () => actions.retry(taskId))}>retry failed steps</Button>
   {:else if move.kind === 'replan' && canRun && plan}
-    <!-- Reopens the approved plan as a new EDITABLE version (kernel.editPlan admits `blocked` and
-         stamps it awaiting_approval). No model call, so a rejected plan costs nothing to reopen —
-         what costs money is re-running one whose verdict cannot change. -->
+    <!-- Reopen as a new editable version: no model call, unlike re-running an unchanged verdict -->
     <Button size="sm" disabled={busy} onclick={() => void perform('plan reopened for editing', reopen)}>
       reopen plan for editing
     </Button>

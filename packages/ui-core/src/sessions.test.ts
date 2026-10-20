@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { z } from 'zod'
-import { AUTHOR_SOURCE, Door, EVENT_KIND, IsolationTier, NO_CHAT, type EventInput, type MemoryAuthor, type Origin, type Scope, ScopeType } from '@orc/contracts'
+import { AUTHOR_SOURCE, Door, EVENT_KIND, IsolationTier, NO_CHAT, type EventInput, type Author, type Origin, type Scope, ScopeType } from '@orc/contracts'
 
 // these histories are arranged through the terminal door; the run halves are the supervisor's
 const CLI = NO_CHAT(Door.cli)
@@ -13,9 +13,7 @@ import type { ViewParams } from './views/view'
 import { VIEW } from './wire'
 import { authorFixture, must, planNoteFixture } from '@orc/contracts/fixtures'
 
-// Every read here goes through the door helper the tools use, against a REAL session: the views'
-// own unit tests answer from a hand-built model, and what those cannot show is that the thing the
-// session folds out of Postgres is the same thing a view reads.
+// reads go through the door helper against a real session; view unit tests use a hand-built model
 const PROJECT: Scope = { type: ScopeType.project }
 const taskScope = (id: string): Scope => ({ type: ScopeType.task, id, subtree: false })
 const logOf = async (sessions: ProjectSessions, params: ViewParams<'timeline'> = { scope: PROJECT }) =>
@@ -25,10 +23,7 @@ const logOf = async (sessions: ProjectSessions, params: ViewParams<'timeline'> =
 const TaskDetailView = z.object({ task: z.object({ title: z.string() }) })
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-// Everything setup() opens is torn down HERE, before its database is dropped, whether or not the
-// test remembered — same idiom as graph-ui's server.test.ts. createProjectSessions holds an event
-// stream AND a project watch; a test that returned early on a failed expect used to leave both
-// alive against a database this afterAll then dropped.
+// torn down before the database is dropped, even when a test returned early on a failed expect
 const openSessions: Array<{ close: () => Promise<void> }> = []
 const openStores: Array<{ close: () => Promise<void> }> = []
 afterAll(async () => {
@@ -51,7 +46,7 @@ async function setup() {
   return { storage, taskId: t.id, sessions }
 }
 
-const claimsWritten = (why: string, author: MemoryAuthor, origin: Origin): EventInput => ({
+const claimsWritten = (why: string, author: Author, origin: Origin): EventInput => ({
   ...origin,
   taskId: null, stepId: null, runToken: null, kind: EVENT_KIND.knowledge_written,
   payload: { added: [], changed: [], retired: [], files: [], why, decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author },
@@ -230,9 +225,7 @@ describe('ProjectSessions', () => {
     expect((await logOf(sessions, { scope: PROJECT, kinds: [EVENT_KIND.feedback_requested] })).map(r => r.seq))
       .toEqual([q1.seq, q2.seq])
 
-    // beforeSeq is EXCLUSIVE and pages BACKWARD: the ledger asks for what precedes its oldest
-    // row, and with limit it must get the rows nearest the cursor, not the start of the log
-    // (the head of the unlimited read is the task's own task_created row, so assert the tail)
+    // beforeSeq is exclusive and pages backward: with a limit, the rows nearest the cursor
     const before = await logOf(sessions, { scope: taskScope(taskId), beforeSeq: q2.seq })
     expect(before.every(r => r.seq < q2.seq)).toBe(true)
     expect(before.map(r => r.seq).slice(-3)).toEqual([s1.seq, q1.seq, s2.seq])
@@ -241,8 +234,7 @@ describe('ProjectSessions', () => {
     expect((await logOf(sessions, { scope: PROJECT, beforeSeq: s1.seq, limit: 5 })).every(r => r.seq < s1.seq)).toBe(true)
   })
 
-  // A guard, not a rendering test: the plan wire must not grow a serialized diagram back, because
-  // a projection nothing renders is built and paid for on every request.
+  // a guard: the plan wire must not grow a serialized diagram back, nothing renders it
   it('the plan wire carries waves and notes only — no rendered diagram', async () => {
     const { storage, taskId, sessions } = await setup()
     await storage.events.append(planNoteEvent(taskId, 'sub'))

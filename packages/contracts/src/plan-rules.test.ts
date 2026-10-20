@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { PLAN_FIELD_RULES, planFieldViolations, RULE_SEVERITY, zoneEntryMisuse } from './plan-rules'
 
-// A planner froze a zone whose single entry was several globs joined with newlines
-// (`["a/**\nb.ts"]`). Nothing refused it, the frozen fence then matched no real path, two steps were
-// refused every write to their own files, and there was no repair path — a whole slice's pipeline
-// was cancelled. These cases pin the character set and the wording that teaches the fix.
+// pins the character set and the wording that teaches the fix
 describe('zoneEntryMisuse', () => {
   const cases: [string, string, string][] = [
     ['a newline-joined entry — the observed failure', 'a/**\nb.ts', 'a/**\\nb.ts'],

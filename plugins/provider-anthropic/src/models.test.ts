@@ -1,10 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { listAnthropicModels } from './index'
 
-// listModels contract (packages/contracts/src/execution.ts): REJECT when the API cannot answer;
-// [] is reserved for "answered, nothing usable". The cost-table union lives in discovery
-// (modelUniverse), not here — the served claude set survives an offline API either way, but
-// `reachable` must stop lying about it.
+// listModels rejects when the API cannot answer; [] means answered with nothing usable
 describe('listAnthropicModels', () => {
   const KEYS = ['ORC_ANTHROPIC_AUTH', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'] as const
   const saved: Record<string, string | undefined> = {}

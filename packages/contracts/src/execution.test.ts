@@ -127,8 +127,7 @@ describe('modelIdsFrom', () => {
     expect(modelIdsFrom({ data: [] }, 'data', 'id')).toEqual([]) // positively empty
   })
   it('THROWS when the list key is missing or not an array — an unparseable body is not an answer', () => {
-    // [] here would flow into discovery as "reachable and empty" and append models: [] over the
-    // real catalog — the silence-vs-empty confusion the listModels contract exists to kill.
+    // [] would read as reachable-and-empty and append models: [] over the real catalog
     expect(() => modelIdsFrom({ nope: true }, 'data', 'id')).toThrow('data')
     expect(() => modelIdsFrom('not even a record', 'data', 'id')).toThrow('data')
   })

@@ -1,103 +1,51 @@
-// Mutating capabilities, implemented by whoever owns a Kernel + ExecutionPort (the CLI today —
-// see packages/cli/src/actions.ts). Adapters (web server, future TUI) receive this interface;
-// ui-core itself never constructs one. Implementations return data and never print: each
-// adapter renders results its own way (CLI lines, web toasts).
+// implemented by whoever owns a Kernel and ExecutionPort; return data, never print
 import type { ApprovedBy, Decision, DecisionFilter, DecisionInput, DecisionStatus, DecisionSummary, Origin, PlanDraft, Workspace, WorkspaceWithHealth } from '@orc/contracts'
 
-// The two ways a plan is stamped, named rather than merged into one bag of optionals: a template
-// the action builds, or a draft the door parsed (--file, --from-vault, an authored request body).
-// Validation (every step's model ref) is the ACTION's either way, so an authored draft gets the
-// same checks at every door.
+// a template the action builds or a draft the door parsed; validation is the action's either way
 export type PlanSource = { template: { modelRef: string; skillRefs: string[] } } | { draft: PlanDraft }
 
-// Every MUTATION takes `origin: Origin` as its required LAST parameter — the interaction and the
-// door the call entered by, which the kernel stamps on every event it appends. Identity, never
-// authority: no verb here may branch on it. Reads take none; they record nothing.
+// every mutation takes origin last: identity, never authority; no verb may branch on it
 export interface OrcActions {
   newTask(input: {
     title: string
     spec?: string
     parentId?: string
-    // Omitted = the workspace the serving process's own checkout is (the CLI door's default too).
-    // Never null: a task without a workspace is refused by the kernel, not stored unbound.
+    // omitted = the serving process's own workspace; never null: the kernel refuses unbound tasks
     workspaceId?: string
-    // Required-nullable, never optional: a forgotten budget must be a compile error, not a spend
-    // cap that silently stops existing (which is what routing `orc new --budget` through an
-    // optional key would have done).
+    // required-nullable, never optional: a forgotten budget must not silently remove the cap
     budgetUSD: number | null
-    // cwd null = resolve from the task's own workspace at run time. A door that filled it in with
-    // the directory the serving process sits in would drag a task created in one worktree into
-    // another checkout.
+    // cwd null = the task's own workspace at run time, not the serving process's directory
     grounded?: { modelRef: string; cwd: string | null; analyzerRef?: string }
   }, origin: Origin): Promise<{ taskId: string }>
   propose(taskId: string, plan: PlanSource, origin: Origin): Promise<{ version: number; steps: number }>
-  // pre-approval only (the kernel enforces it). Same PlanSource as propose: a door that offers a
-  // template edit must not carry its own copy of what a template plan is.
+  // pre-approval only (the kernel enforces it); same PlanSource as propose
   edit(taskId: string, plan: PlanSource, origin: Origin): Promise<{ version: number }>
-  // approvedBy: the web door omits it (human click → 'human'); the MCP door under
-  // --autonomy full passes 'mcp' so replay shows exactly who approved (P7 attribution).
-  // Both optionals collapsed into one options object: TS1016 forbids an optional parameter before
-  // the required origin, and two `| undefined` positionals would be passed blind at every door.
+  // approvedBy: web omits it ('human'); MCP under --autonomy full passes 'mcp'
   approve(taskId: string, opts: { version?: number; approvedBy?: ApprovedBy.human | ApprovedBy.mcp }, origin: Origin): Promise<{ version: number }>
-  // A run is REQUESTED, never started here: the supervisor holding the runtime turns the recorded
-  // ask into a workflow, so there is no handle to hand back — callers watch the event stream.
-  // Omitted cwd = the task's own workspace, resolved by the kernel (requestRun). A door that filled
-  // it in with the directory the serving process happens to sit in would drag a task created in one
-  // worktree back into another checkout; an explicit cwd is the deliberate override.
-  // `since` is the log sequence the request was recorded at — a caller that watches (the CLI's
-  // tail) must start from it; re-tailing from the top replays the whole task's history.
+  // requested, not started: the supervisor owns the runtime; tail from since, not the top
   run(taskId: string, cwd: string | null, origin: Origin): Promise<{ requested: true; since: number }>
-  // Every usable model ref, discovered — no per-door flag: a door that folded the log answered []
-  // for a project with none yet, and a driver told { refs: [] } cannot name a model at all.
-  // The stall a flag guarded against is bounded at the discovery seam, per provider.
+  // no per-door flag: a door that folded the log answered [] for a project with none yet
   listModels(): Promise<string[]>
-  // The ACTIVE workspaces of this project — an archived record is finished business (the operator
-  // archived that path on purpose) and is not listed.
-  //
-  // Each record comes WITH its health, from the one derivation `orc ws ls` prints: a driver asking
-  // "which checkout is this in" and a human reading the terminal must not be handed two readings of
-  // the same workspace. Ordered attention-first (dangling → waiting → active → idle → merged), so a
-  // caller that renders the list in order is already showing what needs a person.
+  // active workspaces only, each with its health from the derivation orc ws ls prints
   listWorkspaces(): Promise<WorkspaceWithHealth[]>
-  // One request, one checkout: creates the git worktree + branch under the project's .orc/worktrees,
-  // records it as a managed workspace, and drafts the request as its first task. `base` defaults to
-  // the HEAD of the checkout this door serves. taskId is nullable because a workspace can exist
-  // WITHOUT a request — the terminal's `orc ws new --no-task`, for a human about to work the tree
-  // themselves. This door has no such flag (a driver asking for a workspace is asking for a
-  // request), so the shape is shared with that path rather than a case this one produces.
+  // taskId is nullable: a workspace can exist without a request (orc ws new --no-task)
   newWorkspace(input: { title: string; spec?: string; base?: string }, origin: Origin): Promise<{ workspace: Workspace; taskId: string | null }>
   listDecisions(filter: DecisionFilter, origin: Origin): Promise<DecisionSummary[]>
   readDecision(id: string, origin: Origin): Promise<Decision>
   recordDecision(input: DecisionInput, origin: Origin): Promise<{ id: string; status: DecisionStatus; superseded: string | null }>
-  // `projectId` names the project to answer IN; omitted means this door's own. Answering is the one
-  // human action that is not execution: the append only unblocks the parked step, and a supervisor's
-  // router carries it into the workflow off feedback_provided — so unlike run/retry/propose it binds
-  // to no runtime and no started directory. The graph UI lists and streams every project in the
-  // database; fencing this to its home project made it show a question it then refused to let the
-  // user answer, sending them to a terminal for a row it already had that project's log to write.
-  // `supervised` is false when nothing is live in that project right now: the answer is durable and
-  // the next supervisor picks it up, but the human who typed it must be told it is only queued.
+  // projectId defaults to this door's; reply binds to no runtime; supervised=false means only queued
   reply(taskId: string, text: string, projectId: string | undefined, origin: Origin): Promise<{ answered: boolean; supervised: boolean }>
   retry(taskId: string, cwd: string | null, origin: Origin): Promise<{ requested: true; since: number }>
-  // grounded-plan refinement: annotate queues feedback on one plan-note; revise annotates the
-  // scoped notes AND wakes the parked plan agent (the conversational gate). `refs` is required and
-  // may be empty — an omitted list and an empty one always meant the same thing.
+  // annotate queues feedback on one plan-note; revise also wakes the parked plan agent
   annotate(taskId: string, noteId: string, text: string, refs: string[], origin: Origin): Promise<{ noteId: string }>
   revise(taskId: string, text: string, scope: string[], origin: Origin): Promise<{ topic: string | null }>
-  // project chat management: the display name is a project_identified event; a new project mints
-  // identity in the directory AND appends that event, making it listable at once. A directory that
-  // already holds an orc project is REUSED (reused: true), never re-minted.
+  // a display name is a project_identified event; an existing orc directory is reused
   renameProject(name: string, origin: Origin): Promise<{ name: string }>
   newProject(dir: string, name: string, origin: Origin): Promise<{ projectId: string; reused: boolean }>
-  // the subtree's task ids the cancel stamped; one already terminal is not among them
+  // the subtree's task ids the cancel marked; one already terminal is not among them
   cancel(taskId: string, origin: Origin): Promise<{ cancelled: string[] }>
-  // destructive test-reset of the CURRENT project: erases pending durable-execution state
-  // (crashed runs included — nothing gets recovered into the fresh log), deletes its events +
-  // operation journal; identity and the knowledge files stay, so the chat survives empty.
-  // warnings report best-effort cleanup steps that failed — the log purge itself is committed
-  // once this resolves.
+  // destructive test-reset of the current project; identity and knowledge files stay
   purgeProject(origin: Origin): Promise<{ events: number; operations: number; warnings: string[] }>
-  // remove a FOREIGN project outright: events + journal + durable-execution state, no identity
-  // re-seed — it disappears from the chats list. The home project refuses (purge is its reset).
+  // remove a foreign project outright; the home project refuses (purge is its reset)
   deleteProject(projectId: string, origin: Origin): Promise<{ events: number; operations: number; warnings: string[] }>
 }

@@ -1,6 +1,4 @@
-// Actual token/cost numbers for a task subtree, folded from the event log.
-// Run: bun bench/task-usage.ts <rootTaskId>
-// ponytail: relative imports — bench/ is not a workspace package and doesn't need to be
+// relative imports: bench/ is not a workspace package
 import { PAYLOAD_SCHEMAS } from '../packages/contracts/src/index.ts'
 import { fold, loadConfig, openStorage, requireProject, stepUsage, subtreeTaskIds, taskUsage } from '../packages/kernel/src/index.ts'
 
@@ -17,8 +15,6 @@ const fmt = (n: number): string => n.toLocaleString('en-US')
 let iterations = 0
 let firstTs = ''
 let lastTs = ''
-// handoff bytes: the prose steps push onto their dependents (signal summaries) — protocol
-// rule 8 wants this small, with knowledge travelling as note refs instead
 let handoffChars = 0
 let signals = 0
 for (const e of events) {
@@ -48,8 +44,7 @@ for (const id of ids) {
 const mins = firstTs && lastTs ? (new Date(lastTs).getTime() - new Date(firstTs).getTime()) / 60_000 : 0
 console.log(`\nTOTAL in=${fmt(inTok)} out=${fmt(outTok)} cacheRead=${fmt(cacheTok)} cost=$${cost.toFixed(4)}  iterations=${iterations}  wall=${mins.toFixed(1)}min  handoff=${fmt(handoffChars)}ch/${signals} signals`)
 
-// cross-validation: the fold above must agree with an independent raw scan over event.usage —
-// if these ever disagree, either the fold or the extractor is wrong and the report is untrustworthy
+// the fold and a raw scan of event.usage must agree; a mismatch means the report is wrong
 let rawIn = 0, rawOut = 0
 for (const e of events) {
   if (!e.usage || !e.taskId || !ids.includes(e.taskId)) continue

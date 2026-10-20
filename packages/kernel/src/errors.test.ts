@@ -1,11 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { isConnectionRefused } from './errors'
 
-// Guards the most common first-run failure: Postgres not started. bin.ts turns a true here into
-// "start it with: docker compose up -d" and a raw driver error otherwise. It walks
-// AggregateError.errors and .cause chains because drizzle wraps driver errors and pg's socket
-// error can arrive nested — a pg or Bun upgrade that changes either shape silently turns the
-// helpful message back into a stack trace. No database needed.
+// walks .errors and .cause: drizzle wraps driver errors and pg's socket error can nest
 describe('isConnectionRefused', () => {
   it('detects ECONNREFUSED flat, under AggregateError, and down a cause chain', () => {
     expect(isConnectionRefused(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }))).toBe(true)

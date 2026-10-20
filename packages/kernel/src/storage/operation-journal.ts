@@ -29,15 +29,12 @@ export interface OperationContext {
   origin: Origin
 }
 
-// One spelling for the four transitions this file appends: a per-append literal drops the chat and
-// the door on whichever path is edited last, and the events become unattributable.
+// one spelling: a per-append literal drops the chat and door on whichever path is edited last
 const envelopeOf = (context: OperationContext) => ({
   ...context.origin,
   taskId: context.taskId, stepId: context.stepId, runToken: context.runToken,
 })
 
-// Durable before/after journal: node and transition events commit in one
-// locked transaction, so the graph node and the append-only history can never disagree.
 export class OperationJournal {
   constructor(private readonly store: PostgresStore, private readonly events: EventLog) {}
 
@@ -52,8 +49,7 @@ export class OperationJournal {
       .onConflictDoUpdate({ target: [operations.projectId, operations.operationId], set: toOperationRow(rec) })
   }
 
-  // commits the before-record ahead of the external effect; completed nodes are reused,
-  // started/failed nodes begin the next attempt (explicitly at-least-once)
+  // before-record commits ahead of the external effect; completed nodes are reused
   beginOperation(
     context: OperationContext,
     spec: OperationSpec,
@@ -75,8 +71,7 @@ export class OperationJournal {
     })
   }
 
-  // idempotent re-entry for a committed attempt; stale attempts throw TERMINAL so the
-  // durable-step wrapper never re-fires the effect over a newer attempt
+  // stale attempts throw TERMINAL so the step wrapper never re-fires over a newer attempt
   completeOperation(
     context: OperationContext,
     spec: OperationSpec,
@@ -111,8 +106,7 @@ export class OperationJournal {
     })
   }
 
-  // no-op on ambiguity (runs from catch paths whose error must surface); a COMPLETED
-  // node is never regressed by a lost commit-ack
+  // no-op on ambiguity (catch paths must surface their error); a COMPLETED node never regresses
   failOperation(context: OperationContext, spec: OperationSpec, attempt: number, error: unknown): Promise<void> {
     return this.store.withProjectLock(async tx => {
       const ops = this.events.txOps(tx)

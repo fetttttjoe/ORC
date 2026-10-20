@@ -24,8 +24,7 @@ describe('gitDirs', () => {
     expect(path.resolve(worktree, wtDirs?.commonDir ?? '')).toBe(sharedGit)
     expect(path.resolve(worktree, wtDirs?.gitDir ?? '')).toContain(path.join(sharedGit, 'worktrees'))
 
-    // git prints --git-dir/--git-common-dir relative to the QUERIED directory, not to the
-    // worktree root — resolveProjectRoot's `path.resolve(dir, ...)` is what must survive this.
+    // git prints these relative to the QUERIED directory, not the worktree root
     const sub = path.join(worktree, 'sub')
     mkdirSync(sub)
     const subDirs = gitDirs(sub)
@@ -67,15 +66,12 @@ describe('checkout facts and worktree lifecycle', () => {
     const { main } = tmpGitRepo()
     const dest = path.join(main, '.orc', 'worktrees', 'req-2')
     expect(worktreeAdd(main, dest, 'orc/req-2', 'main')).toEqual({ ok: true })
-    // A checked-out branch is git's own refusal, and it is the one that matters: a caller
-    // compensating a half-done `ws new` must remove the worktree BEFORE the branch, or the branch
-    // survives with nothing pointing at it.
+    // remove the worktree BEFORE the branch, or the branch survives with nothing pointing at it
     expect(branchDelete(main, 'orc/req-2').ok).toBe(false)
     expect(worktreeRemove(main, dest)).toEqual({ ok: true })
     expect(branchDelete(main, 'orc/req-2')).toEqual({ ok: true })
     expect(branches(main)).not.toContain('orc/req-2')
-    // deleting what is no longer there is a failure with git's own message, never a silent ok —
-    // a compensating caller reports what it could not clean up
+    // deleting what is gone fails with git's own message, never a silent ok
     expect(branchDelete(main, 'orc/req-2').ok).toBe(false)
   })
 
@@ -91,8 +87,7 @@ describe('gitToplevel', () => {
     const { main, worktree } = tmpGitRepo()
     const sub = path.join(main, 'apps', 'x')
     mkdirSync(sub, { recursive: true })
-    // realpath on both sides: git prints the resolved path, and a tmpdir may be reached through a
-    // symlink (/tmp → /private/tmp on macOS), which would make a raw string compare fail there
+    // realpath both sides: git prints the resolved path, and a tmpdir may be a symlink
     expect(gitToplevel(sub)).toBe(realpathSync(main))
     // a linked worktree is its own toplevel — the directory being worked in, not the main checkout
     expect(gitToplevel(worktree)).toBe(realpathSync(worktree))
@@ -114,19 +109,15 @@ describe('merging a workspace branch into trunk', () => {
     expect(isAncestor(main, tip, 'main')).toBe(true)
     expect(existsSync(path.join(main, 'f.txt'))).toBe(true)
     expect(revParse(main, 'HEAD')).toBe(r.mergeCommit)
-    // --no-ff: the landing is its OWN commit, never a fast-forward to the branch tip — the
-    // recorded mergeCommit has to name one addressable point on trunk
+    // --no-ff: the landing is its OWN commit, one addressable point on trunk
     expect(r.mergeCommit).not.toBe(tip)
 
-    // Measured: a second `merge --no-ff` of an already-merged branch prints "Already up to date",
-    // exits 0 and commits NOTHING — so HEAD still names the first merge. Returning it would record
-    // that commit twice, as if the second call had landed something.
+    // a second merge of a merged branch exits 0 and commits NOTHING: HEAD would name the first
     const again = mergeBranch(main, 'feature', 'main')
     expect(again.ok).toBe(false)
     if (!again.ok) {
       expect(again.error).toContain('already contained')
-      // the REASON, not the sentence: `orc ws merge` sends this one case to `orc ws finalize`,
-      // and matching on wording would break the moment the wording improves
+      // the REASON, not the sentence: callers branch on it and the wording will improve
       expect(again.reason).toBe(MERGE_REFUSAL.alreadyContained)
     }
   })
@@ -148,8 +139,7 @@ describe('merging a workspace branch into trunk', () => {
       expect(wrong.error).toContain('feature')
       expect(wrong.reason).toBe(MERGE_REFUSAL.wrongBranch)
     }
-    // detached is not "on some other branch": currentBranch answers null, and a refusal that
-    // interpolated that null would read "is on null, not main"
+    // detached HEAD: currentBranch answers null, and a refusal must not read 'is on null'
     sh(main, 'checkout', '--detach', '--quiet')
     const detached = mergeBranch(main, 'feature', 'main')
     expect(detached.ok).toBe(false)
@@ -168,8 +158,7 @@ describe('merging a workspace branch into trunk', () => {
     writeFileSync(path.join(main, 'wip.txt'), 'x')
     expect(dirtyPaths(main)).toContain('wip.txt')
     expect(isClean(main)).toBe(false)
-    // null, not '' — a caller deciding whether it may still act on a directory has to tell a
-    // removed checkout from a clean one, and both would otherwise look "not dirty"
+    // null, not '': a removed checkout must be told apart from a clean one
     expect(dirtyPaths(mkdtempSync(path.join(tmpdir(), 'orc-nogit-')))).toBeNull()
   })
 
@@ -181,9 +170,7 @@ describe('merging a workspace branch into trunk', () => {
     sh(main, 'commit', '-q', '-am', 'ours')
     const r = mergeBranch(main, 'feature', 'main')
     expect(r.ok).toBe(false)
-    // Measured: git prints "CONFLICT …/Automatic merge failed" to STDOUT and leaves stderr EMPTY,
-    // so a stderr-only refusal would be blank at the exact moment the operator has a half-merged
-    // tree to deal with.
+    // a conflict prints to STDOUT with stderr EMPTY: a stderr-only refusal would be blank
     if (!r.ok) {
       expect(r.error).toContain('CONFLICT')
       expect(r.error).toContain('merge --abort')
@@ -193,8 +180,7 @@ describe('merging a workspace branch into trunk', () => {
     expect(isClean(main)).toBe(false)
     expect(existsSync(path.join(main, '.git', 'MERGE_HEAD'))).toBe(true)
 
-    // …and the next attempt must not read as "commit your work first": the tree is dirty because a
-    // merge is RUNNING, and the way out is to finish or abandon that merge, not to commit it blind
+    // a mid-merge tree's way out is to finish or abandon the merge, not to commit it blind
     const during = mergeBranch(main, 'feature', 'main')
     expect(during.ok).toBe(false)
     if (!during.ok) {
@@ -212,8 +198,7 @@ describe('merging a workspace branch into trunk', () => {
     expect(revParse(main, 'no-such-branch')).toBeNull()
     expect(revParse(nogit, 'HEAD')).toBeNull()
     expect(isAncestor(main, head ?? '', 'main')).toBe(true) // a commit is its own ancestor
-    // exit 1 is git's "no"; every other failure is "cannot tell". Conflating them would report an
-    // unknown branch as merely unmerged — and `ws finalize` would refuse with the wrong reason.
+    // exit 1 is 'no', anything else 'cannot tell': an unknown branch is not merely unmerged
     expect(isAncestor(main, 'no-such-branch', 'main')).toBeNull()
     expect(isAncestor(main, head ?? '', 'no-such-branch')).toBeNull()
     expect(isAncestor(nogit, 'HEAD', 'main')).toBeNull()
@@ -224,8 +209,7 @@ describe('defaultBranch', () => {
   it('is null with no origin/HEAD set, and reads the captured trunk name once it is', () => {
     const { main } = tmpGitRepo()
     expect(defaultBranch(main)).toBeNull()
-    // The ref target need not exist for `symbolic-ref --short` to resolve it — this repo has no
-    // `origin` remote at all, only the symbolic ref itself.
+    // the ref target need not exist for symbolic-ref --short; this repo has no origin remote
     const r = Bun.spawnSync(['git', '-C', main, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
     expect(r.exitCode).toBe(0)
     expect(defaultBranch(main)).toBe('main')

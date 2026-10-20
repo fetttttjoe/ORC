@@ -3,19 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-/**
- * The post-commit hook, pinned the same way scripts/commit-msg-hook.test.ts pins commit-msg:
- * Bun.spawn against a throwaway repo, assert on exit code / stdout / stderr — never against live
- * infra no other hook test here stands up.
- *
- * Two things this hook must NEVER do, both mechanically pinned:
- *   1. Print anything, or exit non-zero, when there is no `.orc` project to record into (the
- *      degrade-silently path — `.orc` absent is exactly what a throwaway `git init`-only repo is).
- *   2. Sit on the commit's critical path: the append (bun startup + a Postgres round-trip) is
- *      DETACHED, so the hook script itself must return fast regardless of whether the append
- *      would succeed or fail. A future change that makes the append synchronous should fail this
- *      test, not just quietly tax every commit in the repo.
- */
+/** Bun.spawn against a throwaway repo: asserts exit code and output, never live infra */
 const HOOK = path.join(import.meta.dir, 'hooks', 'post-commit')
 const FAST_BOUND_MS = 300
 
@@ -66,9 +54,7 @@ describe('the post-commit hook degrades silently with no .orc project', () => {
     }
   })
 
-  // Pins the detach: the DB append (bun startup + a Postgres round-trip) must never sit on the
-  // commit's critical path. A hook that made it synchronous would still pass the assertions above
-  // eventually — but slowly — so this bound is the thing that would actually catch that regression.
+  // a synchronous append would still pass the assertions above, only slowly; this bound catches it
   it('returns fast — the append is detached off the commit critical path', async () => {
     const dir = await makeRepoWithOneCommit()
     try {

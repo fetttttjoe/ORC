@@ -1,6 +1,5 @@
 <script lang="ts">
-  // wall-clock time for a log row. The seq is the ORDER; this is the when — an operator judging
-  // "is it stuck?" or "how long did that step take?" cannot answer either from a sequence number.
+  // Wall-clock time for a log row; the seq is the order, this is the when
   let { ts }: { ts: string } = $props()
 
   const at = $derived(new Date(ts))

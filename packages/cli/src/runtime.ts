@@ -1,4 +1,4 @@
-import { AUTHOR_SOURCE, AutoHealMode, CHECKS_EXECUTOR_REF, Door, HookName, KNOWLEDGE_REFUSAL, NO_CHAT, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, type MemoryAuthor } from '@orc/contracts'
+import { AUTHOR_SOURCE, AutoHealMode, CHECKS_EXECUTOR_REF, Door, HookName, KNOWLEDGE_REFUSAL, NO_CHAT, ROLE_SKILL, TERMINAL_TASK_STATUS, type AgentExecutor, type Analyzer, stepAuthor } from '@orc/contracts'
 import { apiLoopExecutor } from '@orc/executor-api-loop'
 import { configuredProviders } from './providers'
 import { agentAnalyzer } from '@orc/analyzer-agent'
@@ -14,62 +14,35 @@ import { checksExecutor, commitTool, createDbosPort, createPluginHost, dbosSend,
 
 const AUTO_HEAL_EXECUTOR = 'auto-heal'
 
-// What this supervisor process itself initiates (the commit reactor's sweep): no
-// chat answered it, and no terminal typed it.
+// what this supervisor itself initiates (the commit reactor's sweep): no chat, no terminal
 const SUPERVISOR_ORIGIN = NO_CHAT(Door.supervisor)
 
 export function seedRegistries(config = loadConfig()) {
   const providers = configuredProviders(config)
   const executors = new Map<string, AgentExecutor<unknown>>([['api-loop', apiLoopExecutor()], [CHECKS_EXECUTOR_REF, checksExecutor()]])
-  // The config-driven iteration budget is applied by createGroundedTask, to BOTH template steps —
-  // wrapping only the analyzer here left the plan step (and every subplan that inherits it) at 30.
+  // the iteration budget is applied by createGroundedTask to BOTH template steps, not here
   const analyzers = new Map<string, Analyzer>([['agent-analyzer', agentAnalyzer()]])
   return { providers, executors, analyzers }
 }
 
 export async function buildPlugins(config = loadConfig()): Promise<{ host: PluginHost; hub: McpHub }> {
   const host = await createPluginHost(config, seedRegistries(config))
-  // point-of-use enforcement (EXTENDING invariant 4): the fingerprint predicate runs against
-  // a fresh trust read at spawn time, never a startup snapshot
+  // point-of-use: the fingerprint predicate runs against a fresh trust read at spawn time
   const hub = createMcpHub(config.mcpServers, (id, cfg) => isMcpTrusted(loadTrust(config.projectRoot), id, cfg))
   return { host, hub }
 }
 
-// Timing every boot phase is what turns "it hung" into "it is in recovery".
-// Exported so callers that open storage themselves (bin.ts's openKernel path, which threads an
-// already-open storage into buildRuntime below) can time that open with the SAME instrument and
-// hand the result back in as `storageMs` — otherwise that phase is invisible to the boot line.
+// exported so bin.ts's openKernel path can time its storage open with the same instrument
 export const bootPhase = async <T>(label: string, run: () => Promise<T>, into: Array<[string, number]>): Promise<T> => {
   const at = Date.now()
   try { return await run() } finally { into.push([label, Date.now() - at]) }
 }
 
-/**
- * The phases list buildRuntime starts from. A caller that opened storage itself (bin.ts, the real
- * `orc serve` path) times it and hands the duration back, so 'storage' leads the line; otherwise
- * buildRuntime times its own open and this starts empty. Pure and exported so the rule is testable
- * without launching DBOS — buildRuntime does not expose `phases`, and the only other observation
- * seam is parsing the printed line, which would pin formatting rather than behaviour.
- */
+/** The phases buildRuntime starts from: a caller that timed its own storage open leads the line. */
 export const seedPhases = (hasSharedStorage: boolean, storageMs: number | undefined): Array<[string, number]> =>
   hasSharedStorage && storageMs !== undefined ? [['storage', storageMs]] : []
 
-/**
- * Boot-time notice for role skills the index does not hold — one `warn` per missing skill, never a
- * throw.
- *
- * The kernel APPENDS steps a planner never authored and stamps role skills onto steps it did not
- * write: the finish step declares ROLE_SKILL.finisher, the commit step ROLE_SKILL.committer, and
- * the grounded freeze adds ROLE_SKILL.auditor to the verify step. So a checkout whose skills dir
- * was never seeded is already broken before anything runs — but it only said so at proposePlan
- * ("unknown skill 'role-finisher'"), which is the right refusal at the wrong moment: a human is by
- * then already trying to start work.
- *
- * A NOTICE, not a second gate. proposePlan's refusal is the enforcement and stays exactly as it is;
- * a supervisor that would not boot over a skill no plan has asked for yet would be worse than the
- * problem. Pure and exported so the rule is testable without launching DBOS, the same reason
- * seedPhases above is.
- */
+/** One `warn` per role skill the index lacks, never a throw: proposePlan's refusal is the gate. */
 export function warnMissingRoleSkills(indexed: string[], skillsDir: string, warn: (message: string) => void): void {
   const have = new Set(indexed)
   for (const skill of Object.values(ROLE_SKILL)) {
@@ -88,18 +61,11 @@ export async function buildRuntime(
   const knowledgeOpening = openKnowledge(config)
   if ('unavailable' in knowledgeOpening && config.knowledge !== null) console.warn(KNOWLEDGE_REFUSAL.unavailable(knowledgeOpening.unavailable))
 
-  // reuse the caller's storage (bin passes the kernel's) — one pool, one lifecycle. When the
-  // caller already timed that open (bin.ts's openKernel path), seed the phases list with it so
-  // the boot line still names 'storage' instead of the phase silently vanishing whenever
-  // shared.storage is provided (which on the real `orc serve` path is always).
+  // reuse the caller's storage: one pool, one lifecycle; seed the phases with its timed open
   const phases = seedPhases(shared?.storage !== undefined, shared?.storageMs)
   const storage = shared?.storage ?? (await bootPhase('storage', () => openStorage(config.databaseUrl, { projectId: config.projectId, redactEnv: config.redactEnv }), phases))
   const log = storage.events
-  // reuse the caller's kernel (bin passes the one wired to its refValidator + analyzers) so
-  // task_split's expanded child plans go through the same toolRef/skillRef validation as
-  // `orc propose`, and createGroundedTask can resolve its analyzer.
-  // approval doors are operator config, so the kernel this port builds tools against must carry
-  // the configured set — finalize_plan's refusal text reads it straight off the kernel
+  // reuse the caller's kernel: it carries the refValidator, analyzers and configured approval doors
   const kernel = shared?.kernel ?? new Kernel(log, host.refValidator, host.analyzers, dbosSend, config.groundedApprovalDoors, config.finishChecks)
   log.onAppend = e => host.hooks.dispatch(HookName.event_appended, e)
 
@@ -143,13 +109,8 @@ export async function buildRuntime(
     ...(autoHeal && { onCommitRecorded: async payload => { autoHeal.onCommitRecorded(payload.workspaceId) } }),
     skills: host.skills, tools: hub,
     stepTools: p => {
-      // workspaceId comes off `p`, i.e. off the running TASK — NOT from cwdAuthor like every other
-      // door here. One supervisor serves every workspace at once, so the process cwd says nothing
-      // about where a given step's knowledge belongs; the port reads it from the TaskNode it
-      // already folds. See createDbosPort's stepTools.
-      // p.origin is the RUNNING STEP's own origin (its run chat), never this process's: the note a
-      // step writes belongs to the conversation that step is.
-      const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, origin: p.origin, workspaceId: p.workspaceId, taskId: p.taskId, stepId: p.stepId, runToken: p.runToken, executor: p.executor, model: p.model, role: p.role }
+      // workspaceId comes off the running TASK, not cwdAuthor: one supervisor serves every workspace
+      const author = stepAuthor(p)
       const stepAccess = knowledgeAccess(knowledgeOpening, log, p.workspaceDir)
       const stepKnowledge = bindStepKnowledge({
         access: stepAccess, author, p: { stepId: p.stepId, role: p.role, taskId: p.taskId, ancestorTaskIds: p.ancestorTaskIds, step: p.step },
@@ -158,26 +119,17 @@ export async function buildRuntime(
       const suspectAt = suspectAtFor(stepAccess, author)
       return { knowledge: stepKnowledge.knowledge, tools: [
       ...stepKnowledge.tools,
-      // registration-gated inside the factory (like report_coverage): a scout orients, the plan
-      // step decomposes — a scout that splits builds a second, unapproved decomposition.
+      // registration-gated in the factory: a scout that splits builds a second, unapproved plan
       ...splitTool({ kernel, config: { approvalPolicy: config.approvalPolicy, maxDepth: config.maxDepth }, p }),
-      // read_annotations only needs the kernel (reads plan_annotated off the log) — unconditional,
-      // like splitTool: harmless everywhere, returns an empty list for a task with no annotations.
+      // unconditional: returns an empty list for a task with no annotations
       readAnnotationsTool({ kernel, p }),
-      // report_coverage emits analysis_completed; registration-gated inside the factory to the
-      // scout analyze step — a tool that can only ever error must not be visible (a verify
-      // auditor burned one iteration per attempt calling it).
+      // registration-gated to the scout analyze step: a tool that can only error gets called anyway
       ...reportCoverageTool({ kernel, p }),
-      // scoped_changes answers "which paths did MY task's steps change?" off the log, so the verify
-      // auditor stops reading sibling tasks' completed work out of the SHARED worktree as its own.
-      // Registration-gated inside the factory to the auditor VERIFY step (role alone would also hand
-      // it to the grounded `plan` step, which shares that role). Read-only, and a FLOOR — never a
-      // substitute for the test/typecheck gate, never a reason to dismiss an in-scope defect.
+      // scoped_changes is registration-gated to the verify and finish steps; a floor, never the gate
       ...scopedChangesTool({ kernel, p, ...(stepKnowledge.citing && { claimsAt: stepKnowledge.citing }) }),
       ...taskPlanTool({ kernel, p }),
       ...(config.autoCommit ? commitTool({ kernel, dir: p.workspaceDir, p, ...(suspectAt && { suspectAt }) }) : []),
-      // exec runs operator-allowlisted commands (execAllowlist in .orc/config.json) in the step
-      // workspace — the acceptance-gate tool. Empty allowlist = not offered.
+      // exec runs operator-allowlisted commands in the step workspace; an empty allowlist is not offered
       ...execTool({ workspaceDir: p.workspaceDir, allowlist: config.execAllowlist }),
       // the plan step's authoring surface; both factories register for that step alone
       ...planNoteTools({ kernel, p }),
@@ -188,7 +140,7 @@ export async function buildRuntime(
   await bootPhase('dbos-launch', () => port.launch(), phases)
   // one line, at the moment an operator is guaranteed to be reading: which phase owned the boot
   console.log(`orc serve: boot ${phases.map(([l, ms]) => `${l} ${ms}ms`).join(' · ')}`)
-  host.skills.watch() // hot-index during long-lived runs (spec quality scenario: <1s)
+  host.skills.watch() // hot-index during long-lived runs
   return {
     ...port,
     shutdown: async (opts?: { drain?: boolean }) => {

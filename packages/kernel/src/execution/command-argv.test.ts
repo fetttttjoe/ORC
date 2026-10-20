@@ -29,11 +29,7 @@ describe('commandArgv (quoting, but still no shell)', () => {
     expect(argv("grep 'a\\b' f.ts")).toEqual(['grep', 'a\\b', 'f.ts'])
   })
 
-  /**
-   * The trust model is unchanged: this adds grouping, NOT interpretation. Every metacharacter stays
-   * an ordinary character in an argv token, so the target program rejects it rather than a shell
-   * acting on it — the property the exec tool has always relied on.
-   */
+  // The trust model is unchanged: metacharacters stay ordinary characters in an argv token.
   it('leaves every shell metacharacter inert inside its token', () => {
     expect(argv('echo hi; rm -rf /')).toEqual(['echo', 'hi;', 'rm', '-rf', '/'])
     expect(argv('echo a | tee b')).toEqual(['echo', 'a', '|', 'tee', 'b'])

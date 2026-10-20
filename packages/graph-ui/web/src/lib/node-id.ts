@@ -1,7 +1,4 @@
-// Pure node-id parsers, zero imports by design: graph node ids are
-// `step:<task>:<step>` / `artifact:<task>:<path>` / `model:<ref>`, and a bare id
-// is a task. Artifact paths and model refs may themselves contain ':', so only the first two
-// separators are structural — everything after them belongs to the last part.
+// Pure node-id parsers, zero imports: only the first two ':' are structural
 export type NodeKind = 'task' | 'step' | 'artifact' | 'model'
 
 /** build a step node id — the inverse of stepIdOf, so the two spellings cannot drift */

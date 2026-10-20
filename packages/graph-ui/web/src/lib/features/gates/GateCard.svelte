@@ -16,10 +16,7 @@
   let text = $state('')
   let busy = $state(false)
 
-  // the grounded plan step's question earns one-click approve: it is the one place the kernel
-  // reads the answer as more than plain text (it freezes the plan the human just saw); the
-  // kernel-appended finish step reads the same approval word too — "record the decision (if
-  // any) and finish" — so it gets the button as well
+  // The plan and finish steps' questions get one-click approve: the kernel reads it as approval
   const isApprovalGate = $derived(gate.stepId === STEP_ID.plan || gate.stepId === STEP_ID.finish)
 
   async function send(answer: string): Promise<void> {
@@ -45,10 +42,7 @@
     <span class="font-mono text-label text-human/70">#{gate.seq}</span>
   </div>
 
-  <!-- `gate.question` is the agent's own text, straight from the event payload — the view registry
-       carries it verbatim (see openQuestions() in ui-core), never the ledger's clipped, `Q: `-
-       prefixed summary line. Answering a truncated question was answering the wrong one; this
-       pane no longer needs a transcript fetch to recover the real wording. -->
+  <!-- gate.question is the agent's verbatim text from the view registry, not the ledger summary -->
   <p class="mb-2.5 text-[13px] leading-relaxed break-words whitespace-pre-wrap text-paper">{gate.question}</p>
 
   {#if session.canAnswer()}

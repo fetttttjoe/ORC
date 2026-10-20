@@ -1,7 +1,7 @@
 import { Command } from 'commander'
 import { AdrSection, AUTHOR_SOURCE, decisionSummaryOf, DecisionStatus, Door, NO_CHAT, type Decision, type DecisionInputRaw, type KnowledgePort } from '@orc/contracts'
 import type { EventLog, Kernel, ProjectConfig } from '@orc/kernel'
-import { cwdAuthor, knowledgeAuthor } from './cwd-workspace'
+import { cwdAuthor, cliAuthor } from './cwd-workspace'
 import { enumArg } from './enum-arg'
 import { NO_PROJECT_ERROR } from './exit'
 import { knowledgeAccess, openKnowledge, type KnowledgeOpening } from './knowledge-open'
@@ -61,7 +61,7 @@ export function adrCommand(deps: {
     if ('unavailable' in access) throw new Error(access.unavailable)
     return access.port
   }
-  const readCall = async () => ({ author: await knowledgeAuthor(deps.requireKernel(), needProject().config.dir), idempotencyKey: null })
+  const readCall = async () => ({ author: await cliAuthor(deps.requireKernel(), needProject().config.dir), idempotencyKey: null })
   const record = async (title: string, o: SectionOpts, supersedes?: string): Promise<void> => {
     const input: DecisionInputRaw = { title, context: o.context, decision: o.decision, consequences: o.consequences, ...(o.considered !== undefined && { considered: o.considered }), ...(o.status !== undefined && { status: o.status }), ...(o.tags !== undefined && { tags: o.tags }), ...(supersedes !== undefined && { supersedes }) }
     const knowledge = port()

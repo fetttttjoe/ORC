@@ -90,8 +90,7 @@ describe('createMcpHub', () => {
   })
 
   it('omits an env value referencing an unset $VAR instead of passing "$VAR" literally', async () => {
-    // the fixture only crashes on the literal string '1', so a literal '$UNSET_VAR_XYZ' pass-through
-    // would ALSO resolve successfully — the warning is what actually proves omission happened
+    // the fixture only crashes on '1'; the warning, not a resolve, proves the var was omitted
     const warn = spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const hub = makeHub(new Set(['fixture']), {

@@ -1,15 +1,5 @@
-// The focus walk, pure and link-shape-only: which nodes count as "this request's work". Zero
-// runtime imports; focus.test.ts pins the reachability contract.
 
-/**
- * Nodes reachable from `root` following link DIRECTION (source → target) only.
- *
- * Direction is what keeps focus meaningful. Every edge the projection draws points outward from
- * the work: task → step (plan), task → child task, step/task → artifact, task → model (uses).
- * An undirected walk — the previous implementation —
- * flowed BACKWARD through shared hubs: any other task using the same model was two hops away,
- * so the "focus" set was the entire connected component and focusing visibly dimmed nothing.
- */
+// Follow link DIRECTION only: an undirected walk reaches every task sharing a hub, dimming nothing
 export function focusReach(root: string, links: Iterable<{ source: string; target: string }>): Set<string> {
   const out = new Map<string, string[]>()
   for (const l of links) {

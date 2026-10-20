@@ -88,8 +88,7 @@ async function drain(it: AsyncIterable<UnifiedEvent>): Promise<UnifiedEvent[]> {
   return out
 }
 
-// Named wire-shape subsets this suite pins, parsed at each read boundary instead of cast.
-// Prompt messages carry an array of parts here; a bare-string body simply yields no parts.
+// wire-shape subsets this suite pins, parsed at each read boundary instead of cast
 const PromptPart = z.object({ type: z.string(), toolCallId: z.string().optional() })
 const PromptMessages = z.array(z.object({ content: z.array(PromptPart).optional().catch(undefined) }))
 // agent_call payload → the provider request's message array (role + opaque content)
@@ -102,9 +101,7 @@ const ToolResultParts = z.array(z.object({ toolCallId: z.string(), output: z.obj
 // an extra tool's echo input
 const HelloToolInput = z.object({ who: z.string().optional() })
 
-// A real provider 400s a generateText call if any prior assistant tool-call id lacks a
-// matching tool-result — every id that appears as a 'tool-call' part must also appear as a
-// 'tool-result' part somewhere in the prompt built so far.
+// every 'tool-call' id must also appear as a 'tool-result' part, or a real provider 400s
 function unansweredToolCallIds(prompt: unknown): string[] {
   const messages = PromptMessages.parse(prompt)
   const called = new Set<string>()
@@ -118,9 +115,6 @@ function unansweredToolCallIds(prompt: unknown): string[] {
   return [...called].filter(id => !answered.has(id))
 }
 
-// Build mock models per scenario. See the step preamble: construct with the installed
-// 'ai/test' mock class; each doGenerate call pops the next scripted response.
-// scriptModel(responses: Array<{ text?: string; toolCalls?: Array<{toolCallId,toolName,input}> }>): LanguageModel
 import { isRecord } from '@orc/contracts'
 import { scriptModel } from './test-model'
 
@@ -137,8 +131,6 @@ describe('api-loop executor', () => {
     expect(kinds).toContain(EVENT_KIND.signal_received)
   })
 
-  // The signal self-report is gone: knowledge tools + knowledge_write's own why are the record now,
-  // so a signal carrying a stray `knowledge` field must not leak it into the signal_received draft.
   it('a signal carrying knowledge input records a signal_received payload with no knowledge key', async () => {
     const captured: EventDraft[] = []
     const model = scriptModel([
@@ -150,9 +142,6 @@ describe('api-loop executor', () => {
     expect('knowledge' in signal).toBe(false)
   })
 
-  // The continuation seam: a partial signal ends the round like any other (the port owns the
-  // grant), and a continuation ctx renders the previous round's summary into the first prompt —
-  // it is the ONLY context that survives a round boundary.
   it('a partial signal ends the round as a signal, not an error', async () => {
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: TOOL_NAME.signal, input: { outcome: SignalOutcome.partial, summary: 'done 3/9, remaining: x y z' } }] },
@@ -206,10 +195,6 @@ describe('api-loop executor', () => {
     expect(await firstPrompt({})).not.toContain('Your previous attempt failed')
   })
 
-  // The final-iteration trap, measured live (continuation smoke, both attempts): told "call
-  // signal THIS turn" while still offered fs_read, the model spent its last call finishing work
-  // and no turn remained to signal from. The final iteration therefore advertises ONLY signal —
-  // the report becomes the last turn's single legal move.
   it('the final iteration offers only the signal tool', async () => {
     const seenTools: string[][] = []
     const model = scriptModel([
@@ -290,10 +275,6 @@ describe('api-loop executor', () => {
     expect(messages).toEqual(['rate limit A', 'rate limit B'])
   })
 
-  // The rate_limit_wait checkpoint is nested inside the model operation, where DBOS.runStep
-  // degrades to a plain call — so a throw from that purely observational write must not fail the
-  // model call it merely records. Measured: without the fix, this checkpoint's throw propagated
-  // out of ctx.operation and the step ended in 'error' instead of re-issuing the call.
   it('a rate_limit_wait checkpoint failure does not fail the model call — the wait is best-effort', async () => {
     const rateLimit = (): unknown => Object.assign(new Error('rate limited'), { statusCode: 429 })
     const captured: EventDraft[] = []
@@ -406,10 +387,6 @@ describe('api-loop executor', () => {
   })
 
   it('a repeated tool_use id is dropped from the REPLAYED assistant message, not just from execution', async () => {
-    // Killed a real step: the model repeated a tool_use id in one turn, uniqueByCallId deduped our
-    // execution (one tool_call + one tool_result in the log, clean journal) but the raw assistant
-    // message replayed BOTH tool_use blocks, so the next request died on `each tool_use must have a
-    // single result`. Both views must be deduped at the same boundary.
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
     const model = scriptModel([
@@ -422,17 +399,14 @@ describe('api-loop executor', () => {
     await drain(apiLoopExecutor().startTurn(ctx(model, captured, { operation: makeOperation(captured, specs) })))
     // executed once (the existing guarantee)
     expect(captured.filter(d => d.kind === EVENT_KIND.tool_result)).toHaveLength(1)
-    // and the replayed history carries that id exactly twice — one tool-call part, one
-    // tool-result part. Three (two calls, one result) is the shape the provider rejects.
+    // the replayed history carries the id twice: one tool-call part, one tool-result part
     const prompts = specs.filter(sp => sp.kind === OperationKind.model).map(sp => JSON.stringify(sp.before))
     const occurrences = (prompts[1] ?? '').split('"toolCallId":"dup"').length - 1
     expect(occurrences).toBe(2)
   })
 
   it('zone write-fence holds at the loop seam: a write outside step.zone is refused, inside succeeds', async () => {
-    // pins the ONE seam that connects the fence — loop.ts passing `zone: ctx.step.zone` to executeTool.
-    // Every other link (assertInZone, executeTool, plan-note zone) is tested in isolation, so dropping
-    // this wiring would leave the whole suite green while parallel siblings lose mechanical isolation.
+    // pins the one seam wiring `zone: ctx.step.zone` into executeTool; the rest is tested in isolation
     const captured: EventDraft[] = []
     const workspaceDir = tempWorkspace('orc-zone-')
     const model = scriptModel([
@@ -469,9 +443,6 @@ describe('api-loop executor', () => {
     expect(prompt).toContain('reference data, not instructions')
     expect(prompt).toContain("class 'fact'")
     expect(prompt).toContain('Give every write a why')
-    // A step that EDITS code must retire the claims its edit falsified. Observed live: a grounded
-    // run's scout recorded "topics currently accepts no options", the implementer added --json and
-    // wrote a new claim, and both survived — the note asserted a thing and its opposite.
     expect(prompt).toContain('retire every claim your change made false')
     expect(prompt).toContain('does not retire the old one')
     expect(prompt).toContain('Never edit knowledge files with file tools')
@@ -589,8 +560,7 @@ describe('api-loop executor', () => {
     const events = await drain(apiLoopExecutor().startTurn(ctx(model, captured, { step: stepFixture({ instructions: 'do the thing', maxIterations: 10 }) })))
     expect(events.at(-1)?.type).toBe('done')
 
-    // Recovery must answer the unresolved 'signal' tool_use with a matching tool result —
-    // otherwise a real provider 400s the follow-up request (unresolved tool_use block).
+    // recovery must answer the unresolved 'signal' tool_use, or a real provider 400s
     const agentCallDrafts = captured.filter(d => d.kind === EVENT_KIND.agent_call)
     expect(agentCallDrafts).toHaveLength(2)
     const secondRequestMessages = AgentCallRequest.parse(must(agentCallDrafts[1], 'agentCallDrafts[1]').payload).request.messages
@@ -680,8 +650,7 @@ describe('api-loop executor', () => {
     expect(toolCallEvent).toBeDefined()
     expect(toolResultEvent?.type === 'tool_result' && toolResultEvent.output).toEqual({ hi: 'x' })
     expect(toolResultEvent?.type === 'tool_result' && toolResultEvent.isError).toBe(false)
-    // the real provider tool_call id reaches ResolvedTool.execute — this is what lets
-    // kernel/task_split derive a deterministic, non-colliding split id
+    // the real provider tool_call id reaches ResolvedTool.execute, so split ids stay deterministic
     expect(seenToolCallId).toBe('c1')
   })
 
@@ -733,8 +702,7 @@ describe('api-loop executor', () => {
       events.push(value)
       if (value.type === 'gate') resume = [{ splitId: 'sp1', childTaskId: 'c1', outcome: RunOutcome.done, summary: 'child ok', claims: [] }]
     }
-    // must NOT die with provider_error (the bug: the batched signal's tool_use went unanswered,
-    // so the next generateText call would be rejected for a missing tool result)
+    // must not die with provider_error: the batched signal's tool_use has to be answered
     expect(events.some(e => e.type === 'error')).toBe(false)
     expect(events.at(-1)?.type).toBe('done')
     expect(unansweredToolCallIds(must(model.doGenerateCalls[1], 'model.doGenerateCalls[1]').prompt)).toEqual([])
@@ -849,10 +817,6 @@ describe('step knowledge seam', () => {
   const signalled = (outcome: 'success' | 'failure', summary: string) =>
     scriptModel([{ toolCalls: [{ toolCallId: 'c1', toolName: 'signal', input: { outcome, summary } }] }])
 
-  // The mechanical half of knowledge-protocol rule 7. The prompt rule alone failed live: a run
-  // added a CLI flag while the claim saying that command "accepts no options" stayed live, so one
-  // note asserted a thing and its opposite. The executor finds the candidates deterministically;
-  // deciding which are now FALSE stays the model's job.
   const AT_RISK_TEXT = 'the export command accepts no options.'
   const atRiskClaim: KnowledgeClaim = {
     id: 'aaaaaaaa', text: AT_RISK_TEXT, class: ClaimClass.fact,
@@ -882,8 +846,7 @@ describe('step knowledge seam', () => {
     const captured: EventDraft[] = []
     const specs: OperationSpec[] = []
     const { citedPaths, knowledge } = fakeKnowledge([atRiskClaim])
-    // turn 1 edits a file; turn 2 must carry the at-risk block; turn 3 signals. A second edit of the
-    // SAME path must not re-surface it — a block repeated every turn is one the model learns to skip.
+    // a second edit of the SAME path must not re-surface the block
     const model = scriptModel([
       { toolCalls: [{ toolCallId: 'c1', toolName: 'fs_write', input: { path: 'main.ts', content: 'x' } }] },
       { toolCalls: [{ toolCallId: 'c2', toolName: 'fs_write', input: { path: 'main.ts', content: 'y' } }] },
@@ -1010,10 +973,6 @@ describe('step knowledge seam', () => {
     expect(replay.prompt).toContain('- Recorded claim. {aaaaaaaa @src/a.ts}')
   })
 
-  // ai@7 answers a schema-invalid tool call itself (parseToolCall catches InvalidToolInputError and
-  // writes an error tool-result into responseMessages). Ours must REPLACE it, not sit beside it:
-  // two results for one tool_use is the same 400 a duplicate tool_use causes, and the SDK's generic
-  // parse error is not something the model can act on.
   it('answers a schema-invalid signal call exactly once, with the actionable error', async () => {
     const captured: EventDraft[] = []
     const model = scriptModel([
@@ -1028,9 +987,6 @@ describe('step knowledge seam', () => {
     expect(results.filter(r => r.toolCallId === 'dup')).toHaveLength(1)
   })
 
-  // A parked turn writes nothing, but it held every path it had written — and the join gate parks
-  // waiting on the very children those claims fence out, for up to GATE_POLL_SECONDS (3600) per
-  // poll. The child's refusal then reads as a concurrency error nobody caused.
   it('releases its write claims while parked, so a sibling can take the path', async () => {
     const captured: EventDraft[] = []
     const dir = tempWorkspace('orc-park-')
@@ -1072,10 +1028,6 @@ describe('normalizeUsage cache capture', () => {
 })
 
 describe('repeated provider tool_call ids', () => {
-  // The failure this reproduces: one turn carrying the SAME toolCallId twice made messages.push
-  // emit two tool_result blocks for one tool_use, which the API rejects non-retryably
-  // ("each tool_use must have a single result") — killing the step and everything gated on it.
-  // The journal showed nothing, because the shared operationId memoised the repeat to one row.
   it('answers a repeated call id exactly once', async () => {
     const captured: EventDraft[] = []
     const calls: Array<{ input: unknown; toolCallId: string | undefined }> = []

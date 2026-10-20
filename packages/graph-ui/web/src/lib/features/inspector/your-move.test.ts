@@ -39,11 +39,6 @@ describe('yourMove — a verdict is answered by replanning, never by repeating',
     expect(m.kind).toBe('retry')
   })
 
-  /**
-   * The loop this exists to end: retry re-runs only what did not complete, so a rejecting step
-   * meets the same completed siblings and reaches the same verdict — three identical audit passes
-   * were observed before this distinction existed.
-   */
   it('offers REPLAN when the step rejected the work, and never retry', () => {
     const m = yourMove({ ...base, failedStepId: 'verify', rejected: true })
     expect(m.kind).toBe('replan')

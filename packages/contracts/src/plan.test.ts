@@ -34,9 +34,6 @@ describe('validatePlan', () => {
   it('accepts multi-step when any dependency exists', () => {
     expect(validatePlan(plan([step('a'), step('b', ['a'])]))).toEqual({ ok: true })
   })
-  // Was: an all-parallel plan was accepted whenever a step named 'verify' existed. That exemption
-  // is only reachable when the verify step is itself unordered — which is the defect, reproduced
-  // live on 2026-07-26. A verify step earns the plan nothing unless it DEPENDS on the work.
   it('an unordered verify step does not rescue an all-parallel plan', () => {
     const r = validatePlan(plan([step('a'), step('b'), step('verify')]))
     expect(r.ok).toBe(false)
@@ -87,10 +84,7 @@ describe('ChildPlanStep.modelRef', () => {
 })
 
 
-// Reproduced live 2026-07-26: a grounded plan froze `draft` and `verify` with no dependency and the
-// SAME zone. They ran in one wave, verify audited a file draft had not written yet, and the run
-// reported done. The all-parallel guard already existed but exempted any plan containing a step
-// named 'verify' — an exemption only reachable when that verify step is itself unordered.
+// draft and verify with no dependency and the same zone ran in one wave
 describe('plan shape defects that cause races', () => {
   const step = (id: string, over: Partial<PlanStep> = {}): PlanStep =>
     stepFixture({ id, title: id, instructions: 'x', dependsOn: [], zone: [], ...over })
@@ -119,9 +113,6 @@ describe('plan shape defects that cause races', () => {
     ]).ok).toBe(true)
   })
 
-  // A planner joined several globs with newlines into ONE zone entry (`["a/**\nb.ts"]`). It passed
-  // every gate, the frozen fence then matched no real path, and two steps were refused every write
-  // to their own files with no repair path — the slice's pipeline was cancelled.
   it('refuses a step whose zone entry is several globs joined into one string', () => {
     const r = check([
       step('draft', { zone: ['packages/a/**\npackages/b.ts'] }),
@@ -142,9 +133,6 @@ describe('plan shape defects that cause races', () => {
     if (!r.ok) expect(r.errors.join(' ')).toContain('one glob per array entry')
   })
 
-  // Pin: validatePlan's zone sweep now routes through planFieldViolations (the shared rule table
-  // in plan-rules.ts) instead of calling zoneEntryMisuse directly. The wording is unchanged, so this
-  // is a message-parity pin, not a new-behavior test — it passes against the pre-sweep code too.
   it('a malformed zone entry is refused with the step id and the pinned wording', () => {
     const r = check([step('x', { zone: ['a/**\nb.ts'] })])
     expect(r.ok).toBe(false)

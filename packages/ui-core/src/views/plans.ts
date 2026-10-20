@@ -8,14 +8,12 @@ export const plans = defineView({
   name: VIEW.plans,
   push: false,
 
-  // null is "no plan proposed yet", which the caller renders as such — an empty versions list
-  // would read as a task whose plan was emptied.
+  // null = no plan proposed yet; an empty versions list would read as an emptied plan
   read(model, { taskId }) {
     const tp = model.state.plans.get(taskId)
     if (!tp) return null
     const shown = (tp.approvedVersion != null ? tp.versions.find(v => v.version === tp.approvedVersion) : undefined) ?? tp.versions.at(-1)
-    // Fresh Map, so the raw run-status fold is never mutated. A step with no run entry yet has
-    // no status, and todoWaves reports it 'pending'.
+    // fresh Map: the raw run-status fold is never mutated; a step with no run entry is pending
     const states = new Map<string, StepStatusEntry>(
       [...(model.state.steps.get(taskId) ?? [])].map(([id, st]) =>
         [id, { status: st.status, ...(st.failure && { failureClass: st.failure.class }) }]),

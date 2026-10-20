@@ -58,10 +58,7 @@ describe('trust store', () => {
     expect(mcpFingerprint(server)).toBe(mcpFingerprint({ ...server, env: { API_KEY: 'rotated-value' } }))
   })
 
-  // .orc/config.json is committed by design (.gitignore un-ignores it), so the declaration is a
-  // PR-reachable artifact and the fingerprint is the only thing between an edit and re-consent.
-  // Repointing an indirection is a privilege change, not a rotation: same command, same args,
-  // same env key — a different secret handed to a third-party process.
+  // config.json is committed, so repointing an indirection is a privilege change, not a rotation
   it('repointing a $VAR indirection at another secret invalidates the grant', () => {
     const d = temp()
     const declared = { command: 'bun', args: ['server.ts'], env: { API_KEY: '$WEATHER_TOKEN' } }

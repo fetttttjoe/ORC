@@ -3,7 +3,6 @@ import type { AgentExecutor, ModelProvider } from './execution'
 import type { EventRecord } from './events'
 import type { Analyzer } from './analysis'
 
-// ---- T0 skills (agentskills.io open spec, strict) ----
 
 export const SKILL_NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/
 
@@ -12,7 +11,7 @@ export const SkillManifest = z.strictObject({
   description: z.string().min(1).max(1024),
   license: z.string().optional(),
   compatibility: z.string().max(500).optional(),
-  allowedTools: z.string().optional(), // frontmatter key 'allowed-tools'; parsed, NOT enforced until M5
+  allowedTools: z.string().optional(), // frontmatter key 'allowed-tools'; parsed, NOT enforced
   metadata: z.record(z.string(), z.string()).optional(),
 })
 export type SkillManifest = z.infer<typeof SkillManifest>
@@ -31,7 +30,6 @@ export interface LoadedSkill {
   hash: string // sha256 hex of body — the event log records which CONTENT ran (R9)
 }
 
-// ---- T1 MCP (neutral seam — the SDK never crosses into kernel/contracts) ----
 
 export const MCP_SERVER_ID_RE = /^[a-z0-9-]+$/
 
@@ -60,8 +58,7 @@ export interface ResolvedTool {
   name: string // mangled, model-facing
   description: string
   inputSchema: Record<string, unknown> // JSON Schema, as delivered by the server
-  // toolCallId: the real provider tool_call id, when the caller has one (executeTool threads it
-  // through) — optional so MCP tools and other implementations that don't need it stay unchanged.
+  // toolCallId is the provider's real id; optional so MCP tools stay unchanged
   execute(input: unknown, toolCallId?: string): Promise<{ output: unknown; isError: boolean }>
 }
 
@@ -70,7 +67,6 @@ export interface ToolSource {
   close(): Promise<void>
 }
 
-// ---- T2 extensions + hooks ----
 
 export enum HookName {
   session_start = 'session_start',

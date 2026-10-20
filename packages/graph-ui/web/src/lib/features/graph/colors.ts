@@ -1,33 +1,22 @@
-// Node/edge color vocabulary for the sigma island — pure, zero-import, pinned by colors.test.ts.
-// A WebGL canvas cannot read CSS custom properties, so these are hardcoded copies of the app.css
-// @theme tokens with the token named beside each hex — change a token there, grep the name here.
-// Status strings mirror the TASK_STATUS/StepRunStatus wire values; the test pins the set.
+// Hardcoded copies of app.css tokens (a WebGL canvas cannot read CSS properties), named per hex
 
-// TYPE-ONLY imports: erased at build, so this module stays runtime-pure. The "no imports" rule in
-// the header is about the COLOURS — a WebGL canvas cannot read CSS custom properties, so the hexes
-// are hardcoded copies — not about the vocabulary. Taking the unions from the wire means a node or
-// edge kind added there fails THIS file to compile rather than rendering an undefined colour.
+// TYPE-ONLY imports: a node or edge kind added on the wire fails this file to compile
 import type { EdgeType, NodeType } from '@orc/ui-core/graph-wire'
 
 export type { NodeType }
 
 export const TYPE_COLORS: Record<NodeType, string> = {
-  // --color-machine (#6fa8b5) family, dimmed to rest — full brightness is reserved for the
-  // running override, otherwise a running task would be indistinguishable from an idle one
+  // --color-machine family dimmed to rest; full brightness is reserved for the running override
   task: '#54808a',
   // lighter, grayer steel of the same family (machine mixed toward --color-mist)
   step: '#7d9dab',
-  // amber-adjacent, deliberately softer than --color-human (#e8a33d) so an artifact never
-  // reads as a gate awaiting the operator
+  // amber-adjacent, softer than --color-human so an artifact never reads as a gate
   artifact: '#d9a66a',
-  // WORKER hue, outside the two-temperature axis: a model carries no lifecycle — it is the actor
-  // that does the work, not a state something is in. Dusty orchid, clearly apart from artifact
-  // amber (#d9a66a), and muted enough for the ink background.
+  // WORKER hue, outside the two-temperature axis: a model is an actor, not a state
   model: '#bd82a8',
 }
 
-// Live lifecycle overrides, strongest first: failed > blocked > running. Settled states
-// (done/completed/pending) keep the type color — the graph shows what is HAPPENING, not history.
+// Live overrides, strongest first: failed > blocked > running; settled states keep the type color
 export const STATUS_COLORS: Record<string, string> = {
   failed: '#c4573b', // --color-rust
   blocked: '#c4573b', // --color-rust — same temperature as failed; StatusPill agrees
@@ -35,8 +24,7 @@ export const STATUS_COLORS: Record<string, string> = {
   cancelled: '#5c6472', // --color-fog
 }
 
-// only task/step carry a lifecycle in `detail`; an artifact's detail is its size, a model's its
-// provider — recoloring those on a coincidental string was the bug the legacy test pinned against
+// only task/step carry a lifecycle in detail; an artifact's is its size, a model's its provider
 export const colorFor = (type: NodeType, detail: string): string =>
   ((type === 'task' || type === 'step') ? STATUS_COLORS[detail] : undefined) ?? TYPE_COLORS[type]
 
@@ -47,19 +35,10 @@ export const isActive = (type: NodeType, detail: string): boolean =>
 export const EDGE_COLOR = '#2e3742' // --color-rule
 export const LABEL_COLOR = '#e6e1d6' // --color-paper
 
-// A `uses` edge — the one that says WHICH worker ran a step — is drawn in the worker's own hue
-// instead of the shared chrome, so the relationship is legible without clicking a node. Dimmed well
-// below the node itself: an edge is still chrome, and a graph where every connection shouts is one
-// where the nodes stop being findable. Keyed by the wire's edge-type string rather than the EdgeType
-// union, because this module is zero-import by design (a WebGL canvas cannot read CSS tokens, so
-// everything here is a hardcoded copy — see the file header).
+// A `uses` edge is drawn in the worker hue, dimmed below the node; keyed by wire string
 export const EDGE_BASE: Partial<Record<EdgeType, string>> = { uses: '#5c3f55' }
 
-// Authored against EdgeType (a renamed kind fails the build above), looked up by plain string. The
-// wire deliberately parses `type` loosely so a kind this build has never heard of cannot break the
-// whole graph — so the lookup must tolerate one, and an unknown kind falls back to chrome. Built
-// from the table rather than re-listed, and no cast: `as EdgeType` on wire input would assert
-// exactly the thing that is not guaranteed.
+// Looked up by plain string: the wire parses `type` loosely, so unknown kinds fall back to chrome
 const EDGE_BASE_BY_NAME = new Map<string, string>(Object.entries(EDGE_BASE))
 
 export const edgeColorFor = (type: string): string => EDGE_BASE_BY_NAME.get(type) ?? EDGE_COLOR
@@ -67,10 +46,7 @@ export const edgeColorFor = (type: string): string => EDGE_BASE_BY_NAME.get(type
 /** the newest event's nodes flash in the human colour — attention, not status */
 export const FLASH_COLOR = '#e8a33d' // --color-human
 
-/**
- * Fade a colour toward the page ground for focus dimming. Parsing here (not a CSS opacity) because
- * sigma paints into WebGL, where a per-node alpha is not available on the base renderer.
- */
+// Fade toward the page ground; parsed here because sigma's base renderer has no per-node alpha
 export function dim(hex: string, amount = 0.78): string {
   const m = /^#([0-9a-f]{6})$/i.exec(hex)
   if (!m?.[1]) return hex

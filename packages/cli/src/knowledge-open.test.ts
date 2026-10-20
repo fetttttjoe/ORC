@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   AUTHOR_SOURCE, CheckVerdict, ClaimClass, ClaimState, DeliveryMode, Door, EVENT_KIND, KNOWLEDGE_REFUSAL,
-  type EventInput, type EventKind, type EventRecord, type KnowledgeAccess, type MemoryAuthor,
+  type EventInput, type EventKind, type EventRecord, type KnowledgeAccess, type Author,
 } from '@orc/contracts'
 import { eventFixture } from '@orc/contracts/fixtures'
 import { EVIDENCE_NOT_RECORDED, REGISTRY_REFUSAL } from '@orc/knowledge-core'
@@ -21,7 +21,7 @@ const gitCheckout = (): string => {
   dirs.push(dir)
   return dir
 }
-const author: MemoryAuthor = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'chat-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
+const author: Author = { source: AUTHOR_SOURCE.agent, workspaceId: 'ws-1', origin: { chatId: 'chat-1', door: Door.supervisor }, taskId: 't-1', stepId: 's-1', runToken: 'r-1' }
 const fact = (text: string) => ({ text, class: ClaimClass.fact, anchors: [{ path: 'src/a.ts' }] })
 
 const opened = () => openKnowledge({ knowledge: { plugin: 'git-files', options: {} } })
@@ -32,7 +32,7 @@ const portOf = (access: KnowledgeAccess) => {
 const NO_EVENTS = async (): Promise<EventRecord[]> => []
 const NO_SEQ = async (): Promise<number> => 0
 const quiet = { append: async () => eventFixture(), after: NO_EVENTS, earliestSeq: NO_SEQ }
-const memoryLog = () => {
+const fakeLog = () => {
   const records: EventRecord[] = []
   const asked: Array<[number, EventKind[] | undefined]> = []
   return {
@@ -86,7 +86,7 @@ describe('knowledgeAccess', () => {
   })
   it('a holds check in the log clears the claim for every access over that log; a checked payload that does not parse is skipped', async () => {
     const dir = gitCheckout()
-    const log = memoryLog()
+    const log = fakeLog()
     const call = { author, idempotencyKey: null }
     const first = portOf(knowledgeAccess(opened(), log, dir))
     const [ref] = (await first.write(call, { add: [{ ...fact('outer declares its inner helper'), anchors: [{ path: 'src/a.ts', symbol: 'outer' }] }] })).added
@@ -101,7 +101,7 @@ describe('knowledgeAccess', () => {
   })
   it('a purge of the log drops the holds check it held, so the next drift through the same log reads suspect again', async () => {
     const dir = gitCheckout()
-    const log = memoryLog()
+    const log = fakeLog()
     const call = { author, idempotencyKey: null }
     const port = portOf(knowledgeAccess(opened(), log, dir))
     const [ref] = (await port.write(call, { add: [{ ...fact('outer declares its inner helper'), anchors: [{ path: 'src/a.ts', symbol: 'outer' }] }] })).added
@@ -114,7 +114,7 @@ describe('knowledgeAccess', () => {
     expect((await port.drift(call, { ids: [id] })).map(d => d.state)).toEqual([ClaimState.suspect])
   })
   it('drift reads through one access ask the log for writes and checks once from 0, then only after the last seq', async () => {
-    const log = memoryLog()
+    const log = fakeLog()
     const call = { author, idempotencyKey: null }
     const port = portOf(knowledgeAccess(opened(), log, gitCheckout()))
     await port.write(call, { add: [fact('a declares outer')] })

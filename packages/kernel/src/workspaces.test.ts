@@ -4,9 +4,7 @@ import { authorFixture, eventFixture } from '@orc/contracts/fixtures'
 import { fold, type State } from './projections'
 import { applyArchived, applyRetitle, compareWorkspaceHealth, orphanTasks, tasksByWorkspace, workspaceByCwd, workspaceCwdFor, workspaceHealth, type WorkspaceProbes } from './workspaces'
 
-// Workspace.id is z.uuid(), so the fold's parse SKIPS a record whose id is a short label — every
-// assertion here would then read an empty map and pass for the wrong reason. Labels map to fixed
-// uuids so the assertions stay readable and the fold actually sees the records.
+// Workspace.id is z.uuid(): a short label is skipped by the fold and assertions pass vacuously
 const ID = {
   a: '11111111-1111-4111-8111-111111111111',
   b: '22222222-2222-4222-8222-222222222222',
@@ -64,8 +62,6 @@ describe('workspace fold', () => {
   })
 })
 
-// The transitions the fold applies and the kernel returns are ONE function each — the pair below is
-// what stops `retitleWorkspace`'s answer from drifting from what the next fold of the same log says.
 describe('workspace transitions', () => {
   it('retitle and archive/restore leave the source record untouched', () => {
     const w = ws(ID.a, '/repo')
@@ -105,12 +101,7 @@ describe('derivations', () => {
   })
 })
 
-// ── health ────────────────────────────────────────────────────────────────────────────────────
-// A TABLE, one row per state, because the table IS the contract: the CLI, the MCP door and the
-// console all render this one verdict, so a rung that stopped being reachable (shadowed by the rung
-// above it) would otherwise pass every per-surface test while nothing ever printed that word again.
-// Hand-built states rather than folded ones: reaching `running` / `awaiting_approval` through the
-// fold would need a run's whole event chain, which tests the fold, not this rule.
+// one row per state: a rung shadowed by the one above it would otherwise go unnoticed
 
 const WS_A = ws(ID.a, '/repo')
 const stateOf = (tasks: TaskNode[], merged = false): Pick<State, 'tasks' | 'workspaces' | 'workspaceMerges'> => ({
@@ -123,8 +114,7 @@ const stateOf = (tasks: TaskNode[], merged = false): Pick<State, 'tasks' | 'work
 const LIVE: WorkspaceProbes = { dirExists: true, clean: true }
 const GONE: WorkspaceProbes = { dirExists: false, clean: null }
 const askedT1 = ev(EVENT_KIND.feedback_requested, { topic: 'cwd', question: 'which cwd?' }, 't1')
-// MemoryAuthor.origin is required and the payload is untyped, so an author without it compiles but
-// fails the FeedbackProvidedPayload parse and the answer never lands.
+// Author.origin is required: without it the FeedbackProvidedPayload parse fails
 const answeredT1 = ev(EVENT_KIND.feedback_provided, { topic: 'cwd', text: 'this one', author: authorFixture({ workspaceId: ID.a }) }, 't1')
 
 const CASES: Array<{
@@ -133,9 +123,7 @@ const CASES: Array<{
   events?: EventRecord[]
   probes?: WorkspaceProbes
   expected: WorkspaceHealth['state']
-  // The `merged` FLAG, asserted per row rather than derived from the row's own state: the flag and
-  // the state are two different answers, and a row that only checked the state could not tell a
-  // shadowed merge (`active` with merged: true) from one that never happened.
+  // the `merged` flag asserted per row: it is a different answer from the state
   merged?: true
 }> = [
   {
@@ -145,11 +133,7 @@ const CASES: Array<{
     expected: WORKSPACE_STATE.active,
   },
   {
-    // The precedence row the flag exists for. `merged` is a FACT about whether the work landed;
-    // `state` is where the operator's attention goes — and every rung above `merged` shadows it, so
-    // without the flag a landed workspace that is running again is indistinguishable from one that
-    // never merged at all. "Has this work landed?" is the question the whole workspace transaction
-    // exists to answer, and the state column cannot answer it.
+    // a landed workspace that is running again reads `active`; only the flag says it merged
     name: 'active — a merged workspace with a running task; the flag survives the rung that shadows it',
     state: stateOf([task('t1', ID.a, TASK_STATUS.running)], true),
     expected: WORKSPACE_STATE.active,
@@ -167,16 +151,14 @@ const CASES: Array<{
     expected: WORKSPACE_STATE.waiting,
   },
   {
-    // the same question ANSWERED is not a gate — without this row, "waiting" could be spelled
-    // "has ever asked" and every workspace that ever ran a gated step would read as waiting forever
+    // an ANSWERED question is not a gate; else 'has ever asked' would read as waiting forever
     name: 'idle — the question was answered on its topic',
     state: stateOf([task('t1', ID.a, TASK_STATUS.blocked)]),
     events: [askedT1, answeredT1],
     expected: WORKSPACE_STATE.idle,
   },
   {
-    // merged beats dangling — its worktree is REMOVED by `ws merge`, so `!dirExists` is the normal
-    // end state of a landed workspace, not a warning
+    // `ws merge` removes the worktree, so !dirExists is the normal end state of a landed workspace
     name: 'merged — the merge fact is recorded, even with the checkout gone',
     state: stateOf([task('t1', ID.a, TASK_STATUS.done)], true),
     probes: GONE,
@@ -222,8 +204,7 @@ describe('workspaceHealth', () => {
     const events = [
       ev(EVENT_KIND.workspace_created, { workspace: WS_A }, null, '2026-09-10T00:00:00.000Z'),
       ev(EVENT_KIND.task_created, { task: task('t1', ID.a) }, 't1', '2026-09-11T00:00:00.000Z'),
-      // this workspace's own retitle is LATER than anything its tasks did — a workspace with no
-      // task activity at all must still date from something, or `ws ls` prints a blank age
+      // the workspace's own retitle is later than its tasks' activity: `ws ls` needs some age
       ev(EVENT_KIND.workspace_retitled, { workspaceId: ID.a, title: 'Renamed' }, null, '2026-09-12T00:00:00.000Z'),
       // another workspace's record and another workspace's task are both LATER and must not count
       ev(EVENT_KIND.workspace_retitled, { workspaceId: ID.b, title: 'Other' }, null, '2026-09-20T00:00:00.000Z'),
@@ -237,8 +218,6 @@ describe('workspaceHealth', () => {
   })
 })
 
-// The one ordering every door sorts by, so the terminal, the MCP door and the console agree about
-// what the operator sees first. Attention first, finished business last.
 describe('compareWorkspaceHealth', () => {
   const of = (state: WorkspaceHealth['state'], archivedAt: string | null = null) =>
     ({ workspace: ws(ID.a, '/repo', { archivedAt }), health: { state } })

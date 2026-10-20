@@ -55,11 +55,7 @@ describe('planFrame', () => {
     expect(plan.seq).toBeNull()
   })
 
-  // sse.ts never tells a fresh id-less frame apart from a LATER one whose `ev.lastEventId` merely
-  // inherited the previous id-bearing frame's value (the SSE last-event-id buffer persists across
-  // id-less messages — see frame-plan.ts's docblock). This pins why that is harmless: by the time
-  // such a frame arrives, `heldSeq` already equals the inherited value, so re-assigning it is a
-  // no-op rather than a real advance.
+  // an inherited envSeq equals heldSeq, so re-assigning it is a no-op
   it('an inherited (non-zero) envSeq equal to heldSeq is a safe no-op, not a regression', () => {
     const plan = planFrame(11, 11, envelope({ operator: OP }))
     expect(plan.regression).toBe(false)

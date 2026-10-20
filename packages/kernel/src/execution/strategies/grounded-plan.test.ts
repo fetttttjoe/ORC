@@ -2,8 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { CHECKS_STEP_ID, COMMIT_STEP_ID, EVENT_KIND, FINISH_STEP_ID, PlanNoteToolName, ROLE_SKILL, STEP_ROLE, type EventRecord, type PlanNote } from '@orc/contracts'
 import { eventFixture, must, planNoteFixture, stepFixture } from '@orc/contracts/fixtures'
 import { freezePlan, groundedPlanOmission, instantiateFrozenPlan, planGraphHash, withCommitStep } from './grounded-plan'
-// the appender lives in the pure module now (finish-step.ts, contracts-only imports); this describe
-// stays here because its subject is what the FREEZE ends with, not the appender in isolation
+// this describe stays here: its subject is what the FREEZE ends with, not the appender in isolation
 import { withFinishStep } from '../../finish-step'
 
 const note = (over: Partial<PlanNote> & { id: string }): PlanNote => planNoteFixture({ title: over.id, ...over })
@@ -59,8 +58,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     const draft = instantiateFrozenPlan('masterplan', notes)
     expect(must(draft.steps.find(s => s.id === 'verify'), 'draft.steps.find(s => s.id === \'verify\')').role).toBe('auditor')
     expect(must(draft.steps.find(s => s.id === 'work'), 'draft.steps.find(s => s.id === \'work\')').role).toBe('implementer')
-    // the auditor + heal contracts ride as the kernel-appended role skill — the REF is frozen
-    // into the plan (planner can't remove it); implementer siblings never carry it
+    // the auditor + heal contracts ride as the kernel-appended role skill ref; implementers never do
     expect(must(draft.steps.find(s => s.id === 'verify'), 'draft.steps.find(s => s.id === \'verify\')').instructions).toBe('audit it')
     expect(must(draft.steps.find(s => s.id === 'verify'), 'draft.steps.find(s => s.id === \'verify\')').skillRefs).toEqual([ROLE_SKILL.auditor])
     expect(must(draft.steps.find(s => s.id === 'work'), 'draft.steps.find(s => s.id === \'work\')').instructions).toBe('do it')
@@ -95,9 +93,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     expect(must(instantiateFrozenPlan('masterplan', notes).steps.find(s => s.id === 'b'), 'step b').dependsOn).toEqual(['a'])
   })
 
-  // A missing dependency lets a step run EARLY — silent corruption. A surplus one only makes it run
-  // later. So an unresolvable target widens to every sibling rather than being dropped or throwing:
-  // the planner replaced `a` with a-read/a-write while `b` kept dependsOn ['a'].
+  // An unresolvable dependsOn widens to every sibling: a missing dependency would run a step EARLY.
   it('heals a stale ordering target by waiting on every sibling, never by dropping it', () => {
     const notes: PlanNote[] = [
       note({ id: 'masterplan', subplans: ['a-read', 'a-write', 'b'] }),
@@ -120,9 +116,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     expect(first).toEqual(instantiateFrozenPlan('masterplan', notes))
   })
 
-  // A masterplan with no subplans freezes to steps: [] — and with autoCommit on, withCommitStep then
-  // appends a commit step, yielding a commit-only pipeline that reports done having written no code
-  // (incidents c4bc1d38, 8b5e1034). Refuse at the freeze — the ONE derivation — naming the field.
+  // A masterplan with no subplans is refused at the freeze, naming the field.
   it('refuses a masterplan with no subplans, naming the field', () => {
     expect(() => instantiateFrozenPlan('masterplan', [note({ id: 'masterplan', title: 'M' })])).toThrow(/subplans/)
   })
@@ -142,8 +136,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
       'Why: the api needs it\n\ndo the thing\n\nUnresolved uncertainty (reviewed at approval — act on these, do not skip):\n- is X wired?')
   })
 
-  // A reviewed uncertainty entry is load-bearing material the human approved along with the rest
-  // of the plan note — dropping it silently at the freeze means the executing agent never sees it.
+  // A reviewed uncertainty entry must reach the executing agent, not be dropped at the freeze
   it('appends reviewed uncertainty entries to the derived instructions', () => {
     const notes: PlanNote[] = [
       note({ id: 'masterplan', subplans: ['a'] }),
@@ -154,8 +147,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     expect(instructions).toContain('second gap: Z is unverified')
   })
 
-  // The default `uncertainty: []` must leave the derived instructions byte-identical to what
-  // `n.body || n.summary || n.title` alone produces — no heading, nothing appended.
+  // The default `uncertainty: []` leaves instructions byte-identical to the body alone.
   it('leaves instructions byte-identical to body||summary||title when uncertainty is empty', () => {
     const notes: PlanNote[] = [
       note({ id: 'masterplan', subplans: ['a'] }),
@@ -168,9 +160,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
   })
 })
 
-  // a subplan's step gets only what its note declares — before this, toolRefs/skillRefs were
-  // hardcoded empty, so a grounded plan could decompose work but never grant the capability to do
-  // it: a research subplan reached execution with no way to search.
+  // a subplan's step gets only what its note declares (toolRefs/skillRefs)
   it('freezes the capabilities a subplan declares into its step', () => {
     const notes: PlanNote[] = [
       note({ id: 'masterplan', subplans: ['research', 'local'] }),
@@ -186,9 +176,7 @@ describe('instantiateFrozenPlan (pure, deterministic)', () => {
     expect(steps.find(s => s.id === 'local')?.skillRefs).toEqual([])
   })
 
-// The grounded strategy exists to DECOMPOSE. A plan step that signals success without freezing a
-// split did not do its job — and the run reported success anyway, with an empty plan graph. This
-// happened on a real run: the agent verified the analyze step's work itself and passed.
+// A plan step that signals success without freezing a split did not do its job
 describe('groundedPlanOmission', () => {
   const runToken = 'step:t1:plan:a1'
   const grounded = (over: Partial<EventRecord> = {}): EventRecord => eventFixture({
@@ -259,8 +247,7 @@ describe('withCommitStep', () => {
 })
 
 describe('withFinishStep', () => {
-  // the same three notes withCommitStep's describe freezes — duplicated rather than shared, so a
-  // change to one describe's fixture cannot silently retune the other's assertions
+  // the same three notes as withCommitStep's describe, duplicated so fixtures never retune each other
   const frozen = () => instantiateFrozenPlan('masterplan', [
     note({ id: 'masterplan', subplans: ['db', 'verify'] }),
     note({ id: 'db', body: 'do it' }),
@@ -281,7 +268,7 @@ describe('withFinishStep', () => {
       instructions: "Reconcile the claims this task recorded, record its decision if it made one, and present the summary; the 'role-finisher' skill is your contract.",
       dependsOn: ['db', 'verify'], skillRefs: [ROLE_SKILL.finisher], toolRefs: [], zone: [], readOnlySource: true,
     })
-    // the commit stamp must see reconciled notes, so it waits on the finish step too
+    // the commit step must see the reconciled plan, so it waits on the finish step too
     expect(draft.steps.at(-1)?.dependsOn).toEqual(['db', 'verify', FINISH_STEP_ID])
   })
 
@@ -307,9 +294,7 @@ describe('withFinishStep', () => {
     expect(draft.steps.at(-1)?.dependsOn).toEqual(['db', 'verify', CHECKS_STEP_ID])
   })
 
-  // the blank-plan refusal (instantiateFrozenPlan) stays AHEAD of the append: a childless masterplan
-  // must never freeze to a finish-only pipeline that asks the human to summarize nothing — the same
-  // silent-failure shape the commit-only pipeline had (incidents c4bc1d38, 8b5e1034)
+  // the blank-plan refusal stays AHEAD of the append: no finish-only pipeline for a childless plan
   it('never turns a childless masterplan into a finish-only pipeline — the blank-plan refusal comes first', () => {
     expect(() => freezePlan('masterplan', [note({ id: 'masterplan', title: 'M' })], { autoCommit: false, checks: [] })).toThrow(/subplans/)
   })

@@ -68,8 +68,7 @@ describe('events', () => {
       title: 'run t1', parent: { chatId: 'copilot:1', seq: 3 }, externalRef: null,
     }).success).toBe(true)
   })
-  // A chat has one lifecycle event. A second, writer-declared ending would disagree with the task
-  // status the readers already derive an end from, and nothing would say which of the two is right.
+  // one lifecycle event: a second ending would disagree with the task status
   it('has no chat_closed kind and no payload row for one', () => {
     expect(Object.values(EventKind)).not.toContain('chat_closed')
     expect(Object.keys(PAYLOAD_SCHEMAS)).not.toContain('chat_closed')

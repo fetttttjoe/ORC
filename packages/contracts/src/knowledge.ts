@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { z } from 'zod'
-import type { MemoryAuthor } from './author'
+import type { Author } from './author'
 import type { AnchorReading, ClaimState } from './claim-state'
 import { normalizeEntity, pathSegments, ROOT_ENTITY } from './entity-of'
 import type { Decision, DecisionDraft, DecisionFilter, DecisionInputRaw, DecisionWriteResult } from './decision'
@@ -217,7 +217,7 @@ export enum DeliveryMode {
   push = 'push',
 }
 
-export interface KnowledgeCall { author: MemoryAuthor; idempotencyKey: string | null }
+export interface KnowledgeCall { author: Author; idempotencyKey: string | null }
 export interface KnowledgeRead extends KnowledgeCall { mode: DeliveryMode }
 
 export enum PreloadArm { pushed = 'pushed', here = 'here', around = 'around', search = 'search' }

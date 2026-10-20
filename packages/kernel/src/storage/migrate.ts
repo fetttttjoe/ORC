@@ -6,8 +6,6 @@ import { sql } from 'drizzle-orm'
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 
-// schema changes are a deliberate act (orc db migrate / test setup), never an open()
-// side effect; only this module knows where the committed SQL lives
 const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../drizzle', import.meta.url))
 
 const journalEntryCount = (): number => {
@@ -24,9 +22,7 @@ export async function migrateDatabase(url: string): Promise<void> {
   }
 }
 
-// Same shape probing as errors.ts' isConnectionRefused: 'in' checks, no casts. The
-// `cause !== error` guard is load-bearing — error-wrapping libraries can hand back a chain
-// that loops on itself, and the unguarded walk recursed to stack overflow.
+// the `cause !== error` guard is load-bearing: a self-looping cause chain overflowed the stack
 export function isMissingMigrationTable(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false
   if ('code' in error && (error.code === '42P01' || error.code === '3F000')) return true
@@ -35,9 +31,7 @@ export function isMissingMigrationTable(error: unknown): boolean {
   return cause !== undefined && cause !== error && isMissingMigrationTable(cause)
 }
 
-// credential-free database identity for error messages — WHICH database was checked is the
-// first thing a "schema is behind" report needs (a wrong cwd resolves to a different database
-// and the bare message reads like corruption)
+// credential-free identity: a wrong cwd resolves another database and reads like corruption
 const where = (url?: string): string => {
   if (!url) return ''
   try {

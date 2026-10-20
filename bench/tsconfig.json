@@ -1,7 +1,6 @@
 {
   "extends": "../tsconfig.base.json",
-  // bench files import '../packages/*/src/*.ts' by design (see the ponytail note each file carries:
-  // bench/ is not a workspace package); legal under noEmit, which the base config sets.
+  // bench/ is not a workspace package: it imports ../packages/*/src/*.ts, legal under noEmit
   "compilerOptions": { "allowImportingTsExtensions": true },
   "include": ["*.ts"]
 }

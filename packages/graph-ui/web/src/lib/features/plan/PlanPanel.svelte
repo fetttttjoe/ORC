@@ -15,17 +15,7 @@
   import type { EditableStep } from './plan-edit'
   import type { WaveStep } from '$lib/api/types'
 
-  /**
-   * The plan, at three depths the operator chooses between: a progress bar always, the wave rail
-   * under it, and the dependency graph dropped out below that.
-   *
-   * The bar is the summary that is ALWAYS true — it needs no plan version and no visual, so it
-   * renders even while the rest is loading. Everything heavier is behind a disclosure, because the
-   * inspector is a column and a graph opened by default pushes the plan notes off the pane.
-   *
-   * Owning the disclosure here (rather than in RequestTab) is what keeps the ledger card and the
-   * inspector from growing two different answers to "is the graph open?".
-   */
+  // The plan at three depths: the always-true bar, the wave rail, the graph behind a disclosure
   interface Props {
     steps: readonly (FlowStep & EditableStep)[]
     /** the projected wave layering; null when the shown version has no visual yet */
@@ -38,13 +28,9 @@
 
   let { steps, waves, taskId, onstepclick, onlink, onrefused }: Props = $props()
 
-  // Open by default. It started collapsed to keep the plan notes above the fold, but the graph is
-  // the thing an operator opens this tab FOR, and a dim text link below the rail was hunted for
-  // twice before being found. A control you have to search for is a control that does not exist.
+  // Open by default: the graph is what an operator opens this tab for
   let open = $state(true)
-  // The big canvas. Separate state from `open` on purpose: closing the dialog must return you to
-  // whatever the inline panel was doing, not collapse it. Editing a plan needs room the inspector
-  // column does not have, so this is where the pre-approval editor will live.
+  // Separate from `open`: closing the dialog must not collapse the inline panel
   let big = $state(false)
 
   const statuses = $derived(waves?.flatMap(w => w.steps.map(s => s.status)) ?? [])
@@ -89,8 +75,7 @@
   </div>
 {/if}
 
-<!-- The same PlanGraph, the same adapter, the same edit seam — only the box is bigger. Nothing
-     about the graph is duplicated here, which is what makes the editor land in one place later. -->
+<!-- The same PlanGraph, adapter and edit seam; only the box is bigger -->
 <Dialog.Root bind:open={big}>
   <Dialog.Content class="flex h-[88vh] max-w-[min(1400px,94vw)] flex-col gap-2 sm:max-w-[min(1400px,94vw)]">
     <Dialog.Header class="shrink-0">

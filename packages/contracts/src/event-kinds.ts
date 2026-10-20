@@ -1,7 +1,7 @@
 import type { Usage } from './execution'
 import type { Door } from './origin'
 
-// The event vocabulary and the stored envelope, in a leaf module: type-only imports cannot form a cycle.
+// a leaf module: type-only imports cannot form a cycle
 export enum EventKind {
   task_created = 'task_created',
   plan_proposed = 'plan_proposed',
@@ -53,11 +53,9 @@ export interface EventRecord {
   seq: number
   projectId: string
   idempotencyKey: string | null
-  // which interaction caused this event, null for one outside any. Never recoverable later: no
-  // stored field says which of the interactions live at that instant this event belonged to.
+  // null for an event outside any interaction; no stored field recovers it later
   chatId: string | null
-  // where this call entered. Never null: a chatless event that also lost its door would be
-  // anonymous forever, indistinguishable from a CLI call, an MCP call or a hook's commit.
+  // never null: a chatless event that lost its door would be anonymous forever
   door: Door
   taskId: string | null
   stepId: string | null

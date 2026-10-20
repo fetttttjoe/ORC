@@ -23,10 +23,7 @@ describe('workspace scoping (trust boundary)', () => {
   })
   it('rejects symlink escapes', async () => {
     const dir = ws()
-    // Point the symlink at a real file outside the workspace. If the realpath
-    // guard is missing or wrong, this read succeeds and returns the secret —
-    // a bare "does it error" check on a nonexistent target would pass either
-    // way (ENOENT masks a missing guard), so this asserts on an actual file.
+    // the target must be a real file: ENOENT would mask a missing realpath guard
     const outside = mkdtempSync(path.join(tmpdir(), 'orc-outside-'))
     writeFileSync(path.join(outside, 'secret.txt'), 'top-secret')
     symlinkSync(outside, path.join(dir, 'sneaky'))
@@ -35,10 +32,7 @@ describe('workspace scoping (trust boundary)', () => {
   })
   it('rejects fs_write through a symlinked dir at a deep nonexistent path (ancestor-walk loop)', async () => {
     const dir = ws()
-    // Nothing below `sneaky` exists yet, so resolveInWorkspace's
-    // `while (!existsSync(probe)) probe = path.dirname(probe)` loop must climb
-    // past b/ and a/ before it finds `sneaky` itself — unlike the read test above,
-    // which finds an existing file on the first probe and never iterates.
+    // nothing below `sneaky` exists, so the ancestor walk must climb past b/ and a/
     const outside = mkdtempSync(path.join(tmpdir(), 'orc-outside-'))
     symlinkSync(outside, path.join(dir, 'sneaky'))
     const r = await executeTool(TOOL_NAME.fs_write, { path: 'sneaky/a/b/new.txt', content: 'x' }, dir)
@@ -48,12 +42,6 @@ describe('workspace scoping (trust boundary)', () => {
 })
 
 describe('the write fence refuses .git, zone or no zone', () => {
-  /**
-   * `.git` is not source. A write there can plant a hook git will execute on the next commit —
-   * outside the exec allowlist entirely — rewrite refs, or corrupt the repository. assertInZone
-   * returns early for an UNFENCED step, so before this the only thing standing between an agent
-   * and `.git/hooks/pre-commit` was that fs_write cannot set an executable bit.
-   */
   it('refuses a write under .git even with no zone declared', async () => {
     const dir = ws()
     mkdirSync(path.join(dir, '.git', 'hooks'), { recursive: true })
@@ -80,15 +68,6 @@ describe('the write fence refuses .git, zone or no zone', () => {
 })
 
 describe('a write preserves what a file IS, not just what it says', () => {
-  /**
-   * writeFileAtomic writes a temp file and renames it over the target, which REPLACES the inode —
-   * so everything about the file that is not its bytes goes with the old one. Mode is the half that
-   * bites: measured live, an orc run edited packages/cli/src/bin.ts and it landed as 100644 having
-   * been 100755, and nothing failed because the file still worked when invoked as `bun bin.ts`.
-   *
-   * A git hook is where it stops being cosmetic: git executes the hook file directly, so a hook
-   * that loses its bit silently never runs again.
-   */
   const mode = (p: string): number => statSync(p).mode & 0o777
 
   it('fs_write keeps an executable file executable', async () => {
@@ -155,9 +134,6 @@ describe('fs tools', () => {
     releaseWriteClaims(b.writer)
   })
 
-  // A refused edit writes nothing, so it must not fence a sibling out of the path. The claim was
-  // taken before fs_edit validated anything, and none of the three refusal branches released it —
-  // so one bad old_string locked the file against every other step for the rest of the run.
   it('a refused fs_edit does not leave the path claimed against a sibling', async () => {
     const dir = ws()
     const a = { writer: 'step:t:a:a1' }
@@ -174,9 +150,7 @@ describe('fs tools', () => {
     releaseWriteClaims(b.writer)
   })
 
-  // Same rule when the write itself THROWS (ENOSPC, EACCES) rather than refusing: the outer catch
-  // returns the error envelope, and the path must not stay fenced against siblings over an edit
-  // that never landed. A read-only parent directory makes the atomic temp-file write throw EACCES.
+  // a read-only parent directory makes the atomic temp-file write throw EACCES
   it('an fs_edit whose write throws does not leave the path claimed against a sibling', async () => {
     const dir = ws()
     const a = { writer: 'step:t:a:a1' }
@@ -249,9 +223,6 @@ describe('fs tools', () => {
   })
 })
 
-// The corruption this tool exists to prevent, observed live: an agent asked to add ~11 lines to a
-// 347-line file rewrote the whole file through fs_write and baked JSON escapes into 85 lines of it.
-// A surgical edit cannot touch what it does not name.
 describe('fs_edit', () => {
   it('replaces only the named text and leaves the rest of the file byte-identical', async () => {
     const dir = ws()
@@ -262,8 +233,6 @@ describe('fs_edit', () => {
     expect(readFileSync(path.join(dir, 'doc.md'), 'utf8')).toBe('line one\nsubgraph CLI ["packages/cli"]\nline three\nline four\n')
   })
 
-  // String.prototype.replace treats $$, $&, $` and $' in the replacement as patterns — a
-  // new_string containing shell or Makefile text ('$$HOME') lands corrupted with no error.
   it('writes new_string verbatim — $ replacement patterns are not interpreted', async () => {
     const dir = ws()
     writeFileSync(path.join(dir, 'mk'), 'echo OLD\n')
@@ -327,8 +296,6 @@ const extraTool = (over: Partial<ResolvedTool> = {}): ResolvedTool => ({
 })
 
 describe('fs_read line range', () => {
-  // agents reach for `sed -n '10,20p' file` via exec (blocked) because fs_read read whole files;
-  // a 1-indexed inclusive line range removes that whole class of exec friction
   const withFile = async () => {
     const dir = ws()
     await executeTool(TOOL_NAME.fs_write, { path: 'f.txt', content: 'a\nb\nc\nd\ne' }, dir)
@@ -355,8 +322,6 @@ describe('fs_read line range', () => {
 })
 
 describe('fs_delete', () => {
-  // Observed live: a step was REQUIRED to remove its own scratch file and had no tool that could —
-  // fs_write/fs_edit cannot delete, and git writes are not (and must not be) allowlisted.
   it('deletes a file inside the workspace and reports it', async () => {
     const dir = ws()
     writeFileSync(path.join(dir, 'scratch.md'), 'probe')
@@ -384,7 +349,6 @@ describe('fs_delete', () => {
 })
 
 describe('scout role', () => {
-  // Scouts ground plans before any plan exists: the file-writing tools are not offered to them at all.
   it('a scout toolSet has no file-writing tools; reads stay', () => {
     const set = toolSet([], { role: STEP_ROLE.scout })
     expect(Object.keys(set)).not.toContain(TOOL_NAME.fs_write)
@@ -398,7 +362,7 @@ describe('scout role', () => {
     expect(Object.keys(set)).toContain(TOOL_NAME.fs_edit)
   })
   it('a readOnlySource step (the plan step) has no file-writing tools regardless of role', () => {
-    // the plan step is role=auditor, like child verify steps that write scratch, so the flag fences it, not the role
+    // the plan step is role=auditor like verify steps that write scratch, so the flag fences it
     const set = toolSet([], { role: STEP_ROLE.auditor, readOnlySource: true })
     expect(Object.keys(set)).not.toContain(TOOL_NAME.fs_write)
     expect(Object.keys(set)).not.toContain(TOOL_NAME.fs_edit)
@@ -444,9 +408,6 @@ describe('extra tools', () => {
 })
 
 describe('fs_edit diagnoses double-encoded arguments', () => {
-  // The tool argument is already JSON, so a model that escapes its newlines again sends `\\n` —
-  // backslash and n, two characters — and no match is ever possible. Observed live: an agent burned
-  // iterations re-reading a file it had copied correctly, because the error told it to do that.
   it('names the double encoding instead of blaming the copy', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-edit-'))
     writeFileSync(path.join(dir, 'f.ts'), 'const a = 1\nconst b = 2\n')
@@ -464,9 +425,6 @@ describe('fs_edit diagnoses double-encoded arguments', () => {
   })
 })
 
-// fs_edit could only catch this because the FILE proved it. The boundary check needs no such
-// evidence, which is what extends the diagnosis to fs_write — where a whole file arrives as one
-// line and there is nothing to compare it against.
 describe('every tool argument is checked for double encoding, not just fs_edit', () => {
   const oneLineFile = `# Notes\\n\\n- first\\n- second\\n${'filler text '.repeat(20)}`
 
@@ -488,12 +446,6 @@ describe('every tool argument is checked for double encoding, not just fs_edit',
   })
 })
 
-/**
- * fs_delete is a WRITE. It passed the zone fence but not the claim registry, so a sibling step
- * could unlink a file another sibling had claimed and was still writing — no refusal, no record,
- * the file simply gone. FS_WRITE_TOOL_NAME lists delete as a write and loop.ts tracks it as one for
- * claims-at-risk; only the tool's own branch disagreed.
- */
 describe('fs_delete takes a write claim like every other write tool', () => {
   it('refuses to delete a path a sibling step has claimed, and leaves the file intact', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-claim-del-'))

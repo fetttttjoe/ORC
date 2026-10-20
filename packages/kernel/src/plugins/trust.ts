@@ -6,11 +6,7 @@ import { atomicWriteFileSync } from '../atomic-file'
 import { z } from 'zod'
 import type { McpServerConfig } from '@orc/contracts'
 
-// The grant file (.orc/trust.json) is LOCAL consent — never committed (.orc/* is
-// gitignored). Config DECLARES servers/extensions; only this file ARMS them (spec D3).
-// A grant binds to a FINGERPRINT of what was consented to: change the declaration
-// (MCP command/args/env keys) or the content (extension entry bytes) and the old
-// grant is invalid — consent must be given again.
+// local consent, never committed: config DECLARES, only this file ARMS
 const TrustRecord = z.object({ id: z.string().min(1), fingerprint: z.string().regex(SHA256_HEX_RE) })
 const TrustFile = z.object({
   mcp: z.array(TrustRecord).default([]),
@@ -21,18 +17,7 @@ export interface TrustStore { mcp: TrustRecord[]; extensions: TrustRecord[] }
 
 const trustPath = (dir: string): string => path.join(dir, '.orc', 'trust.json')
 
-// Declaration fingerprint: command, args, and the declared env.
-//
-// An env value is covered ONLY when it is a `$NAME` indirection. Those name WHICH secret the
-// server receives, so they are part of the declaration a human consented to — and they are
-// references, not secret material, so hashing them leaks nothing. A `$WEATHER_TOKEN` ->
-// `$ANTHROPIC_API_KEY` edit in the committed .orc/config.json would otherwise leave command,
-// args, and env key names byte-identical, keep the grant valid, and hand a third-party process
-// a secret it was never trusted with.
-//
-// Literal values ARE secret material (resolveEnv passes them through verbatim), so they are
-// folded to a constant: inlining or rotating one neither writes a verifier for it into
-// trust.json nor invalidates consent.
+// only `$NAME` env values are hashed (they name the secret); literals fold to a constant
 const envDeclaration = (env: Record<string, string> = {}): string[][] =>
   Object.entries(env).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, v.startsWith('$') ? v : ''])
 

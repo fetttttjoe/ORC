@@ -18,8 +18,7 @@ const opened = (seq: number, w: Workspace): EventRecord =>
 const created = (seq: number, over: Partial<TaskNode>): EventRecord =>
   eventFixture({ seq, taskId: over.id ?? 't1', kind: EVENT_KIND.task_created, payload: { task: taskFixture(over) } })
 
-// One log behind every case: the focus is DERIVED from folded state, so a selection can only ever
-// be handed a shape the fold itself produces.
+// one log behind every case: a selection is only handed shapes the fold produces
 const state = modelOf([
   opened(1, workspace(WS_A, 'Alpha')),
   opened(2, workspace(WS_B, 'Beta')),
@@ -66,7 +65,7 @@ describe('copilotFocus', () => {
   it('an id the state does not hold → null', () => {
     expect(copilotFocus(state, { taskId: 'nope', workspaceId: null })).toBeNull()
     expect(copilotFocus(state, { taskId: null, workspaceId: 'nope' })).toBeNull()
-    // the task selection still wins: an unknown task is "nothing to look at", not "look at the workspace"
+    // the task selection still wins: an unknown task is "nothing to look at"
     expect(copilotFocus(state, { taskId: 'nope', workspaceId: WS_A })).toBeNull()
   })
 })

@@ -11,9 +11,6 @@ const ev = (over: Partial<EventRecord>): EventRecord =>
 const task = (over: Partial<TaskNode> = {}): TaskNode => taskFixture({ title: 'demo', spec: 'do it', status: TASK_STATUS.running, createdAt: '2026-07-17T00:00:00.000Z', ...over })
 
 describe('renderTaskFiles', () => {
-  // The index used to list a session link per PLAN step, but a session file is written only for a
-  // step that left events. Every unstarted step therefore got a link to a file that was never
-  // emitted — and in Obsidian a dead link is indistinguishable from an empty note.
   it('links only the sessions it actually emits, never the steps that have not started', () => {
     seq = 0
     const plan = planFixture({ taskId: 't1', version: 1, steps: [stepFixture({ id: 's1' }), stepFixture({ id: 's2' })] })
@@ -28,9 +25,6 @@ describe('renderTaskFiles', () => {
     expect(files['tasks/t1/index.md']).not.toContain('sessions/s2.md')
   })
 
-  // Mermaid node ids share ONE namespace, and PlanStep.id is only constrained to `^[\w-]+$` — so a
-  // step named `op0` collided with the first operation node, merging the boxes and turning the edge
-  // between them into a self-loop.
   it('a step named like a generated node keeps its own box', () => {
     seq = 0
     const plan = planFixture({ taskId: 't1', version: 1, steps: [stepFixture({ id: 'op0' })] })
@@ -82,10 +76,7 @@ describe('renderTaskFiles — mermaid label escaping', () => {
 })
 
 describe('renderTaskFiles — ## Usage table', () => {
-  // a plan-step step, plus an agent_call carrying envelope usage bound to that step
-  // per-step runTokens, as production issues them: the fold dedupes usage by
-  // (runToken, iteration) — at-least-once redelivery must not double-bill — so a shared
-  // token across steps would silently swallow every step's usage after the first.
+  // per-step runTokens: the fold dedupes usage by (runToken, iteration); a shared one drops usage
   const agentCall = (stepId: string, usage: EventRecord['usage']) =>
     ev({ kind: EVENT_KIND.agent_call, stepId, runToken: `step:t1:${stepId}:a1`, usage, payload: { stepId, runToken: `step:t1:${stepId}:a1`, iteration: 1, request: {}, response: {} } })
 

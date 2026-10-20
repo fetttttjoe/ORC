@@ -12,8 +12,6 @@ const ids = (rows: ReturnType<typeof restoredRows>): string[] => rows.map(r => r
 
 describe('restoredRows', () => {
   test('adjacent-seq exchanges never share a key', () => {
-    // the observed crash: assistant of seq N collided with user of seq N+1 (both 2N+2 under the
-    // old numeric scheme) — copilot exchanges land on consecutive seqs in normal use
     const rows = restoredRows([exchange(79327), exchange(79328)], 40)
     expect(new Set(ids(rows)).size).toBe(rows.length)
   })

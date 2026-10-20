@@ -6,7 +6,7 @@ duplicated, or left in an unknown state — even across a `kill -9`. It compleme
 big picture. This doc drills into the mechanics with file paths so you can go read the real code.
 
 The one-sentence version, taken from `docs/ARCHITECTURE.md`: **the Postgres event log is the
-only truth**. The operation journal, SurrealDB, the vault markdown, and DBOS's own system
+only truth**. The operation journal, the vault markdown, and DBOS's own system
 database are all either a rebuildable index over that log or a disposable projection of it. All
 state is `fold(events)`.
 

@@ -11,10 +11,6 @@ describe('planGeometry', () => {
     expect(g.groups.map(x => x.x)).toEqual([0, 160]) // 100 + 2*10 padding = 120, + 40 gap
   })
 
-  /**
-   * Svelte Flow places a node carrying parentId RELATIVE to that parent. Absolute coordinates here
-   * stack every child in the container's top-left corner, which reads as a single node.
-   */
   it('positions steps relative to their container, never absolutely', () => {
     const g = planGeometry([{ id: 'a', rank: 2, lane: 0 }], spec)
     expect(g.groups[0]?.x).toBe(320)

@@ -11,12 +11,6 @@ describe('hookNames (which files are hooks, and which merely live beside them)',
     expect(hookNames(['post-commit.ts'])).toEqual(['post-commit'])
   })
 
-  /**
-   * The bug this pins, made on the first run of the install script: inferring hook names from the
-   * extension gave `post-commit-append.ts` and `post-commit-paths.ts` executable dispatchers of
-   * their own. Helpers share this directory; the set of names git invokes is fixed, so it is a
-   * whitelist and not a pattern.
-   */
   it('ignores helper modules and their tests that merely sit in the same directory', () => {
     expect(hookNames(['post-commit-append.ts', 'post-commit-paths.ts', 'post-commit-paths.test.ts'])).toEqual([])
   })
@@ -28,11 +22,7 @@ describe('hookNames (which files are hooks, and which merely live beside them)',
 })
 
 describe('the hooks directory as it stands', () => {
-  /**
-   * git EXECS a hook file directly and only when it is executable, so this bit is the difference
-   * between a wired hook and a dead one — and no test that invokes a hook via `sh <file>` can see
-   * the difference. Asserted on the real directory for that reason.
-   */
+  /** invoking via `sh <file>` cannot see the mode bit, so this asserts the real directory */
   it('every dispatcher is executable, and nothing else is', () => {
     const entries = readdirSync(HOOKS_DIR)
     const executable = (f: string): boolean => (statSync(path.join(HOOKS_DIR, f)).mode & 0o111) !== 0

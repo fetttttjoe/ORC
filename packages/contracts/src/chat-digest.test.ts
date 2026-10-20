@@ -27,8 +27,7 @@ describe('ChatDigest', () => {
     expect(parsed.caused).toEqual({ tasks: [], plans: [], runs: [] })
   })
 
-  // Nullable, never absent: "this chat is still open" and "whoever folded this forgot the end" must
-  // not look alike, and an ABSENT count reads as nothing having happened.
+  // nullable, never absent: an absent count reads as nothing having happened
   it('rejects a half-folded digest, field by field', () => {
     for (const field of Object.keys(digest)) {
       expect(ChatDigest.safeParse(without(field)).success).toBe(false)

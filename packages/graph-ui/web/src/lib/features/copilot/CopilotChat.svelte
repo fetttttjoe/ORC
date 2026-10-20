@@ -18,12 +18,6 @@
   import { fmtCost, fmtTokens } from '$lib/features/inspector/node-head'
   import { restoredRows, type CopilotRow as Row } from './copilot-rows'
 
-  /**
-   * The copilot strip. Bubbles persist per chat in localStorage: the ledger records the exchange
-   * as an event, but a reload used to leave the operator staring at an empty pane with their own
-   * question gone. Tool calls render as their own rows — a copilot that silently reads state and
-   * then asserts something is indistinguishable from one that guessed.
-   */
   const HISTORY_CAP = 20
   const NEW_CHAT_COMMAND = '/new'
 
@@ -38,34 +32,17 @@
 
   const ready = $derived(session.info.copilot && session.sel.project !== '')
 
-  // What the copilot is ABOUT: the task the operator has selected, which is what the server builds
-  // the prompt's focus block from. Null workspace — the server resolves it from that task.
+  // The selected task: the server builds the prompt's focus block from it
   const taskId = $derived(session.sel.node === null ? null : taskIdOf(session.sel.node))
 
-  /**
-   * Which chat this pane is in. Across a reload the pointer is DERIVED, not stored: the chats view
-   * folds chat_opened out of the log, so the newest copilot chat is the conversation to continue —
-   * browser storage would hold a private copy of a record the server already keeps. `adopted` is
-   * the id the server reported once the turn was COMMITTED, which beats the view until it refetches.
-   */
+  // The chat pointer is derived from the chats view, not stored; adopted beats it until refetch
   const known = createQuery(viewQuery(VIEW.chats, () => (ready ? { scope: { type: ScopeType.project } } : null)))
   let adopted = $state<string | null>(null)
   // `/new` leaves the journal alone and puts this pane in NO chat, so the next turn opens one
   let cleared = $state(false)
   const chatId = $derived(adopted ?? (cleared ? null : (known.data ?? []).find(d => d.kind === ChatKind.copilot)?.chatId ?? null))
 
-  /**
-   * The conversation is journaled: every exchange is a `copilot_exchange` event carrying the
-   * question, the answer and the tools it called. Restoring from the LOG means the same history
-   * is there from another browser and survives a cleared cache — browser storage held a private
-   * copy of a record the server already keeps.
-   *
-   * Scoped to THIS chat, and filtered server-side by KIND rather than windowed by row count: a
-   * fixed-size tail can run past every exchange in it once enough agent-loop noise (tool_call, …)
-   * follows — observed with 450 tool_call rows after one exchange, which pushed it out of a
-   * 400-row window entirely. `kinds` narrows BEFORE the slice (timeline.ts), so the last
-   * `HISTORY_CAP * 2` matching rows are always the newest exchanges, whatever else happened after.
-   */
+  // Scoped to this chat and filtered by KIND server-side: a row-count window can miss every exchange
   const history = createQuery(
     viewQuery(VIEW.timeline, () => (chatId === null ? null : { scope: { type: ScopeType.chat, id: chatId }, kinds: [EVENT_KIND.copilot_exchange], limit: HISTORY_CAP * 2 })),
   )
@@ -152,21 +129,14 @@
       live = live.filter(r => !(r.kind === 'message' && r.id === answerId && r.text === ''))
       busy = false
       abort = null
-      // Take the durable copy AND drop the optimistic one. Refetching alone left both on screen:
-      // `rows` concatenates restored + live, so every question and answer rendered twice and
-      // stayed that way (measured: still 2 copies 3s after the turn). Only when the refetch
-      // actually succeeded — a failed one leaves `restored` without this turn, and a duplicate is
-      // a far better failure than a vanished answer. `cleared` (/new) hides `restored` on purpose,
-      // so there the optimistic rows ARE the pane and must survive.
+      // Take the durable copy and drop the optimistic one, only after a refetch succeeded
       const refreshed = await history.refetch()
       if (!cleared && refreshed.isSuccess) live = []
     }
   }
 </script>
 
-<!-- The cap is viewport-relative, not a fixed 20rem: on a short window a fixed cap ate the ledger
-     above it, and on a tall one it wasted the space it could have used. The rem term still bounds
-     it on very tall screens, where a chat half the page high reads as the whole console. -->
+<!-- The cap is viewport-relative: a fixed 20rem ate the ledger on short windows -->
 <section aria-label="copilot" class="flex max-h-[min(20rem,45vh)] shrink-0 flex-col border-t border-line bg-ink">
   {#if rows.length > 0}
     <div bind:this={list} class="flex min-h-0 grow flex-col gap-1.5 overflow-y-auto px-3 py-2">
@@ -181,8 +151,7 @@
             {row.text}{#if busy && row.id === rows.at(-1)?.id && row.role === 'assistant'}<span class="breathe">▍</span>{/if}
           </div>
         {:else}
-          <!-- min-w-0 + max-w-full: a tool payload is arbitrary text (paths, ids, JSON), and without
-               these a single long line stretched the flex column and pushed the composer sideways -->
+          <!-- min-w-0 + max-w-full: one long tool-payload line stretched the column -->
           <details class="min-w-0 max-w-full self-start rounded-(--radius-chip) border border-line bg-desk/40 px-2 py-1">
             <summary class="flex cursor-pointer items-center gap-1.5 select-none">
               <Chip mono temp={row.state === 'error' ? 'rust' : row.state === 'running' ? 'machine' : 'neutral'}>{row.toolName}</Chip>

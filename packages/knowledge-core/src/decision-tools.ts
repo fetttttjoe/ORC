@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import {
   DecisionFilter, DecisionInput, DecisionSlug, decisionSummaryOf, KnowledgeToolName,
-  type KnowledgeAccess, type MemoryAuthor, type ResolvedTool,
+  type KnowledgeAccess, type Author, type ResolvedTool,
 } from '@orc/contracts'
 import { knowledgeIdempotencyKey, resolveKnowledgeTool, type ToolSpec } from './tools'
 
@@ -34,5 +34,5 @@ const SPECS: Record<DecisionStepToolName, ToolSpec> = {
   },
 }
 
-export const decisionTools = (access: KnowledgeAccess, author: MemoryAuthor): ResolvedTool[] =>
+export const decisionTools = (access: KnowledgeAccess, author: Author): ResolvedTool[] =>
   DECISION_STEP_TOOLS.map(name => resolveKnowledgeTool(name, SPECS[name], access, author))

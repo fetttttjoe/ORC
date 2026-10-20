@@ -1,12 +1,6 @@
 import { z } from 'zod'
 
-// A workspace is ONE checkout being worked in — the Paseo shape. Two kinds only: `checkout` (work
-// directly in a git checkout on whatever branch it has) and `worktree` (orc ran `git worktree add`
-// for one request). `managed` is the fact that gates `git worktree remove`: orc may delete only
-// what it created. `cwd` is the natural key — adoption matches on the realpath, so a moved
-// worktree is a new workspace and the old record is archived by the operator, never re-pointed.
-// Named `workspace-entity` because `workspace.ts` already holds the step write fence
-// (resolveInWorkspace); the two share the word on purpose — a workspace IS the directory a step runs in.
+// managed gates git worktree remove: orc deletes only what it created; cwd is the key
 export enum WorkspaceKind {
   checkout = 'checkout',
   worktree = 'worktree',
@@ -32,15 +26,7 @@ export const Workspace = z.object({
 })
 export type Workspace = z.infer<typeof Workspace>
 
-// ── Health ────────────────────────────────────────────────────────────────────────────────────
-// The whole state vocabulary, spelled once — a literal 'dangling' at a render site is what drifts
-// from the rule that produces it. Same pattern as `WorkspaceKind` above and `TASK_STATUS`: the enum
-// is the single source, z.enum gives the runtime parser, and the plain alias gives the named constants.
-//
-// It lives in CONTRACTS rather than beside the derivation that produces it (the kernel's
-// workspaceHealth) because the vocabulary is not the policy: the browser bundle cannot import the
-// kernel — it has no database driver — and parses a workspace's health off the wire with the schema
-// below. A second spelling there is exactly how a state added here stops being rendered anywhere.
+// the whole state vocabulary lives here: the browser cannot import the kernel's derivation
 export enum WorkspaceState {
   active = 'active',
   waiting = 'waiting',
@@ -52,38 +38,23 @@ export enum WorkspaceState {
 // every caller already matches on this accessor, never a raw literal — kept as a plain alias
 export const WORKSPACE_STATE = WorkspaceState
 
-// ONE verdict per workspace, derived from the fold plus what only a caller can probe (the
-// filesystem). The DERIVATION stays in the kernel; this is the shape it produces and the schema
-// every other surface reads it back with.
 export const WorkspaceHealth = z.object({
   state: z.enum(WorkspaceState),
-  // The newest stamp this workspace has, over its tasks' events AND its own record's events. NO
-  // THRESHOLD ANYWHERE: the age is printed and the human decides. A cutoff here would be a tuned
-  // constant with no measurement behind it, quietly restating itself as policy.
-  // null only when the log shows nothing at all for this workspace — never a fabricated stamp.
+  // no threshold: the age is printed and the human decides; null when the log shows nothing
   lastActivityAt: z.string().nullable(),
   taskCount: z.number().int(),
   openTaskCount: z.number().int(),
-  // Whether `workspace_merged` was recorded, independent of the STATE — which the rungs above
-  // `merged` can shadow (a landed workspace with a running task reads `active`). Without the flag a
-  // reader cannot tell that case from one that never landed, and "has this work landed?" is the
-  // question the whole workspace transaction exists to answer.
+  // independent of state: a landed workspace with a running task reads active
   merged: z.boolean(),
   dirExists: z.boolean(),
-  // three-valued for the reason isClean is: null means git declined to answer (the directory is not
-  // a checkout, or is gone), which is a different fact from "has uncommitted work".
+  // null means git declined to answer, which is not the same as 'has uncommitted work'
   clean: z.boolean().nullable(),
 })
 export type WorkspaceHealth = z.infer<typeof WorkspaceHealth>
 
-// What every door hands back for one workspace: the record and the verdict, together. Named here
-// rather than spelled inline at each door so `OrcActions.listWorkspaces`, the copilot's
-// project_status dep and the CLI lister cannot disagree about the field names.
 export const WorkspaceWithHealth = z.object({ workspace: Workspace, health: WorkspaceHealth })
 export type WorkspaceWithHealth = z.infer<typeof WorkspaceWithHealth>
 
-// The "commit" of the workspace transaction. Appended by `orc ws merge`, `orc ws finalize`, or the
-// commit reactor once it can see the branch tip is an ancestor of trunk.
 export const WorkspaceMergedPayload = z.object({ workspaceId: z.string().min(1), mergeCommit: z.string().min(1), trunk: z.string().min(1), at: z.string() })
 export type WorkspaceMergedPayload = z.infer<typeof WorkspaceMergedPayload>
 

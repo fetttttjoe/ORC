@@ -3,9 +3,7 @@ import { and, eq, gte, lt, sql } from 'drizzle-orm'
 import { supervisors } from '../schema'
 import type { Storage } from './index'
 
-// A supervisor beats every SUPERVISOR_BEAT_MS; a row unseen for SUPERVISOR_STALE_MS is presumed
-// dead. Six missed beats, so a GC pause or a loaded box cannot evict a healthy supervisor.
-// ponytail: two constants, not settings — promote to config if a real deployment needs slower beats.
+// six missed beats before a row is presumed dead: a GC pause cannot evict a healthy supervisor
 export const SUPERVISOR_BEAT_MS = 5_000
 export const SUPERVISOR_STALE_MS = 30_000
 
@@ -36,16 +34,7 @@ export async function beat(storage: Storage, executorId: string, pid: number, ho
     })
 }
 
-// The ONE atomic claim (`orc serve`'s admission rule, not a second one that could disagree with
-// it): insert wins outright, or wins by TAKING OVER a row whose last_seen_at is older than the
-// stale window — never a live one. RETURNING is empty exactly when a live heartbeat already holds
-// that slot, so trying slots low-to-high and stopping at the first non-empty result IS the
-// decision. The window is `interval '1 second' * n`, not a hard-coded '30 seconds', so
-// SUPERVISOR_STALE_MS stays the one source of how long a heartbeat is trusted.
-//
-// Identity is the reclaimed slot id itself, not a fresh uuid per boot: DBOS recovers only its own
-// executor's PENDING workflows (see dbos-port.ts), so a restarted supervisor must get the same id
-// back to resume what it left in flight — supervisor-1, supervisor-2, … gives it exactly that.
+// one atomic claim: insert, or take over a row stale past the window, never a live one
 export async function claimSlot(storage: Storage, maxSlots: number): Promise<string | null> {
   const pid = process.pid
   const host = hostname()

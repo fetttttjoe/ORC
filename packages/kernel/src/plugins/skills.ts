@@ -16,8 +16,7 @@ const unquote = (v: string): string => {
     : t
 }
 
-// ponytail: hand-rolled parser for the six-field flat schema + one metadata block —
-// a YAML library arrives only if real third-party skills ship YAML this can't read.
+// hand-rolled parser; a YAML library arrives only if third-party skills need it
 export function parseSkillMd(
   text: string,
   dirName: string,
@@ -103,8 +102,7 @@ export class SkillIndex {
     return { name, body, hash: createHash('sha256').update(body).digest('hex') }
   }
 
-  // ponytail: 500ms polling rescan, NOT fs.watch — Bun's recursive watch never reports
-  // files inside dirs created after watch start (spike 2026-07-17); a full rescan is <1ms.
+  // polling rescan, not fs.watch: Bun's recursive watch misses dirs created after it starts
   watch(intervalMs = 500): void {
     if (this.timer) return
     this.timer = setInterval(() => this.rescan(), intervalMs)

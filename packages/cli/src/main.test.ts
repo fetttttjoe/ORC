@@ -7,7 +7,8 @@ import { must } from '@orc/contracts/fixtures'
 import { loadConfig, requireProject, type EventLog } from '@orc/kernel'
 import { createTestDb, seedTestWorkspace, testConfig, TEST_PROJECT_ID, TEST_WORKSPACE, TEST_WORKSPACE_ID, testOrcConfig } from '@orc/kernel/test-helpers'
 import { singleStepDraft } from './plan-template'
-import { buildProgram, openKernel, runInit } from './main'
+import { buildProgram, openKernel } from './main'
+import { runInit } from './project-commands'
 import { buildOrcActions } from './actions'
 import { CommandFailure } from './exit'
 import { cli } from './test-helpers'
@@ -15,16 +16,9 @@ import { watchSubtree } from './watch'
 import { archivedRefusal } from './workspace-ops'
 
 const dbs: Array<{ drop: () => Promise<void> }> = []
-// Process-scoped resources (a real plugin host, an MCP hub, an event-log pool) registered the
-// moment they are created and drained LIFO. A bare `await host.shutdown()` as the last statement
-// of an it() is SKIPPED when an assertion above it throws, which leaks the host into every later
-// test file in the process — that is what turned one failed assertion on this branch into a
-// 22-failure mystery, and it is why the db.drop() below got skipped too.
+// registered at creation, drained LIFO: a bare shutdown is skipped when an assertion throws
 const cleanup: Array<() => Promise<void> | void> = []
-// Teardown drops one Postgres DB per makeCli/openKernel (14+ here).
-// Each pg drop runs its handle's registered closers first (createTestDb.onClose) and then DROPs on
-// its own admin connection; serial drops blew bun's default 5s hook budget under a contended pg
-// (same fix as kernel.test.ts) — the dbs are distinct, so drop them concurrently.
+// drop the databases concurrently: serial drops blew bun's 5s hook budget under a contended pg
 afterAll(async () => {
   for (const c of cleanup.reverse()) await c()
   await Promise.all(dbs.map(d => d.drop()))
@@ -39,12 +33,8 @@ async function makeCli() {
   dbs.push(db)
   const { kernel, storage } = await openKernel(db.url, { projectId: TEST_PROJECT_ID, config: testOrcConfig() })
   db.onClose(() => storage.close())
-  // buildProgram(kernel) has no project context, so `new` cannot resolve a cwd workspace here —
-  // the tests below pass --workspace explicitly, and this is the record they name.
   await seedTestWorkspace(storage.events, CLI)
   const { run, lines } = cli(kernel)
-  // exposed for tests that must append a raw event the kernel would never produce itself (an
-  // orphaned task_created naming a workspace the fold never saw)
   return { run, lines, kernel, storage }
 }
 
@@ -77,11 +67,6 @@ describe('orc CLI', () => {
       expect(existsSync(path.join(dir, 'custom', 'skills', name, 'SKILL.md'))).toBe(true)
   })
 
-  // An existing project could not receive a NEWLY shipped skill: init refused outright once
-  // identity existed, and --force minted a whole new project (a different projectId — every task,
-  // note and event orphaned) just to top up a directory. Seeding is now unconditional and identity
-  // minting is the part that is guarded, so `orc init` is the answer to "I pulled a release that
-  // ships a new role skill".
   it('init is idempotent: a second run keeps the identity and re-seeds a deleted skill', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'orc-init-again-'))
     await runInit(['--name', 'demo'], dir)
@@ -153,9 +138,6 @@ describe('orc CLI', () => {
     const errors: string[] = []
     spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errors.push(a.join(' ')) })
     const { run } = cli(kernel)
-    // The command reports the problem and FAILS — as a thrown outcome, not by writing
-    // process.exitCode. Running this test can no longer change the exit status of the test process,
-    // which is what used to make a 0-failure suite exit 1 in CI depending on file order.
     await expect(run('replay', t.id, '--at', String(first - 1))).rejects.toBeInstanceOf(CommandFailure)
     expect(errors.join('\n')).toContain('sequences are GLOBAL')
     const lastEventSeq = must(events.at(-1), 'last event').seq
@@ -183,10 +165,7 @@ describe('orc CLI', () => {
     await expect(run('replay', 'missing-task')).rejects.toThrow("no task 'missing-task'")
   })
 
-  // Proof of the hermetic isolation openKernel's required config buys: THIS repo's own
-  // .orc/config.json sets finishChecks (['bun run typecheck']), and a kernel that fell back to
-  // loadConfig() would silently inherit it — the same assertion fails on that code (config
-  // omitted → cwd fallback), because a checks step then IS appended.
+  // proves openKernel's required config is hermetic: loadConfig() would inherit finishChecks
   it('propose leaves off the checks step for a kernel opened with testOrcConfig()', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -228,10 +207,6 @@ describe('orc CLI', () => {
     expect((await kernel.getTask(id ?? ''))?.workspaceId).toBe(w.id)
   })
 
-  // The kernel accepts a task in an archived workspace, and should: archiving is not a fact about
-  // whether a record may be REFERENCED, and a merged workspace's subtree keeps growing. The refusal
-  // belongs at the door, where a human named the id: that operator archived the checkout on purpose,
-  // so a task filed there is work the default listing hides and the directory may no longer hold.
   it('new --workspace refuses an archived workspace and names the way back', async () => {
     const { run, kernel } = await makeCli()
     const w = await kernel.createWorkspace({ title: 'Done', cwd: '/done', branch: 'b', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false }, CLI)
@@ -244,9 +219,7 @@ describe('orc CLI', () => {
     expect((await kernel.getTask(id ?? ''))?.workspaceId).toBe(w.id)
   })
 
-  // A child of a task in workspace B belongs to B, wherever the operator happened to type the
-  // command. Binding it to the cwd instead would let ONE subtree straddle two working directories —
-  // the thing proposeSplit's inheritance exists to prevent.
+  // a child of a task in workspace B belongs to B, never to the cwd's workspace
   it('new --parent inherits the parent\'s workspace instead of the directory the command was typed in', async () => {
     const { run, kernel } = await makeCli()
     const other = await kernel.createWorkspace({ title: 'Other', cwd: '/other', branch: 'b', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false }, CLI)
@@ -288,8 +261,6 @@ describe('orc CLI', () => {
     await expect(run('plan', 'missing', '--version', 'nope')).rejects.toThrow(/integer/)
     await expect(run('approve', 'missing', '--version', '1.5')).rejects.toThrow(/integer/)
     await expect(run('replay', 'missing', '--at', '1e2')).rejects.toThrow(/integer/)
-    // graph --port used a bare parseInt, so '--port 0' bound port 0 and '--port nope' fed NaN to
-    // the server; both must die at parse time like every other numeric option in this file
     await expect(run('graph', '--port', '0')).rejects.toThrow(/positive integer/)
     await expect(run('graph', '--port', 'nope')).rejects.toThrow(/integer/)
   })
@@ -308,8 +279,7 @@ describe('orc CLI', () => {
     expect(out[1]).toContain('listed task')
   })
 
-  // groups.map(...) alone would drop a workspace with zero tasks — this pins that a bare heading
-  // still prints, since "nothing is running here" is itself information an operator needs.
+  // a bare heading still prints: 'nothing is running here' is information
   it('tasks prints tasks grouped under their workspace, and an empty workspace still gets a heading', async () => {
     const { run, kernel } = await makeCli()
     const empty = await kernel.createWorkspace({ title: 'Empty', cwd: '/empty', branch: 'e', baseBranch: 'main', kind: WORKSPACE_KIND.worktree, managed: false, onTrunk: false }, CLI)
@@ -320,9 +290,7 @@ describe('orc CLI', () => {
     expect(out).toContain(`# ${empty.title}  (${empty.branch})  ${empty.cwd}`)
   })
 
-  // A task naming a workspace the fold never saw is a log defect (the grouping is only as
-  // trustworthy as its handling of the case it cannot group) — it must surface loudly, not vanish
-  // from a view keyed by workspace.
+  // a task naming an unseen workspace is a log defect: it must surface loudly, not vanish
   it('tasks prints an orphaned task under a loud heading, never hidden', async () => {
     const { run, storage } = await makeCli()
     const orphan: TaskNode = {
@@ -407,10 +375,6 @@ describe('orc CLI', () => {
     // a task must name a workspace the fold has seen — one seeded record, then tasks as before
     await seedTestWorkspace(log, CLI)
     cleanup.push(() => log.close())
-    // `reply` calls needPort() before replyFeedback (DBOS.send needs DBOS launched in-process), and
-    // then ATTACHES to the run it just unblocked — answering without driving is what left runs
-    // parked. The real send path is still the injected `send` above; startRun here only stands in
-    // for the driver so the reply can complete.
     const stubPort: ExecutionPort = {
       startRun: async () => ({ workflowId: 'run:x:v1', wait: async () => RunOutcome.done }),
       retry: async () => { throw new Error('unused in this test') },
@@ -421,8 +385,6 @@ describe('orc CLI', () => {
     const taskId = must((await run('new', 'grounded task', '--workspace', TEST_WORKSPACE_ID))[0], 'task id')
     await run('propose', taskId)
 
-    // simulate a running plan step raising a feedback gate — normally appended by the DBOS
-    // port's `feedback` branch; this test adds only the human-facing reply/annotate surface
     const runToken = `step:${taskId}:plan:a1`
     await log.append({ ...SUPERVISOR, taskId: taskId, stepId: 'plan', runToken, kind: EVENT_KIND.feedback_requested, payload: { question: 'db choice?', topic: 'auth-1' } })
 
@@ -430,10 +392,6 @@ describe('orc CLI', () => {
     expect(noted[0]).toContain("noted on 'db'")
     expect((await log.byTask(taskId)).some(e => e.kind === EVENT_KIND.plan_annotated)).toBe(true)
 
-    // A rejecting call never returns, so run()'s delta capture cannot report what it printed before
-    // throwing — reading the shared buffer directly is the only way to see it. Nothing in this
-    // harness holds a runtime, so the watch that follows reports the tree as it stands — stopped
-    // short of done — and exits non-zero for it.
     const from = lines.length
     await expect(run('reply', taskId, 'approve')).rejects.toBeInstanceOf(CommandFailure)
     expect(lines.slice(from).join('\n')).toContain('auth-1')
@@ -504,8 +462,6 @@ describe('orc CLI', () => {
     const status = await run('status', taskId)
     const stepLineIdx = status.findIndex(l => l.includes('s1') && l.includes('pending'))
     expect(stepLineIdx).toBeGreaterThanOrEqual(0)
-    // the usage line lives directly under the step's own row — a per-step render, not a reuse of
-    // the trailing task-total line further down
     expect(status[stepLineIdx + 1]).toContain('tokens in/out: 111/22')
     expect(status[stepLineIdx + 1]).toContain('cost: $0.0123')
   })
@@ -549,10 +505,6 @@ describe('orc CLI', () => {
     expect((await kernel.getTask(taskId))?.status).toBe(TASK_STATUS.cancelled)
   })
 
-  // A DBOS-cancelled workflow's getResult() rejects. Every stub port in this file has
-  // `wait: async () => outcome`, so no test ever exercised the rejecting path — and `orc run`
-  // only handled the resolve branch, printing a raw driver error and exit 1 for an advertised
-  // action ("ctrl-c stops the run") while `orc status` correctly showed 'cancelled'.
   it('run reports a cancelled run as cancelled, not as a crash', async () => {
     const db = await createTestDb()
     dbs.push(db)
@@ -566,9 +518,6 @@ describe('orc CLI', () => {
     await run('propose', taskId)
     await run('approve', taskId)
 
-    // cancelled is reported as the outcome it is, and the command exits non-zero for it — the
-    // status `orc cancel` from another terminal leaves behind, read off the log rather than off a
-    // rejected getResult(), because the watcher no longer holds the workflow handle
     const from = lines.length
     let failure: unknown = null
     const watched = run('run', taskId).catch((e: unknown) => { failure = e; return [] })
@@ -679,8 +628,7 @@ describe('orc CLI', () => {
     await run('propose', taskId)
     await run('approve', taskId)
 
-    // forbiddenPort throws on startRun, so this completing at all is the assertion: the command
-    // reached its runtime only to hold one, never to drive with it
+    // forbiddenPort throws on startRun, so completing at all is the assertion
     const watched = run('run', taskId)
     await watching(lines)
     await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
@@ -689,8 +637,6 @@ describe('orc CLI', () => {
 
     const requested = (await kernel.eventsFor(taskId)).filter(e => e.kind === EVENT_KIND.run_requested)
     expect(requested).toHaveLength(1)
-    // `orc run` passed no --cwd, so the kernel records the TASK'S WORKSPACE cwd — the port's own
-    // chain never sees the project-level workspace events, so the resolution has to happen here.
     const requestEvent = must(requested[0], 'first run request event')
     expect(requestEvent.payload).toEqual({ taskId, cwd: TEST_WORKSPACE.cwd, retry: false })
   }, 15_000)
@@ -720,8 +666,6 @@ describe('orc CLI', () => {
 
     await stamp(log, taskId, TASK_STATUS.approved, TASK_STATUS.running)
     const child = await kernel.proposeSplit(splitArgs(taskId, 'call_1', 'gated child', ApprovalPolicy.parse({})), SUPERVISOR)
-    // the run that is waiting is the ROOT — its join cannot resolve until the child runs, so the
-    // approval watches the root rather than asking for a second run of it
     const watched = run('approve', child.childTaskId)
     await until(() => lines.some(l => l.includes('watching the run at')))
     await stamp(log, child.childTaskId, TASK_STATUS.approved, TASK_STATUS.done)
@@ -762,7 +706,7 @@ describe('orc CLI', () => {
     await stamp(log, taskId, TASK_STATUS.running, TASK_STATUS.done)
     await stamp(log, first.childTaskId, TASK_STATUS.approved, TASK_STATUS.done)
 
-    // one finished sibling is not a finished tree — this used to leave the second child to nobody
+    // one finished sibling is not a finished tree
     await Bun.sleep(300)
     expect(settled).toBe(false)
 
@@ -802,14 +746,9 @@ describe('orc CLI', () => {
     expect(out).toContain('cost: $0.0055')
   }, 15_000)
 
-  // The supervisor's half of a run, faked: nothing in this file holds a real runtime, so the
-  // status transitions a run would produce are stamped straight onto the log.
   const stamp = (log: EventLog, taskId: string, from: TaskStatus, to: TaskStatus) =>
     log.append({ ...SUPERVISOR, taskId, stepId: null, runToken: null, kind: EVENT_KIND.task_status_changed, payload: { taskId, from, to } })
 
-  // The port a client must never reach for. Under the supervisor model the CLI records the ask and
-  // watches; anything that starts a workflow from here is the defect this phase removes, so make
-  // it loud rather than letting a silent stub hide it.
   const forbiddenPort = (): ExecutionPort => ({
     startRun: async () => { throw new Error('the CLI must not start runs') },
     retry: async () => { throw new Error('the CLI must not start runs') },
@@ -861,8 +800,7 @@ describe('orc CLI', () => {
     await kernel.proposePlan(parent.id, singleStepDraft({ title: 'p', spec: 'p' }, 'fake/m'), CLI)
     await kernel.approvePlan(parent.id, undefined, undefined, CLI)
     const child = await kernel.proposeSplit(splitArgs(parent.id, 'call_1', 'child', ApprovalPolicy.parse({ default: 'auto' })), SUPERVISOR)
-    // the parent sits in join_splits while the child asks: the parent's own stream stays silent, so
-    // a watch that read only the watched task would wait forever on a question already asked
+    // the parent sits in join_splits while the child asks: a watch of only the parent would hang
     await log.append({
       ...SUPERVISOR, taskId: child.childTaskId, stepId: 'w1', runToken: `step:${child.childTaskId}:w1:a1`,
       kind: EVENT_KIND.feedback_requested, payload: { question: 'may I overwrite it?', topic: 'confirm' },
@@ -874,9 +812,7 @@ describe('orc CLI', () => {
 })
 
 describe('destructive commands name their target', () => {
-  // Both commands act on whatever project the cwd's config resolves to. A script that drifted into
-  // the wrong directory once destroyed a live project's history, so the name is a required argument
-  // and a mismatch must refuse rather than delete.
+  // a mismatched name must refuse rather than delete: a drifted cwd once destroyed a live history
   it('purge and delete refuse when the named project is not this one', async () => {
     const { run } = await makeCli()
     for (const cmd of ['purge', 'delete']) {
@@ -892,8 +828,6 @@ describe('destructive commands name their target', () => {
   })
 })
 
-// A door parses, names its Origin and presents — nothing else. main.ts held a SECOND copy of new,
-// reply and run (its own kernel calls), which is how `orc new --budget` and the web door drifted.
 describe('the CLI door appends exactly what the shared action appends', () => {
   const shape = async (log: EventLog, taskId: string) =>
     (await log.byTask(taskId)).map(e => ({ kind: e.kind, chatId: e.chatId, door: e.door }))
@@ -953,8 +887,7 @@ describe('the CLI door appends exactly what the shared action appends', () => {
     const door = await approved('door run')
     const viaAction = await approved('action run')
     const watched = run('run', door)
-    // The door records the ask and WATCHES; the supervisor's half is faked, or the watch waits
-    // forever on an approved task and its live subscription blocks teardown's DROP DATABASE.
+    // the supervisor's half is faked, or the watch waits on an approved task and blocks teardown
     await settle(() => lines.some(l => l.includes('run requested for')))
     const doorShape = await shape(log, door)
     for (const [from, to] of [[TASK_STATUS.approved, TASK_STATUS.running], [TASK_STATUS.running, TASK_STATUS.done]])

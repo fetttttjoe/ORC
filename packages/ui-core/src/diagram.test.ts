@@ -20,12 +20,6 @@ describe('todoWaves', () => {
     expect(must(must(waves[0], 'waves[0]').steps[0], 'waves[0].steps[0]').status).toBe('completed')
     expect(must(must(waves[1], 'waves[1]').steps[1], 'waves[1].steps[1]').status).toBe('pending')
   })
-  /**
-   * Cyclic steps are PARKED in a trailing wave, not dropped. This used to return [] — the graph
-   * parked them while the rail hid them, so one plan showed different steps on different surfaces.
-   * Both now go through contracts/plan-layering, and it shows them: a step the operator cannot see
-   * is worse than one drawn in an imperfect wave, and a vanished step reads as a plan without it.
-   */
   it('parks a cycle in a trailing wave rather than dropping its steps', () => {
     const waves = todoWaves([{ id: 'x', title: 'x', dependsOn: ['y'] }, { id: 'y', title: 'y', dependsOn: ['x'] }])
     expect(waves.flatMap(w => w.steps.map(s => s.id)).sort()).toEqual(['x', 'y'])

@@ -8,8 +8,7 @@ export const planNotes = defineView({
   name: VIEW.planNotes,
   push: false,
 
-  // Never null: a task that was never decomposed has no notes, which is an empty graph rather than
-  // a missing one.
+  // never null: a task never decomposed has an empty graph, not a missing one
   read: (model, { taskId }) => ({ notes: planNotesOf(model.events, taskId) }),
 
   touches: (event, model) => taskAndParent(event, model).map(taskId => ({ taskId })),

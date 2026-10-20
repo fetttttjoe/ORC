@@ -5,7 +5,7 @@ import { runOrigin } from './run-chat'
 import { splitTool } from './split-tool'
 import { ANALYZE_STEP_ROLE } from './strategies/grounded-plan'
 
-// the proposing step runs inside its run's chat, so the split it proposes is stamped with that chat
+// the proposing step runs inside its run's chat, so the split it proposes carries that chat
 const STEP_ORIGIN: Origin = runOrigin('run:t1:v1')
 const p = { taskId: 't1', stepId: 's1', runToken: 'step:t1:s1:a1', role: 'worker', executor: 'api-loop', modelRef: 'fake/m', maxIterations: 5, origin: STEP_ORIGIN }
 const config = { approvalPolicy: { default: ApprovalMode.manual, rules: [] }, maxDepth: 3 }

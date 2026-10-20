@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createQuery } from '@tanstack/svelte-query'
-  import { KnowledgeHealthState, SUPERVISOR_HEALTH } from '@orc/contracts/health'
+  import { KnowledgeHealthState, SupervisorHealthState } from '@orc/contracts/health'
   import { Separator } from '$lib/components/ui/separator'
   import Chip from '$lib/components/Chip.svelte'
   import { api } from '$lib/api/client'
@@ -11,8 +11,6 @@
   import { session } from '$lib/stores/session.svelte'
   import type { Temperature } from '$lib/temperature'
 
-  // The operator's standing questions, answered without scrolling: is anything driving, is the
-  // graph current, how far is the log, and does anything want me.
   const HEALTH_POLL_MS = 15_000
   const SUSPECT_HINT = 'claims whose code changed since they were written — the heal sweep after the next commit checks them'
 
@@ -22,14 +20,14 @@
   const knowledge = $derived(health.data?.knowledge)
   const gates = $derived(operator.state.openQuestions.length)
 
-  const SUPERVISOR: Record<string, { text: string; temp: Temperature; hint: string }> = {
-    [SUPERVISOR_HEALTH.ready]: { text: 'supervisor ready', temp: 'moss', hint: 'a supervisor holds the runtime — runs execute' },
-    [SUPERVISOR_HEALTH.booting]: { text: 'supervisor booting', temp: 'human', hint: 'projections catching up — runs start when it reports ready' },
-    [SUPERVISOR_HEALTH.stale]: { text: 'supervisor stale', temp: 'rust', hint: 'its heartbeat stopped without cleanup — start `orc serve` to reclaim' },
-    [SUPERVISOR_HEALTH.client]: { text: 'client driving', temp: 'machine', hint: 'no supervisor, but a foreground command or the graph server holds the runtime — runs execute' },
-    [SUPERVISOR_HEALTH.none]: { text: 'no supervisor', temp: 'rust', hint: 'nothing will run — start `orc serve`' },
+  const SUPERVISOR: Record<SupervisorHealthState, { text: string; temp: Temperature; hint: string }> = {
+    [SupervisorHealthState.ready]: { text: 'supervisor ready', temp: 'moss', hint: 'a supervisor holds the runtime — runs execute' },
+    [SupervisorHealthState.booting]: { text: 'supervisor booting', temp: 'human', hint: 'projections catching up — runs start when it reports ready' },
+    [SupervisorHealthState.stale]: { text: 'supervisor stale', temp: 'rust', hint: 'its heartbeat stopped without cleanup — start `orc serve` to reclaim' },
+    [SupervisorHealthState.client]: { text: 'client driving', temp: 'machine', hint: 'no supervisor, but a foreground command or the graph server holds the runtime — runs execute' },
+    [SupervisorHealthState.none]: { text: 'no supervisor', temp: 'rust', hint: 'nothing will run — start `orc serve`' },
   }
-  const supervisor = $derived(sup ? (SUPERVISOR[sup.state] ?? SUPERVISOR[SUPERVISOR_HEALTH.none]) : null)
+  const supervisor = $derived(sup ? SUPERVISOR[sup.state] : null)
 
   const knowledgeNote = $derived.by(() => {
     if (!knowledge) return null

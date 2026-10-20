@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { Door, EVENT_KIND, ScopeType, type EventRecord, type MemoryAuthor } from '@orc/contracts'
+import { Door, EVENT_KIND, ScopeType, type EventRecord, type Author } from '@orc/contracts'
 import { authorFixture, eventFixture, taskFixture, TEST_WORKSPACE_ID } from '@orc/contracts/fixtures'
 import { modelOf } from '../test-helpers'
 import { timeline } from './timeline'
@@ -22,8 +22,6 @@ describe('timeline view', () => {
     expect(timeline.read(modelOf(events), { scope: project, beforeSeq: 3, limit: 10 })?.map(r => r.seq)).toEqual([1, 2])
   })
 
-  // the tail is taken from the MATCHING events, so a limit spent on non-matching traffic returns
-  // an empty pane
   it('fills the limit with the newest matching events, not the newest events', () => {
     const m = modelOf([
       ev(1, EVENT_KIND.copilot_exchange, null, exchange),
@@ -41,10 +39,9 @@ describe('timeline view', () => {
   })
 })
 
-// The task scope answers exactly what the removed `taskId` param answered — including its one hard
-// case: a project-scoped knowledge row (envelope taskId null) belongs to the task that WROTE it.
+// a project-scoped knowledge row (envelope taskId null) belongs to the task that wrote it
 describe('a task scope', () => {
-  const written = (author: MemoryAuthor) => ({ added: [], changed: [], retired: [], files: [], why: null, decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author })
+  const written = (author: Author) => ({ added: [], changed: [], retired: [], files: [], why: null, decision: null, decisionsRecorded: [], decisionsSuperseded: [], asserted: [], author })
   const m = modelOf([
     eventFixture({ seq: 1, kind: EVENT_KIND.task_created, taskId: 'C', payload: { task: taskFixture({ id: 'C', workspaceId: TEST_WORKSPACE_ID }) } }),
     eventFixture({ seq: 2, kind: EVENT_KIND.task_created, taskId: 'D', payload: { task: taskFixture({ id: 'D', parentId: 'C', depth: 1, workspaceId: TEST_WORKSPACE_ID }) } }),
@@ -62,8 +59,6 @@ describe('a task scope', () => {
     expect(timeline.read(m, { scope: { type: ScopeType.task, id: 'C', subtree: true } })?.map(r => r.seq)).toEqual([1, 2, 3, 4, 5])
   })
 
-  // a poller asking "everything after seq N of these kinds" must get the newest MATCHING rows,
-  // not the newest `limit` in-scope events of which none match
   it('applies sinceSeq and kinds before the tail', () => {
     const polled = modelOf([
       eventFixture({ seq: 1, kind: EVENT_KIND.task_created, taskId: 'C', payload: { task: taskFixture({ id: 'C', workspaceId: TEST_WORKSPACE_ID }) } }),

@@ -6,4 +6,6 @@
 - EventLog.append deduplicates on (projectId, idempotencyKey) via onConflictDoNothing, and on conflict re-fetches the existing row and throws KernelError('idempotency_conflict') if the COMPARED fields (chatId, door, taskId, stepId, runToken, kind, payload, usage) differ from the new attempt. {qyzi9pjr @packages/kernel/src/storage/event-log.ts#makeOps.append #architecture-current}
 
 ## Why
+- The first catch-up pump throws so the caller learns the subscription failed, but a reconnect pump must not, because pgListen would end a healthy LISTEN on the throw and pin the backoff. {5p6ydy8r @packages/kernel/src/storage/event-log.ts#EventLog.subscribe}
+- subscribe's onReset fires when delivery restarts from a different log, so a subscriber caching a fold must drop it or it keeps ghosts of the old history. {q1f2xuaj @packages/kernel/src/storage/event-log.ts#EventLog.subscribe}
 - EventLog.append validates each event's payload against PAYLOAD_SCHEMAS AFTER redaction, deliberately, so a zod validation error can never quote a raw secret. {f4cas2jz @packages/kernel/src/storage/event-log.ts#makeOps.append #architecture-current}

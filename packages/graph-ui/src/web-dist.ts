@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { type DistFreshnessResult, ensureDistFresh, fingerprintSourceDirs, writeStamp } from './dist-freshness'
 
-// keep in sync with the workspace packages web/src imports by source (vite.config.ts has no other aliases)
+// keep in sync with the workspace packages web/src imports by source (no other vite aliases)
 export function graphUiDistPaths(): { webDir: string; distDir: string; sourceDirs: string[] } {
   const webDir = path.resolve(import.meta.dir, '../web')
   return {

@@ -1,24 +1,13 @@
-// The one thing the conversation pane needs from a raw tool_result and cannot get from the
-// LogRow summary it normally consumes: whether the call FAILED, and why.
-//
-// Motivating failure: a broken approval gate rejected eight consecutive "approve" answers. Every
-// rejection was a finalize_plan tool_result carrying the reason, and the pane showed none of it —
-// summarizeEvent folds isError into a display string and no consumer can read the flag back. The
-// user saw eight near-identical questions and concluded the system was running in circles.
-//
-// The web adapter is the one place that holds both the raw event and the row the pane receives,
-// so the flag is read here, once.
+// Reads the isError flag off the raw tool_result, which the LogRow summary folds away
 import { EVENT_KIND, type EventRecord } from '@orc/contracts'
 import { z } from 'zod'
 
 export interface ToolFailure { toolName: string; error: string }
 
-// Lenient read-side view (the transcript.ts pattern): a payload that does not parse skips its
-// event rather than throwing — one malformed row must never take the live stream down.
+// Lenient read: a payload that does not parse skips its event, never takes the stream down
 const ToolResultView = z.object({ toolName: z.string(), output: z.unknown(), isError: z.boolean() })
 
-// Long enough for a rejection reason with its context, short enough that a tool returning a
-// megabyte of JSON cannot become the pane. The card links to the inspector for the full result.
+// Room for a rejection reason, too short for a megabyte result to become the pane
 const ERROR_TEXT_LIMIT = 600
 
 export function toolFailure(event: EventRecord | null): ToolFailure | null {

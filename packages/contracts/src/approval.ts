@@ -19,8 +19,7 @@ export const ApprovalPolicy = z.object({
 })
 export type ApprovalPolicy = z.infer<typeof ApprovalPolicy>
 
-// First matching rule wins; a rule matches only if EVERY present field matches.
-// A null costEstimateUSD NEVER matches a maxCostUSD rule (treated as unbounded — spec D8).
+// first matching rule wins; a null costEstimateUSD never matches a maxCostUSD rule
 export function evaluateApproval(
   policy: ApprovalPolicy,
   ctx: { depth: number; costEstimateUSD: number | null; type: string },

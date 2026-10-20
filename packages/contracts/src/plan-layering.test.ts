@@ -22,10 +22,6 @@ describe('stepRanks', () => {
     expect(rank.get('x')).toBe(rank.get('y'))
   })
 
-  /**
-   * Longest path, not shortest. `late` waits on root (0) AND mid (1); ranking it 1 would draw it
-   * beside a step it actually waits for, contradicting the order the scheduler runs them in.
-   */
   it('ranks past the LATEST dependency, not the earliest', () => {
     const { rank } = stepRanks([
       { id: 'root', dependsOn: [] },
@@ -41,10 +37,6 @@ describe('stepRanks', () => {
     expect(cyclic.size).toBe(0)
   })
 
-  /**
-   * The divergence this module exists to end: ui-core's todoWaves DROPPED cyclic steps while the
-   * console's planLayout parked them, so one plan rendered with different steps per surface.
-   */
   it('parks a cycle in a trailing rank and names it, rather than dropping the steps', () => {
     const { rank, cyclic } = stepRanks([
       { id: 'ok', dependsOn: [] },

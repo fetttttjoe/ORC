@@ -21,8 +21,7 @@ export const setApiErrorHandler = (fn: ApiErrorHandler): ApiErrorHandler => {
   return previous
 }
 
-// view-client.ts's fetchView reports a failed view read through this SAME toast surface, rather
-// than a second error-handler registry — one place an endpoint failure reaches the operator.
+// fetchView reports failed view reads through this same toast surface
 export const reportApiError = (err: ApiError): void => onError(err)
 
 const qs = (params: Record<string, string | number | undefined>): string => {
@@ -32,15 +31,7 @@ const qs = (params: Record<string, string | number | undefined>): string => {
   return s ? `?${s}` : ''
 }
 
-/**
- * Fetch and PARSE. The schema is the contract: a server that renames or re-nests a field fails
- * here, once, naming the endpoint and the path — instead of every consumer of that field quietly
- * rendering nothing. Callers still get their declared type, now earned rather than asserted.
- *
- * No `nullOn404` here: every read left on this surface (session/projects/graph/health) always
- * answers something. The views that legitimately 404 (`plans`, `planNotes`) go through
- * view-client.ts's `fetchView`, which owns that case beside the registry that decides it.
- */
+// Fetch and parse: a renamed field fails here naming the endpoint and path; 404s go via fetchView
 async function get<T>(endpoint: string, schema: z.ZodType<T>, params: Record<string, string | number | undefined> = {}): Promise<T> {
   const res = await fetch(`/api/${endpoint}${qs(params)}`)
   if (!res.ok) {
@@ -57,8 +48,7 @@ async function get<T>(endpoint: string, schema: z.ZodType<T>, params: Record<str
   return parsed.data
 }
 
-// CSRF: the server 403s any mutation without the per-boot token from /api/session, and actions
-// additionally carry the active project so a foreign chat's write dies loudly server-side
+// CSRF: mutations carry the per-boot token; actions also carry the active project
 let csrf = { token: '', project: '' }
 export const setAuth = (token: string, project: string): void => {
   csrf = { token, project }

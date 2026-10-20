@@ -5,19 +5,7 @@ import { must } from '@orc/contracts/fixtures'
 import { issueLine } from '@orc/contracts/guards'
 import * as S from '../web/src/lib/api/schemas'
 
-/**
- * The wire contract, asserted against a REAL server response for every read the app makes.
- *
- * These exist because type-level shapes are erased: four separate bugs shipped where the server
- * renamed or re-nested a field and the UI rendered nothing at all — an empty model picker that
- * made the primary flow impossible, artifacts shown as "unrecognised shape", and a model's whole
- * cost lens blank. Each was invisible until someone looked at the screen. Here the same schemas
- * the client parses with fail loudly instead, naming the field.
- *
- * A failure means one of two things, and both are worth a build break: the server changed shape,
- * or a schema is wrong about what the server sends. Never "loosen the schema to make it pass" —
- * find out which side moved.
- */
+// A failure means the server changed shape or a schema is wrong; never loosen the schema to pass
 
 const PROJECT = '00000000-0000-4000-8000-000000000001' // TEST_PROJECT_ID, seeded by e2e/server.ts
 
@@ -52,8 +40,6 @@ test('the models catalog is a bare array of refs', async ({ request }) => {
   const Catalog = S.ViewEnvelope(S.ModelRefs)
   const body = await json(request, viewPath(S.VIEW.models))
   check(Catalog, body, 'the models view')
-  // the flow-breaking regression: a `{refs: […]}` wrapper here empties the model picker, which
-  // disables "create request" in grounded mode entirely
   expect(Array.isArray(Catalog.parse(body).data)).toBe(true)
 })
 
@@ -63,9 +49,7 @@ test('the graph snapshot and timeline match, including every node and link field
 })
 
 test('every node kind parses as ITS OWN shape, not merely as something', async ({ request }) => {
-  // Deliberately NOT S.NodeDetail as one union: each kind is asserted against the schema its pane
-  // actually renders from, so a `run: null` the schema calls `.optional()` fails HERE instead of
-  // matching some other member of the union.
+  // Per-kind schemas, not the union: a `run: null` the schema calls optional must fail here
   const byKind = { task: S.TaskDetail, step: S.StepDetail, artifact: S.ArtifactDetail, model: S.ModelDetail } as const
   const snapshot = S.GraphSnapshot.parse(await json(request, `/api/graph?project=${PROJECT}`))
   const seen = new Set<string>()
@@ -76,8 +60,6 @@ test('every node kind parses as ITS OWN shape, not merely as something', async (
     seen.add(node.type)
     check(S.ViewEnvelope(byKind[node.type]), await res.json(), `the node view (${node.type})`)
   }
-  // EVERY kind, not "more than one": a kind the fixture stops producing fails here rather than
-  // going quietly unchecked.
   expect([...seen].sort(), 'the fixture seeds one node of every kind').toEqual(Object.keys(byKind).sort())
 })
 
@@ -96,11 +78,8 @@ test('plans, plan notes and transcript match for a real task', async ({ request 
 })
 
 test('a name that is no view, and params that fail their schema, are refused', async ({ request }) => {
-  // The browser is told which views exist by one enum; a door that answered 200 for anything else
-  // would let a typo render as an empty pane instead of as an error.
   expect((await request.get(viewPath('nope'))).status()).toBe(404)
-  // hand-built on purpose: the builder cannot produce malformed JSON, and this is the shape a
-  // client that encoded its params wrongly actually sends
+  // hand-built: the builder cannot produce malformed JSON
   expect((await request.get(`${viewPath(S.VIEW.timeline)}&${S.VIEW_ROUTE.params}=%7Bnot-json`)).status()).toBe(400)
   expect((await request.get(viewPath(S.VIEW.timeline, { scope: { type: ScopeType.project }, limit: 0 }))).status()).toBe(400)
 })

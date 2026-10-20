@@ -21,27 +21,20 @@ export const ArtifactProducedPayload = z.object({
 })
 export type ArtifactProducedPayload = z.infer<typeof ArtifactProducedPayload>
 
-// the provider's live catalog at discovery time — append-on-change only, so the latest event
-// per provider IS the catalog and history shows drift. Bounded: a catalog is not a blob dump.
+// append-on-change: the latest event per provider is the catalog; history shows drift
 export const ModelsDiscoveredPayload = z.object({
   providerId: z.string().min(1).max(64),
   models: z.array(z.string().min(1).max(128)).max(500),
 })
 export type ModelsDiscoveredPayload = z.infer<typeof ModelsDiscoveredPayload>
 
-// one completed copilot exchange (P6): the conversation that CAUSED an action is part of the
-// record, not browser state — appended by the graph server after the stream ends, usage on the
-// envelope, redacted at the storage boundary like every event. Tool calls are one-line
-// summaries; the actions they triggered have their own full-fidelity events.
+// one completed copilot exchange, appended by the graph server after the stream ends
 export const CopilotExchangePayload = z.object({
   user: z.string(),
   assistant: z.string(),
   toolCalls: z.array(z.object({ toolName: z.string().min(1), summary: z.string() })).max(64),
   modelRef: z.string().min(1),
-  // Which task and checkout the exchange was ABOUT, stated in the payload: a copilot conversation
-  // roams across tasks within one chat, so the envelope's taskId cannot answer it, and a reader
-  // grouping exchanges by workspace would otherwise have to guess from whatever task was selected
-  // when the browser tab happened to be open. Null when the conversation named neither.
+  // stated here: a copilot chat roams across tasks, so the envelope's taskId cannot answer it
   taskId: z.string().min(1).nullable(),
   workspaceId: z.string().min(1).nullable(),
 })
@@ -60,20 +53,13 @@ export const RateLimitWaitPayload = z.object({
 })
 export type RateLimitWaitPayload = z.infer<typeof RateLimitWaitPayload>
 
-// A supervisor reaction that threw. The reactions are the runtime's whole job — turn a recorded ask
-// into a workflow, cancel what a client stamped cancelled, carry an answer into a parked step — and
-// a throw used to leave nothing but a console.warn on the supervisor's stdout: the client had
-// already been told its ask was recorded, `orc status` showed a task that simply never moved, and
-// the only evidence sat in a log nobody reads. Recorded instead, so "nobody could start this" is
-// DATA — visible in status, the graph, and a bench row — rather than a silence that reads as a hang.
 export enum Reaction {
   runRequested = 'run_requested',
   cancelled = 'cancelled',
   childApproved = 'child_approved',
   feedback = 'feedback',
   splitResolve = 'split_resolve',
-  // the auto-heal reactor: a recorded out-of-task commit triggers the restamp/heal pass the
-  // operator otherwise runs by hand (knowledge provenance plan T2)
+  // auto-heal reactor: a recorded out-of-task commit triggers the heal pass
   commitRecorded = 'commit_recorded',
 }
 
@@ -81,36 +67,26 @@ export enum Reaction {
 export const REACTION = Reaction
 
 export const ReactionFailedPayload = z.object({
-  // derives from the enum — a seventh reaction added to Reaction must not first surface as a
-  // parse failure on the failure-RECORDING path when that reaction first fails
+  // derives from the enum so a new reaction cannot first fail on the failure-recording path
   reaction: z.enum(Reaction),
   taskId: z.string().min(1).nullable(),
   message: z.string(),
-  // the seq of the event whose reaction failed, so the read side can point at the exact cause.
-  // Null when the trigger was a split's STATE rather than one event (an unresolved join).
+  // null when the trigger was a split's state rather than one event
   causeSeq: z.number().int().nonnegative().nullable(),
 })
 export type ReactionFailedPayload = z.infer<typeof ReactionFailedPayload>
 
-// A hand-made commit recorded outside any task by a post-commit hook, captured for log traceability
-// and drift healing. sha is the commit's 40-hex SHA-1 (or other VCS sha), paths are the changed files.
-// paths MAY be empty — an empty commit touches nothing.
+// paths may be empty: an empty commit touches nothing
 const HEX_RE = /^[a-f0-9]+$/i
 export const CommitRecordedPayload = z.object({
   sha: z.string().min(1).regex(HEX_RE, 'sha must be hex digits'),
   paths: z.array(z.string().min(1)),
-  // The checkout the commit landed in, captured by the hook that saw it. Required rather than
-  // derived at read time: worktrees come and go, so a later reader resolving a sha to a checkout
-  // would attribute a merged workspace's commits to trunk. Null when the hook fired outside any
-  // adopted workspace.
+  // required, not derived at read time: worktrees come and go and a later lookup misattributes
   workspaceId: z.string().min(1).nullable(),
 })
 export type CommitRecordedPayload = z.infer<typeof CommitRecordedPayload>
 
-// The explicit ask for a run. NOT inferred from "approved with no live run": `orc propose` +
-// `orc approve` deliberately does not start anything, and inference would silently change that.
-// It also carries what only the caller knows — a --cwd override, and whether this is a retry —
-// so a client holding no execution port can still express both.
+// an explicit ask: orc propose + orc approve deliberately start nothing
 export const RunRequestedPayload = z.object({
   taskId: z.string().min(1),
   cwd: z.string().nullable(),
@@ -118,7 +94,7 @@ export const RunRequestedPayload = z.object({
 })
 export type RunRequestedPayload = z.infer<typeof RunRequestedPayload>
 
-// Who approved the plan — distinct from AuthorSource (a write's door), which only coincides on 'human'/'mcp' by accident of spelling.
+// who approved the plan; distinct from AuthorSource, which is a write's door
 export enum ApprovedBy {
   human = 'human',
   policy = 'policy',
@@ -204,7 +180,7 @@ export const PAYLOAD_SCHEMAS = {
     runToken: z.string().min(1),    // parent step workflow id = DBOS.send target
     childTaskId: z.string().min(1),
   }),
-  split_resolved: SplitResult,      // the join payload IS the event payload (spec D5) — composed, not re-spelled
+  split_resolved: SplitResult,      // the join payload IS the event payload — composed, not re-spelled
   operation_started: OperationStartedPayload,
   operation_completed: OperationCompletedPayload,
   operation_failed: OperationFailedPayload,
@@ -237,8 +213,7 @@ export type EventDraft = {
   [K in EventKind]: EventBody<K> & { usage?: Usage | null; idempotencyKey?: string }
 }[EventKind]
 
-// Built on Origin so chatId and door are spelled ONCE: a second spelling could widen or default
-// one of them here and let a writer that named neither append an anonymous event.
+// built on Origin so chatId and door are spelled once
 const EventStamp = Origin.extend({
   taskId: z.string().min(1).nullable(),
   stepId: z.string().min(1).nullable(),
@@ -248,7 +223,7 @@ const EventStamp = Origin.extend({
   idempotencyKey: z.string().min(1).nullable().default(null),
 })
 
-// payload stays opaque here: it is validated only after redaction, so a zod error never quotes a secret
+// opaque until redaction: a zod error must never quote a secret
 export const EventEnvelope = EventStamp.extend({
   kind: z.enum(EventKind),
   payload: z.record(z.string(), z.unknown()),

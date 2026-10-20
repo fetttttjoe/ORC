@@ -8,9 +8,7 @@ export interface ArtifactReceipt {
   size: number
 }
 
-// The canonical receipt is derived by trusted code — never supplied by the agent.
-// Path rules (containment, regular file, no duplicates) live in validateOutputPaths,
-// shared with the executor's pre-flight; this adds only the hashing.
+// Receipts are derived by trusted code, never supplied by the agent.
 export function verifyArtifacts(workspaceDir: string, paths: string[]): ArtifactReceipt[] {
   return validateOutputPaths(workspaceDir, paths).map(({ path, abs }) => {
     const bytes = readFileSync(abs)

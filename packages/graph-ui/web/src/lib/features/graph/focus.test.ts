@@ -14,8 +14,6 @@ describe('focusReach', () => {
   })
 
   test('never flows backward through a shared hub — the flood that made focus dim nothing', () => {
-    // taskB uses the same model node; an undirected walk reaches it (and from there the whole
-    // component) in two hops, which is exactly what the previous implementation did
     const keep = focusReach('taskA', [
       link('taskA', 'model:m'),
       link('taskB', 'model:m'),

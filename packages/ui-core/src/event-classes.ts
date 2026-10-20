@@ -1,15 +1,9 @@
-// the event vocabulary comes from contracts, never a second spelling: event-kinds.ts is a leaf
-// module (zod + a type-only import), so the browser can take this file without the rest of
-// @orc/contracts
+// a leaf-only import: the browser takes this file without the rest of @orc/contracts
 import { EVENT_KIND } from '@orc/contracts/event-kinds'
 
-// How a kind READS to someone holding a rendered view: does it move something, or is it the agent
-// loop talking to itself? Both sides of the wire ask that question — the views decide what one
-// event makes stale, the ledger decides which rows collapse into a ticker — and a per-side copy of
-// either set is a disagreement nothing reports: the pane simply stops refreshing, or the feed
-// scrolls past the one line an operator was waiting for.
+// both sides of the wire ask this: a per-side copy of either set is a disagreement nothing reports
 
-/** kinds that can move a fetched view — the rest is agent-loop noise the ledger already carries */
+// kinds that can move a fetched view; the rest is agent-loop noise the ledger carries
 export const STATE_CHANGE: ReadonlySet<string> = new Set<string>([
   EVENT_KIND.task_created,
   EVENT_KIND.task_status_changed,
@@ -33,11 +27,7 @@ export const STATE_CHANGE: ReadonlySet<string> = new Set<string>([
   EVENT_KIND.artifact_produced,
 ])
 
-/**
- * Agent-loop noise: every iteration emits several, they carry no state change, and one row each
- * buries the lifecycle rows an operator actually reads. The ledger collapses these into a single
- * in-place ticker line.
- */
+// agent-loop noise: no state change, and a row each would bury lifecycle rows in the ledger
 export const WORKING: ReadonlySet<string> = new Set<string>([
   EVENT_KIND.agent_call,
   EVENT_KIND.tool_call,

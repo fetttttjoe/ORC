@@ -24,10 +24,7 @@ class GraphStore {
     for (const id of p.removeNodeIds) for (const [k, l] of this.links) if (l.source === id || l.target === id) this.links.delete(k)
   }
 
-  /**
-   * The parent of a split child, read from the projected `child` edge — the projection derives
-   * that edge from TaskNode.parentId, so parentage is DATA here, never inferred from the id.
-   */
+  // parentOf reads the projected `child` edge: parentage is data, never inferred from the id
   parentOf(taskId: string): string | null {
     for (const l of this.links.values()) if (l.type === EDGE.child && l.target === taskId) return l.source
     return null

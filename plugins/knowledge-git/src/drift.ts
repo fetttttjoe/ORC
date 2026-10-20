@@ -35,7 +35,7 @@ const BLAME_HEADER = /^([0-9a-f]{40}|[0-9a-f]{64}) \d+ \d+(?: \d+)?$/
 const CONTENT = '\t'
 const UNCOMMITTED = /^0+$/
 const HEAD = 'HEAD'
-// a claim line carries its unique id, so the lowest move and copy thresholds can only match the same claim
+// a claim line carries its unique id, so low move/copy thresholds only match the same claim
 const BLAME = ['blame', '--porcelain', '-w', '-M1', '-C1'] as const
 const BATCH_CHECK = ['cat-file', '--batch-check=%(objectname) %(objecttype)'] as const
 

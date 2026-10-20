@@ -1,6 +1,3 @@
-// Ports the status-precedence semantics of the retired page/status-style onto the app palette:
-// status override precedence failed > blocked > running > type default, and artifact/model are
-// NEVER recolored by a coincidental detail string.
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { must } from '@orc/contracts/fixtures'
@@ -54,18 +51,6 @@ describe('isActive — drives the running size bump', () => {
   })
 })
 
-/**
- * The WebGL copies must equal the CSS tokens they name.
- *
- * colors.ts hardcodes hexes because a canvas cannot read CSS custom properties, and it names the
- * source token in a comment beside each one. That comment was the whole enforcement: "change a
- * token there, grep the name here" — the same silent-drift shape CLAUDE.md warns about for tuned
- * constants quoted in docs. Nothing failed when they diverged; the graph just stopped matching the
- * rest of the console. This reads app.css and makes the divergence a test failure.
- *
- * Only EXACT copies are listed. TYPE_COLORS.task/step/artifact are deliberately derived
- * (dimmed, or mixed toward another token) and have no token to equal.
- */
 describe('the hardcoded canvas colors still equal their app.css tokens', () => {
   const css = readFileSync(new URL('../../../app.css', import.meta.url), 'utf8')
   const TOKEN = /--color-([a-z-]+):\s*(#[0-9a-f]{6})/g
@@ -100,11 +85,6 @@ describe('the hardcoded canvas colors still equal their app.css tokens', () => {
 })
 
 describe('the worker reads as a worker', () => {
-  /**
-   * A model node is the thing that actually ran the step, and it was --color-mist — the same grey
-   * as ordinary chrome — so it sank into the background. It sits outside the two-temperature axis
-   * because it carries no lifecycle: it is an actor.
-   */
   it('is its own hue, not shared with any other node type', () => {
     const others = Object.entries(TYPE_COLORS).filter(([t]) => t !== 'model')
     for (const [type, hex] of others)
