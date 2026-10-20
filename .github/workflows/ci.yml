@@ -31,7 +31,7 @@ jobs:
       # Playwright matches **/*.pw.ts, which `bun test` never runs. e2e/contract.pw.ts asserts every
       # /api response against the schemas the client parses with — the guard written after four
       # shape regressions shipped invisibly. Leaving it out of CI left that guard opt-in by memory.
-      - run: bunx playwright install --with-deps chromium
+      - run: bun run --cwd packages/graph-ui playwright install --with-deps chromium
       - run: bun run e2e
       - run: bun audit
       - if: always()
