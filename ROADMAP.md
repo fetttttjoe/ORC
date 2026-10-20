@@ -32,6 +32,11 @@ Carried beside the console:
   `bench/test-runs.ts` first; build the record only if repeats still cost real time.
 - **`createDbosPort` is one closure** — *deferred.* Split it when one change has to touch two of
   its workflows.
+- **Unpriced catalog models** — *next.* The Anthropic price table (`COSTS` in
+  `plugins/provider-anthropic/src/index.ts`) names no 5.5-generation model, though discovery lists
+  them. A call on one records `costUSD: null`, and the subtree budget counts null as 0
+  (`Kernel.proposeSplit`), so such a run never draws down its budget. Price the models from the
+  provider's published table, and refuse an unpriced model when a budget is set.
 - **Provider robustness** — *open.* A malformed Codex token surfaces as a raw `JSON.parse` error,
   and the openai plugin pins `client_version` (`plugins/provider-openai/src/options.ts`).
 

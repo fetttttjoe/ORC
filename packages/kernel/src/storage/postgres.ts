@@ -11,6 +11,10 @@ export type Tx = Parameters<Parameters<NodePgDatabase['transaction']>[0]>[0]
 
 export const NOTIFY_CHANNEL = 'orc_events'
 
+// a dead or unreachable Postgres must fail fast, not hang every caller for the OS default
+export const CONNECT_TIMEOUT_MS = 3_000
+export const PG_CONNECT_OPTIONS = { connectionTimeoutMillis: CONNECT_TIMEOUT_MS }
+
 // reconnects that can never succeed (database gone, credentials wrong): retrying only leaks
 export const TERMINAL_PG_CODES = new Set(['3D000', '28P01', '28000'])
 const pgErrorCode = z.object({ code: z.string() })
@@ -32,7 +36,7 @@ export class PostgresStore {
   // verifies the schema instead of migrating — migration is an explicit step
   static async open(url: string, opts: { projectId: string; redactEnv?: string[] }): Promise<PostgresStore> {
     // max 4: writers serialize on one advisory lock, and idle pools stacked past 100 server slots
-    const pool = new pg.Pool({ connectionString: url, max: 4, idleTimeoutMillis: 2_000 })
+    const pool = new pg.Pool({ connectionString: url, max: 4, idleTimeoutMillis: 2_000, ...PG_CONNECT_OPTIONS })
     const db = drizzle(pool)
     try {
       await assertMigrated(db, url)
@@ -58,7 +62,7 @@ export class PostgresStore {
 
 // not on PostgresStore, which is bound to one project; ordered by recent activity
 export async function listProjectIds(url: string): Promise<string[]> {
-  const pool = new pg.Pool({ connectionString: url, max: 1 })
+  const pool = new pg.Pool({ connectionString: url, max: 1, ...PG_CONNECT_OPTIONS })
   try {
     const r = await pool.query<{ project_id: string }>(
       'SELECT project_id, MAX(seq) AS last FROM events GROUP BY project_id ORDER BY last DESC',

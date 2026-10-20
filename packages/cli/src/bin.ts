@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { isConnectionRefused, loadConfig, ProjectNotInitializedError, requireProject } from '@orc/kernel'
+import { isDatabaseUnreachable, loadConfig, ProjectNotInitializedError, requireProject } from '@orc/kernel'
 import { Door, errorMessage, HookName, NO_CHAT } from '@orc/contracts'
 import { buildProgram, openKernel } from './main'
 import { runInit, runMigrate } from './project-commands'
@@ -61,7 +61,7 @@ async function main(): Promise<number> {
       // no `send`: DBOS.send needs a launched runtime and the supervisor's router already delivers
       onAppend: e => loaded.host.hooks.dispatch(HookName.event_appended, e),
     }).then(opened => ({ opened }), (error: unknown) => {
-      if (!isConnectionRefused(error)) throw error
+      if (!isDatabaseUnreachable(error)) throw error
       return { unreachable: error }
     }), openTiming)
     if ('unreachable' in booted) return parse(buildProgram(null, undefined, undefined, { config, error: booted.unreachable }), process.argv)
@@ -95,7 +95,7 @@ try {
 } catch (error) {
   // the code is set here and the message still printed: a terminal reader needs the sentence
   if (error instanceof ProjectNotInitializedError) exitCode = EXIT_CODE.noProject
-  if (isConnectionRefused(error))
+  if (isDatabaseUnreachable(error))
     console.error(DATABASE_UNREACHABLE(loadConfig().databaseUrl))
   else console.error(errorMessage(error))
 }

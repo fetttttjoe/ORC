@@ -5,6 +5,7 @@ import pg from 'pg'
 import { sql } from 'drizzle-orm'
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
+import { PG_CONNECT_OPTIONS } from './postgres'
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../drizzle', import.meta.url))
 
@@ -14,7 +15,7 @@ const journalEntryCount = (): number => {
 }
 
 export async function migrateDatabase(url: string): Promise<void> {
-  const pool = new pg.Pool({ connectionString: url })
+  const pool = new pg.Pool({ connectionString: url, ...PG_CONNECT_OPTIONS })
   try {
     await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS_FOLDER })
   } finally {

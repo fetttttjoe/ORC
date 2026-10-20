@@ -1,11 +1,12 @@
 import pg from 'pg'
+import { PG_CONNECT_OPTIONS } from './postgres'
 
 // FORCE evicts attached connections; DROP cannot run inside the database it removes
 export async function dropSystemDatabase(url: string): Promise<'dropped' | 'absent'> {
   const name = decodeURIComponent(new URL(url).pathname.slice(1))
   const admin = new URL(url)
   admin.pathname = '/postgres'
-  const client = new pg.Client({ connectionString: admin.toString() })
+  const client = new pg.Client({ connectionString: admin.toString(), ...PG_CONNECT_OPTIONS })
   await client.connect()
   try {
     // existence decides the return and guards the interpolation: Postgres confirmed the name
@@ -21,7 +22,7 @@ export async function dropSystemDatabase(url: string): Promise<'dropped' | 'abse
 
 // truncating under a live workflow kills it mid-step; accepted for a reset tool
 export async function resetSystemDatabase(url: string): Promise<'reset' | 'absent'> {
-  const client = new pg.Client({ connectionString: url })
+  const client = new pg.Client({ connectionString: url, ...PG_CONNECT_OPTIONS })
   try {
     await client.connect()
   } catch (err) {

@@ -1,4 +1,5 @@
 import pg from 'pg'
+import { PG_CONNECT_OPTIONS } from './postgres'
 
 // session-scoped, so a crash releases it too, which a lease row would not
 export interface RuntimeLock { release(): Promise<void> }
@@ -23,7 +24,7 @@ const RUNTIME_LOCK_HELD_SQL = `
   ) AS held`
 
 export async function runtimeLockHeld(url: string, projectId: string): Promise<boolean> {
-  const client = new pg.Client({ connectionString: url })
+  const client = new pg.Client({ connectionString: url, ...PG_CONNECT_OPTIONS })
   try {
     await client.connect()
     const r = await client.query<{ held: boolean }>(RUNTIME_LOCK_HELD_SQL, [runtimeLockKey(projectId)])
@@ -37,7 +38,7 @@ export async function runtimeLockHeld(url: string, projectId: string): Promise<b
 }
 
 export async function acquireRuntimeLock(url: string, projectId: string): Promise<RuntimeLock> {
-  const client = new pg.Client({ connectionString: url })
+  const client = new pg.Client({ connectionString: url, ...PG_CONNECT_OPTIONS })
   await client.connect()
   try {
     const r = await client.query<{ locked: boolean }>(

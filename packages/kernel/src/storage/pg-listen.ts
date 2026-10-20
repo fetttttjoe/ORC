@@ -1,5 +1,6 @@
 import pg from 'pg'
 import { errorMessage } from '@orc/contracts'
+import { PG_CONNECT_OPTIONS } from './postgres'
 
 export const RECONNECT_DELAYS_MS: readonly [number, ...number[]] = [100, 200, 400, 800, 1600, 3000]
 
@@ -35,7 +36,7 @@ export async function pgListen(opts: PgListenOpts): Promise<PgListenHandle> {
 
   const connect = async (initial: boolean): Promise<void> => {
     if (closed) return
-    const c = new pg.Client({ connectionString: url, application_name: applicationName })
+    const c = new pg.Client({ connectionString: url, application_name: applicationName, ...PG_CONNECT_OPTIONS })
     // stays attached after close (an unhandled 'error' crashes the process) but goes silent
     c.on('error', err => { if (!closed) warn(`listener error: ${errorMessage(err)}`) })
     try {

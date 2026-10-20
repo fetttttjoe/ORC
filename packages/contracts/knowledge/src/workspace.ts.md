@@ -3,6 +3,7 @@
 ## Facts
 - assertInZone and pathInZone in packages/contracts/src/workspace.ts are the one shared implementation of the zone write-fence: a plan step declares `zone` as an array of workspace-relative glob patterns matched with Bun.Glob, and an empty or undefined zone means unrestricted. {3i2qx2ny @packages/contracts/src/workspace.ts#assertInZone @packages/contracts/src/workspace.ts#pathInZone #fact}
 - assertInZone refuses any write whose resolved path contains a '.git' path segment unconditionally, before checking the zone at all — the repository's own metadata is never writable in any zone. {j0ddwqop @packages/contracts/src/workspace.ts#assertInZone #fact}
+- pathInZone treats an empty zone as unrestricted, so a path changed by a step that declared no zone always classifies in-zone in scoped_changes; only a relative path with '..' or a leading '/' is out. {hevfsp0a @packages/contracts/src/workspace.ts#pathInZone @packages/kernel/src/execution/scoped-changes-tool.ts#zonesFor}
 
 ## Why
 - No zone may make .git writable, because a step that writes there could plant a hook that git later runs outside the exec allowlist. {3x8ip5dv @packages/contracts/src/workspace.ts#assertInZone}
